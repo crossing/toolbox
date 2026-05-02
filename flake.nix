@@ -25,6 +25,7 @@
               pkgs.coreutils 
               pkgs.jq 
               pkgs.oauth2c
+              self.packages.${system}.safe-op
             ];
             text = builtins.readFile ./src/op-oauth2c.sh;
           };
