@@ -12,7 +12,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 MOCK_OP="$TEST_DIR/op"
 cat > "$MOCK_OP" <<EOF
 #!/usr/bin/env bash
-echo "mock-output-of-op \$*"
+echo "mock-output: \$*"
 EOF
 chmod +x "$MOCK_OP"
 
@@ -25,41 +25,65 @@ chmod +x "$SAFE_OP"
 
 echo "Running tests for safe-op..."
 
-# Test 1: Command substitution should succeed (stdout is a pipe)
-echo "Test 1: Command substitution..."
-RESULT=$( "$SAFE_OP" item get my-secret )
-if [[ "$RESULT" == *"mock-output-of-op item get my-secret"* ]]; then
-    echo "  Success: Result matched expected mock output."
-else
-    echo "  Failure: Result did not match. Got: $RESULT"
-    exit 1
-fi
-
-# Test 2: Direct terminal output should fail (stdout is a TTY/not a pipe)
-# We can simulate a non-pipe by just running it normally in this script
-# since this script's stdout is probably a TTY or a file redirection if piped.
-# To be sure we test "not a pipe", we can redirect to a file.
-echo "Test 2: Terminal/File output should fail..."
-if "$SAFE_OP" item get my-secret > "$TEST_DIR/out" 2> "$TEST_DIR/err"; then
-    echo "  Failure: Command succeeded but should have been blocked."
-    exit 1
-else
-    if grep -q "CRITICAL SECURITY BLOCK" "$TEST_DIR/err"; then
-        echo "  Success: Correct error message found in stderr."
+# Helper to run test and check result
+# run_test <expected_success_true_false> <command_args...>
+run_test() {
+    expected_success=$1
+    shift
+    args=("$@")
+    
+    echo "Testing: safe-op ${args[*]}"
+    
+    if [ "$expected_success" = true ]; then
+        if ! "$SAFE_OP" "${args[@]}" > "$TEST_DIR/out" 2> "$TEST_DIR/err"; then
+            echo "  Failure: Command failed but should have succeeded."
+            echo "  Stderr: $(cat "$TEST_DIR/err")"
+            exit 1
+        fi
+        echo "  Success: Command allowed."
     else
-        echo "  Failure: Error message not found. Stderr: $(cat "$TEST_DIR/err")"
-        exit 1
+        if "$SAFE_OP" "${args[@]}" > "$TEST_DIR/out" 2> "$TEST_DIR/err"; then
+            echo "  Failure: Command succeeded but should have been blocked."
+            exit 1
+        fi
+        if grep -q "CRITICAL SECURITY BLOCK" "$TEST_DIR/err"; then
+            echo "  Success: Command blocked with correct error message."
+        else
+            echo "  Failure: Error message not found. Stderr: $(cat "$TEST_DIR/err")"
+            exit 1
+        fi
     fi
-fi
+}
 
-# Test 3: Non-secret command should succeed anywhere
-echo "Test 3: Non-secret command (whoami) should succeed..."
-RESULT_WHOAMI=$( "$SAFE_OP" whoami )
-if [[ "$RESULT_WHOAMI" == *"mock-output-of-op whoami"* ]]; then
-    echo "  Success: whoami passed through."
-else
-    echo "  Failure: whoami failed. Got: $RESULT_WHOAMI"
+# Test Cases:
+
+# 1. Non-secret field (username) - Should be ALLOWED in terminal
+run_test true item get my-item --field username
+
+# 2. Secret field (password) - Should be BLOCKED in terminal
+run_test false item get my-item --field password
+
+# 3. Secret field via -f - Should be BLOCKED in terminal
+run_test false item get my-item -f password
+
+# 4. Secret field with case variation - Should be BLOCKED
+run_test false item get my-item --field=Password
+
+# 5. Using --reveal - Should be BLOCKED
+run_test false item get my-item --reveal
+
+# 6. Using read - Should be BLOCKED
+run_test false read op://vault/item/field
+
+# 7. No field, no reveal (masked summary) - Should be ALLOWED
+run_test true item get my-item
+
+# 8. Command substitution (even for secret) - Should be ALLOWED (simulated by piping to cat)
+echo "Testing: \$(safe-op item get my-item --field password) (piped to cat)"
+if ! "$SAFE_OP" item get my-item --field password | cat > /dev/null; then
+    echo "  Failure: Piped command failed but should have been allowed."
     exit 1
 fi
+echo "  Success: Piped command allowed."
 
 echo "All safe-op tests passed!"

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 
 # Find the real 1Password CLI binary.
-# We skip any binary named 'safe-op' to avoid recursion.
-# If the user has aliased op=safe-op, we need to find the actual op.
 OP_BIN=$(which -a op | grep -v "safe-op" | head -n 1)
 
 if [ -z "$OP_BIN" ]; then
@@ -10,18 +8,61 @@ if [ -z "$OP_BIN" ]; then
     exit 127
 fi
 
-# Determine if the command is likely to fetch secrets.
 IS_SECRET_CMD=false
-case "$*" in
-    *"item get"*|*"read"*|*"document get"*|*"--reveal"*)
-        IS_SECRET_CMD=true
-        ;;
-esac
+REVEAL_PRESENT=false
+READ_OR_DOC_PRESENT=false
+SENSITIVE_FIELD_PRESENT=false
+
+# Loop through arguments to detect secret retrieval.
+i=1
+while [ $i -le $# ]; do
+    arg="${!i}"
+    case "$arg" in
+        read|document)
+            READ_OR_DOC_PRESENT=true
+            ;;
+        --reveal|--no-masking)
+            REVEAL_PRESENT=true
+            ;;
+        --field|-f)
+            next_i=$((i + 1))
+            if [ $next_i -le $# ]; then
+                field_val="${!next_i}"
+                # Case-insensitive check for sensitive keywords
+                case "${field_val,,}" in
+                    *password*|*secret*|*token*|*key*|*credential*|*private*|*api*|*auth*)
+                        SENSITIVE_FIELD_PRESENT=true
+                        ;;
+                esac
+            fi
+            ;;
+        --field=*)
+            field_val="${arg#*=}"
+            case "${field_val,,}" in
+                *password*|*secret*|*token*|*key*|*credential*|*private*|*api*|*auth*)
+                    SENSITIVE_FIELD_PRESENT=true
+                    ;;
+            esac
+            ;;
+        -f=*)
+            field_val="${arg#*=}"
+            case "${field_val,,}" in
+                *password*|*secret*|*token*|*key*|*credential*|*private*|*api*|*auth*)
+                    SENSITIVE_FIELD_PRESENT=true
+                    ;;
+            esac
+            ;;
+    esac
+    i=$((i + 1))
+done
+
+# Decide if this is a secret command.
+if [ "$READ_OR_DOC_PRESENT" = true ] || [ "$REVEAL_PRESENT" = true ] || [ "$SENSITIVE_FIELD_PRESENT" = true ]; then
+    IS_SECRET_CMD=true
+fi
 
 if [ "$IS_SECRET_CMD" = true ]; then
-    # Check if stdout is NOT a pipe.
-    # [ -p /dev/stdout ] checks if stdout is a FIFO/pipe.
-    # We want to allow pipes (for $(...) and |) but block TTYs and regular files.
+    # Block if stdout is NOT a pipe.
     if [ ! -p /dev/stdout ]; then
         echo "CRITICAL SECURITY BLOCK: You attempted to output a secret to a TTY or file." >&2
         echo "To prevent leaking secrets into chat context, you MUST use command substitution (e.g., SECRET=\$(safe-op ...))." >&2
@@ -30,5 +71,5 @@ if [ "$IS_SECRET_CMD" = true ]; then
     fi
 fi
 
-# Execute the real op command with all arguments.
+# Execute the real op command.
 exec "$OP_BIN" "$@"
