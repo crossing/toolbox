@@ -8,13 +8,33 @@
   # needs once the Linux-only IBKR tools land.
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
+    # Required only by tools/ibkr-cli, which builds a third-party Python CLI from a
+    # vendored uv.lock. Migrated verbatim from home-ops, which no longer needs them.
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+    };
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, pyproject-nix, uv2nix, pyproject-build-systems }:
     let
       inherit (nixpkgs) lib;
 
       allSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      # ibgateway needs podman and xvfb-run and declares platforms.linux; ibkr-local
+      # symlinkJoins it. This split is the reason for genAttrs over flake-utils --
+      # eachDefaultSystem would emit darwin attributes that fail to evaluate.
+      linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
 
       forAll = systems: f: lib.genAttrs systems f;
 
@@ -34,11 +54,18 @@
         op-oauth2c = final.callPackage ./tools/op-oauth2c/package.nix { };
         freeagent = final.callPackage ./tools/freeagent/package.nix { };
 
+        ibkr-cli = final.callPackage ./tools/ibkr-cli/package.nix {
+          inherit pyproject-nix uv2nix pyproject-build-systems;
+        };
+        ibgateway = final.callPackage ./tools/ibgateway/package.nix { };
+        ibkr-local = final.callPackage ./tools/ibkr-local/package.nix { };
+
         toolbox-skills = final.callPackage ./nix/skills.nix {
           tools = [
             { name = "safe-op"; skill = ./tools/safe-op/SKILL.md; }
             { name = "op-oauth2c"; skill = ./tools/op-oauth2c/SKILL.md; }
             { name = "freeagent"; skill = ./tools/freeagent/SKILL.md; }
+            { name = "ibkr-local"; skill = ./tools/ibkr-local/SKILL.md; }
           ];
         };
       };
@@ -49,6 +76,9 @@
           inherit (pkgs) safe-op op-oauth2c freeagent toolbox-skills;
           # safe-cli had no packages.default, so `nix run github:crossing/toolbox` errored.
           default = pkgs.safe-op;
+        }
+        // lib.optionalAttrs (lib.elem system linuxSystems) {
+          inherit (pkgs) ibkr-cli ibgateway ibkr-local;
         });
 
       # Neither predecessor repo wired its tests into `nix flake check`, so both shipped

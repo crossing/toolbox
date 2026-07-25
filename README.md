@@ -10,6 +10,9 @@ structured errors, and guardrails around the mistakes agents actually make.
 | [`safe-op`](tools/safe-op) | 1Password CLI wrapper that refuses to print secrets to a terminal |
 | [`op-oauth2c`](tools/op-oauth2c) | Runs an OAuth2 flow with 1Password-held credentials, writing tokens back |
 | [`freeagent`](tools/freeagent) | Operate FreeAgent bills, bank transactions and explanations |
+| [`ibkr-local`](tools/ibkr-local) | Guarded Interactive Brokers CLI — reads freely, gates order entry (Linux) |
+| [`ibkr-cli`](tools/ibkr-cli) | Packaging of upstream `fatwang2/ibkr-cli`, patched and pinned (Linux) |
+| [`ibgateway`](tools/ibgateway) | IB Gateway + IBC runtime, image and installer pinned (Linux) |
 
 Each tool directory holds its source, its `SKILL.md`, and its tests.
 

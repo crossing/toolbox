@@ -63,6 +63,33 @@ in
 
   no-ignored-tool-files = noIgnoredToolFiles;
   shellcheck = shellcheckAll;
+}
+// lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+  # None of these were wired into a check in home-ops, so the order-entry guards --
+  # the most safety-critical code in the repo -- were never verified by CI.
+  ibkr-local = mkToolTest {
+    name = "ibkr-local";
+    src = ../tools/ibkr-local;
+    tests = [
+      ../tools/ibkr-local/tests/test-order-entry.sh
+      ../tools/ibkr-local/tests/test-read-only-data.sh
+      ../tools/ibkr-local/tests/test-ibc-config-policy.sh
+    ];
+    extraInputs = [ pkgs.jq pkgs.gawk pkgs.gnused pkgs.ripgrep ];
+  };
+
+  # Asserts the Gateway image and installer are pinned at build time rather than
+  # fetched from a mutable URL at runtime. It works by grepping package.nix, so it
+  # breaks silently if that file is reworded -- which is exactly what de-Snowfalling
+  # `pkgs.fetchurl` -> `fetchurl` did, and why it is now gated here.
+  ibgateway = mkToolTest {
+    name = "ibgateway";
+    src = ../tools/ibgateway;
+    tests = [
+      ../tools/ibgateway/tests/test-runtime-pinning.sh
+      ../tools/ibgateway/tests/test-network-isolation.sh
+    ];
+  };
 
   # Runs `go test ./...` for the whole module by reusing the freeagent derivation with
   # checks turned on, so the Go suite is gated the same way the bash ones are. Building
