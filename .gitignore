@@ -1,4 +1,16 @@
-node_modules/
+# Anchored patterns only. A bare, unanchored name matches at ANY depth: freeagent-cli's
+# .gitignore had `freeagent-cli` on line 1, which silently ignored
+# .agents/skills/freeagent-cli/SKILL.md so it never reached version control -- and in
+# this monorepo the same pattern would have swallowed all of tools/freeagent/.
+# nix/checks.nix fails the build if anything under tools/ becomes ignored.
+
+/result
+/result-*
+/tools/*/result
+/tools/*/result-*
+
 .direnv/
-result
-result-*
+node_modules/
+
+# Go build output. Never add a bare binary name here -- see above.
+/bin/

@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 
-# Find the real 1Password CLI binary.
-OP_BIN=$(which -a op | grep -v "safe-op" | head -n 1)
+# Find the real 1Password CLI binary, skipping ourselves if we are named `op` on PATH.
+#
+# `type -aP` is a bash builtin, unlike `which`, which lives in its own package and was
+# not in runtimeInputs -- so the packaged binary died with "which: command not found" on
+# any PATH that lacked it. It only appeared to work because interactive shells have it.
+#
+# The `|| true` matters: writeShellApplication runs under `set -euo pipefail`, so a
+# failed lookup would abort here instead of reaching the readable error below.
+OP_BIN=$(type -aP op 2>/dev/null | grep -v "safe-op" | head -n 1 || true)
 
 if [ -z "$OP_BIN" ]; then
     echo "Error: 'op' (1Password CLI) not found in PATH." >&2

@@ -15,7 +15,7 @@ export PATH="$TEST_DIR/bin:$PATH"
 # Mock 'op'
 MOCK_OP="$TEST_DIR/bin/op"
 cat > "$MOCK_OP" <<EOF
-#!/usr/bin/env bash
+#!$(command -v bash)
 if [[ "\$*" == *"item get"* ]]; then
     if [[ "\$*" == *"client_id"* ]]; then
         echo "mock-client-id"
@@ -31,7 +31,7 @@ chmod +x "$MOCK_OP"
 # Mock 'safe-op' (just calls op)
 MOCK_SAFE_OP="$TEST_DIR/bin/safe-op"
 cat > "$MOCK_SAFE_OP" <<EOF
-#!/usr/bin/env bash
+#!$(command -v bash)
 exec op "\$@"
 EOF
 chmod +x "$MOCK_SAFE_OP"
@@ -39,7 +39,7 @@ chmod +x "$MOCK_SAFE_OP"
 # Mock 'oauth2c'
 MOCK_OAUTH2C="$TEST_DIR/bin/oauth2c"
 cat > "$MOCK_OAUTH2C" <<EOF
-#!/usr/bin/env bash
+#!$(command -v bash)
 echo '{"access_token": "mock-access-token", "refresh_token": "mock-refresh-token"}'
 EOF
 chmod +x "$MOCK_OAUTH2C"
@@ -47,15 +47,19 @@ chmod +x "$MOCK_OAUTH2C"
 # Mock 'jq' (using system jq)
 # No need to mock jq if it's available, but let's ensure it's in PATH.
 
-# The script we are testing
-OP_OAUTH2C="./src/op-oauth2c.sh"
-chmod +x "$OP_OAUTH2C"
+# Locate the tool. TOOL_SRC lets `nix flake check` point at the store copy; the
+# script_dir fallback keeps direct invocation working from anywhere. Never chmod the
+# source: under nix the tool dir is a read-only store path.
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+tool_dir=${TOOL_SRC:-$script_dir/..}
+OP_OAUTH2C="$tool_dir/op-oauth2c.sh"
+[ -f "$OP_OAUTH2C" ] || { echo "cannot find op-oauth2c.sh at $OP_OAUTH2C"; exit 1; }
 
 echo "Running tests for op-oauth2c..."
 
 # Run the script
 # It should retrieve id/secret, run oauth2c, and edit the item twice.
-OUTPUT=$("$OP_OAUTH2C" "my-item" "https://issuer.com" 2>&1)
+OUTPUT=$(bash "$OP_OAUTH2C" "my-item" "https://issuer.com" 2>&1)
 
 echo "$OUTPUT"
 

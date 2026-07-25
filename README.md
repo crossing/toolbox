@@ -1,38 +1,56 @@
-# Safe CLI
+# toolbox
 
-A collection of small tools and integrations to make it safer for AI agents to work with CLI tools by preventing secret leaks.
+Command-line tools built for AI agents to operate: machine-readable by default,
+structured errors, and guardrails around the mistakes agents actually make.
 
 ## Tools
 
-### `safe-op`
-A wrapper around the 1Password CLI (`op`) that prevents secrets from being output directly to a TTY or a file.
+| Tool | What it does |
+|---|---|
+| [`safe-op`](tools/safe-op) | 1Password CLI wrapper that refuses to print secrets to a terminal |
+| [`op-oauth2c`](tools/op-oauth2c) | Runs an OAuth2 flow with 1Password-held credentials, writing tokens back |
 
-- **Mandatory Usage:** AI agents must use command substitution (e.g., `SECRET=$(safe-op ...)`).
-- **Security Block:** If `safe-op` detects that its output is not a pipe, it will block the execution and provide an instruction to the agent.
-- **Runtime Dependency:** Requires `op` to be available in the runtime `$PATH` (e.g., from the 1Password desktop app).
+Each tool directory holds its source, its `SKILL.md`, and its tests.
 
-### `op-oauth2c`
-An integration between `oauth2c` and 1Password to perform OAuth2 flows without writing tokens to disk.
+## Use
 
-- **Usage:** `op-oauth2c <1password-item-name> <oauth-issuer-url>`
-- **Workflow:**
-  1. Retrieves `client_id` and `client_secret` from 1Password.
-  2. Runs `oauth2c` flow.
-  3. Saves resulting `access_token` and `refresh_token` back to the 1Password item.
+As a flake input:
 
-## Development
+```nix
+{
+  inputs.toolbox.url = "github:crossing/toolbox";
 
-This project uses Nix flakes.
+  # either take the overlay...
+  nixpkgs.overlays = [ inputs.toolbox.overlays.default ];   # -> pkgs.safe-op
+
+  # ...or reference packages directly
+  home.packages = [ inputs.toolbox.packages.${system}.safe-op ];
+}
+```
+
+Or run one without installing:
 
 ```bash
-# Enter development shell
-nix develop
-
-# Build tools
-nix build .#safe-op
-nix build .#op-oauth2c
-
-# Run tests
-./tests/test_safe_op.sh
-./tests/test_op_oauth2c.sh
+nix run github:crossing/toolbox#safe-op -- item list
 ```
+
+Agent skills for every tool are collected into one package:
+
+```nix
+home.file.".agents/skills".source = inputs.toolbox.packages.${system}.toolbox-skills;
+```
+
+## Develop
+
+```bash
+nix develop
+nix flake check          # runs all tool tests + shellcheck + gitignore guard
+nix build .#safe-op
+```
+
+`nix flake check` is the gate. See [AGENTS.md](AGENTS.md) for conventions and
+[docs/adding-a-tool.md](docs/adding-a-tool.md) for the checklist.
+
+## License
+
+MIT, with restrictions on use as AI training data. See [LICENSE](LICENSE).
