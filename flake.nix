@@ -32,11 +32,13 @@
       overlays.default = final: _prev: {
         safe-op = final.callPackage ./tools/safe-op/package.nix { };
         op-oauth2c = final.callPackage ./tools/op-oauth2c/package.nix { };
+        freeagent = final.callPackage ./tools/freeagent/package.nix { };
 
         toolbox-skills = final.callPackage ./nix/skills.nix {
           tools = [
             { name = "safe-op"; skill = ./tools/safe-op/SKILL.md; }
             { name = "op-oauth2c"; skill = ./tools/op-oauth2c/SKILL.md; }
+            { name = "freeagent"; skill = ./tools/freeagent/SKILL.md; }
           ];
         };
       };
@@ -44,7 +46,7 @@
       packages = forAll allSystems (system:
         let pkgs = pkgsFor system; in
         {
-          inherit (pkgs) safe-op op-oauth2c toolbox-skills;
+          inherit (pkgs) safe-op op-oauth2c freeagent toolbox-skills;
           # safe-cli had no packages.default, so `nix run github:crossing/toolbox` errored.
           default = pkgs.safe-op;
         });

@@ -63,4 +63,14 @@ in
 
   no-ignored-tool-files = noIgnoredToolFiles;
   shellcheck = shellcheckAll;
+
+  # Runs `go test ./...` for the whole module by reusing the freeagent derivation with
+  # checks turned on, so the Go suite is gated the same way the bash ones are. Building
+  # the package alone would not run tests -- buildGoModule skips them by default here
+  # only because we never asked; making it explicit means a broken test fails the flake.
+  go-tests = self.packages.${system}.freeagent.overrideAttrs (_: {
+    pname = "check-go-tests";
+    doCheck = true;
+    subPackages = null; # test every package, not just the built binary
+  });
 }
