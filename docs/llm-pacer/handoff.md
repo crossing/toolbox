@@ -8,7 +8,8 @@ Updated: 2026-07-26
 - Branch: `feature/llm-pacer`
 - Base: `master` at `2cf6400`
 - Plan/bottom commit: `f983b3d docs(llm-pacer): record implementation plan`
-- Working tree: uncommitted nested Go module under `tools/llm-pacer`
+- Working tree: tested config, scheduler, and upstream packages awaiting the
+  next implementation checkpoint commit
 - Full contract: `docs/llm-pacer/implementation-plan.md`
 
 Do not rebase the plan above later commits: the user explicitly requires it to
@@ -36,7 +37,9 @@ remain the bottom commit on the implementation branch.
   values, and default absent custom-provider capabilities conservatively to
   false rather than letting tool-call support be overclaimed.
 - Package and Home Manager export work waits for the concurrent Snowfall Lib
-  layout to stabilize. Core tool files are independent of that migration.
+  layout to stabilize. That refactor is now committed as `0a117d1`; rebase onto
+  it after the current core checkpoint, then add integration against its
+  discovered package/check/module layout.
 - The user unit will use absolute `%t/llm-pacer/credentials/...` sources with
   `LoadCredential=`, pass only `%d/...` file paths to the daemon, set
   `X-SwitchMethod=keep-old`, omit activation and restart directives, and clean
@@ -62,20 +65,34 @@ ok github.com/crossing/toolbox/tools/llm-pacer/internal/retry 0.002s
 
 focused credential I/O
 ok github.com/crossing/toolbox/tools/llm-pacer/internal/credential 0.003s
+
+full nested module after config, scheduler minimum-RPM cap, and net/http adapter
+ok all seven packages (go test -count=1 -timeout=30s ./...)
+
+full nested module race run
+ok all seven packages (go test -race -count=1 -timeout=60s ./...)
 ```
+
+The upstream adapter initially appeared to hang because two delayed-header mock
+handlers did no I/O and therefore did not promptly observe client connection
+closure through `request.Context()`. Client-side response-header timeout and
+explicit cancellation already returned correctly. The tests now assert those
+observable contracts and release the handlers deterministically; focused and
+race suites pass. No production timeout or assertion was weakened.
 
 The test used the repository-locked Nix Go 1.26.2 shell. Host `go` is not on
 `PATH`; use a task-specific writable Nix cache below `/tmp`.
 
 ## Next actions
 
-1. Finish configuration, scheduler, and direct `net/http` adapter packages now
-   under isolated implementation and test.
-2. Integrate admission, retry, model validation, JSON, and SSE forwarding.
-3. Add the CLI/server and credential-file-only startup path.
-4. Add OpenCode provider discovery and hermetic 1.18.5 acceptance.
-5. Re-check the Snowfall branch boundary before editing flake/module exports.
-6. Update this file after each verified phase and include it in phase commits.
+1. Commit the validated configuration, scheduler, and upstream packages.
+2. Rebase onto Snowfall commit `0a117d1`, preserving the plan as the first
+   llm-pacer commit.
+3. Integrate admission, retry, model validation, JSON, and SSE forwarding.
+4. Add the CLI/server and credential-file-only startup path.
+5. Add OpenCode provider discovery and hermetic 1.18.5 acceptance.
+6. Add Snowfall package, check, and Home Manager exports.
+7. Update this file after each verified phase and include it in phase commits.
 
 ## Safety boundaries
 
