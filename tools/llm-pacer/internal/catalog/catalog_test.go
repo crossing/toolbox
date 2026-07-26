@@ -80,6 +80,7 @@ func TestLoadRejectsInvalidCatalogs(t *testing.T) {
 		raw  string
 	}{
 		{name: "empty", raw: `{"models":{}}`},
+		{name: "whitespace-padded model ID", raw: `{"models":{" model ":{}}}`},
 		{name: "negative limit", raw: `{"models":{"m":{"limits":{"context":-1}}}}`},
 		{name: "context limit only", raw: `{"models":{"m":{"limits":{"context":1024}}}}`},
 		{name: "output limit only", raw: `{"models":{"m":{"limits":{"output":1024}}}}`},

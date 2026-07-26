@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/crossing/toolbox/tools/llm-pacer/internal/retry"
 )
 
 // Config controls the upstream HTTP transport. All timeout values and
@@ -74,8 +77,14 @@ func NewClient(config Config) (*Client, error) {
 	transport := &http.Transport{
 		// Do not send the upstream bearer token to an ambient HTTP_PROXY. A
 		// future explicit proxy option can add that trust boundary deliberately.
-		Proxy:                 nil,
-		DialContext:           dialer.DialContext,
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			connection, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, markSafePreRequestDialError(err)
+			}
+			return connection, nil
+		},
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          config.MaxInflight,
 		MaxIdleConnsPerHost:   config.MaxInflight,
@@ -95,12 +104,47 @@ func NewClient(config Config) (*Client, error) {
 	}, nil
 }
 
+func markSafePreRequestDialError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	// A permanent lookup failure is not made retryable merely because it also
+	// satisfies net.Error. Only DNS failures explicitly classified as timeout
+	// or temporary are safe candidates.
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		if dnsError.IsTimeout || dnsError.IsTemporary {
+			return retry.MarkSafeTransportError(err)
+		}
+		return err
+	}
+
+	for _, transient := range []error{
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+		syscall.ETIMEDOUT,
+	} {
+		if errors.Is(err, transient) {
+			return retry.MarkSafeTransportError(err)
+		}
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return retry.MarkSafeTransportError(err)
+	}
+	return err
+}
+
 func validateBaseURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return nil, errors.New("invalid upstream base URL")
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
 		return nil, errors.New("upstream base URL must use http or https")
 	}
 	if parsed.Host == "" || parsed.Opaque != "" {
@@ -115,6 +159,7 @@ func validateBaseURL(raw string) (*url.URL, error) {
 	if parsed.Fragment != "" {
 		return nil, errors.New("upstream base URL must not contain a fragment")
 	}
+	parsed.Scheme = scheme
 	return parsed, nil
 }
 

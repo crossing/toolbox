@@ -77,6 +77,17 @@ func TestLoadOverridesDefaultsAndParsesDurations(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesUppercaseUpstreamScheme(t *testing.T) {
+	raw := strings.Replace(minimalConfig, "https://", "HTTPS://", 1)
+	config, err := Load(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := config.UpstreamBaseURL, "https://provider.invalid"; got != want {
+		t.Fatalf("normalized upstream_base_url = %q, want %q", got, want)
+	}
+}
+
 func TestLoadRequiresOneStrictJSONObject(t *testing.T) {
 	tests := map[string]string{
 		"empty":               "",
@@ -109,6 +120,7 @@ func TestLoadValidatesLoopbackListenAndUpstreamURL(t *testing.T) {
 		"missing upstream host":  `{"upstream_base_url":"https:///v1","models":{"m":{}}}`,
 		"URL credentials":        `{"upstream_base_url":"https://user:password@provider.invalid/v1","models":{"m":{}}}`,
 		"URL query":              `{"upstream_base_url":"https://provider.invalid/v1?key=value","models":{"m":{}}}`,
+		"empty URL query":        `{"upstream_base_url":"https://provider.invalid/v1?","models":{"m":{}}}`,
 		"URL fragment":           `{"upstream_base_url":"https://provider.invalid/v1#token","models":{"m":{}}}`,
 	}
 	for name, raw := range tests {

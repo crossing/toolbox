@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -10,8 +11,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/crossing/toolbox/tools/llm-pacer/internal/retry"
 )
 
 const (
@@ -47,6 +51,19 @@ func newTestRequest(t *testing.T, method, path, query string, headers http.Heade
 		t.Fatalf("NewBufferedRequest() error = %v", err)
 	}
 	return request
+}
+
+func decideTransportRetry(t *testing.T, transportError error) retry.Decision {
+	t.Helper()
+	policy, err := retry.New(retry.Config{
+		MaxRetries: 1,
+		BaseDelay:  time.Millisecond,
+		MaxDelay:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("retry.New() error = %v", err)
+	}
+	return policy.Decide(0, 0, nil, transportError, time.Time{})
 }
 
 func closeResponse(t *testing.T, response *http.Response) {
@@ -335,6 +352,12 @@ func TestResponseHeaderTimeoutCancelsDelayedUpstream(t *testing.T) {
 	if !errors.As(err, &networkError) || !networkError.Timeout() {
 		t.Fatalf("Do() error = %v, want timeout", err)
 	}
+	if retry.IsSafeTransportError(err) {
+		t.Fatalf("post-connect response header timeout was marked safe to retry: %v", err)
+	}
+	if decision := decideTransportRetry(t, err); decision.Retry {
+		t.Fatalf("post-connect response header timeout unexpectedly retried: %#v", decision)
+	}
 	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
 		t.Fatalf("response header timeout took %s", elapsed)
 	}
@@ -342,6 +365,150 @@ func TestResponseHeaderTimeoutCancelsDelayedUpstream(t *testing.T) {
 	case <-started:
 	default:
 		t.Fatal("upstream request was not recorded")
+	}
+}
+
+func TestConnectRefusedIsMarkedSafeToRetry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("listener Close() error = %v", err)
+	}
+
+	client := newTestClient(t, "http://"+address, nil)
+	buffered := newTestRequest(t, http.MethodPost, "/v1/chat/completions", "", nil, []byte("{}"))
+	_, err = client.Do(context.Background(), buffered)
+	if err == nil {
+		t.Fatal("Do() unexpectedly succeeded")
+	}
+	if !retry.IsSafeTransportError(err) {
+		t.Fatalf("connection-refused error was not marked safe to retry: %v", err)
+	}
+	if decision := decideTransportRetry(t, err); !decision.Retry {
+		t.Fatalf("connection-refused error was not retried: %#v", decision)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("connection-refused marker did not preserve errors.Is: %v", err)
+	}
+	var operationError *net.OpError
+	if !errors.As(err, &operationError) {
+		t.Fatalf("connection-refused marker did not preserve errors.As: %v", err)
+	}
+}
+
+func TestDialClassificationRejectsPermanentGenericAndDNSFailures(t *testing.T) {
+	permanentDNS := &net.DNSError{
+		Err:        "no such host",
+		Name:       "permanent.invalid",
+		IsNotFound: true,
+	}
+	for _, err := range []error{
+		errors.New("permanent dial configuration failure"),
+		permanentDNS,
+	} {
+		classified := markSafePreRequestDialError(err)
+		if retry.IsSafeTransportError(classified) {
+			t.Fatalf("permanent error was marked safe to retry: %v", classified)
+		}
+		if decision := decideTransportRetry(t, classified); decision.Retry {
+			t.Fatalf("permanent error unexpectedly retried: %#v", decision)
+		}
+	}
+
+	temporaryDNS := &net.DNSError{
+		Err:         "temporary resolver failure",
+		Name:        "temporary.invalid",
+		IsTemporary: true,
+	}
+	classified := markSafePreRequestDialError(temporaryDNS)
+	if !retry.IsSafeTransportError(classified) {
+		t.Fatalf("temporary DNS error was not marked safe to retry: %v", classified)
+	}
+	if decision := decideTransportRetry(t, classified); !decision.Retry {
+		t.Fatalf("temporary DNS error was not retried: %#v", decision)
+	}
+	var preservedDNS *net.DNSError
+	if !errors.As(classified, &preservedDNS) || preservedDNS != temporaryDNS {
+		t.Fatalf("temporary DNS marker did not preserve errors.As: %v", classified)
+	}
+}
+
+func TestTransientPreRequestNetworkFailuresAreMarkedSafe(t *testing.T) {
+	for _, networkError := range []error{
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+		syscall.ETIMEDOUT,
+	} {
+		classified := markSafePreRequestDialError(&net.OpError{Op: "dial", Net: "tcp", Err: networkError})
+		if !retry.IsSafeTransportError(classified) {
+			t.Errorf("pre-request network error %v was not marked safe", networkError)
+		}
+	}
+}
+
+func TestTLSVerificationFailureIsNotMarkedSafeToRetry(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, nil)
+	buffered := newTestRequest(t, http.MethodPost, "/v1/chat/completions", "", nil, []byte("{}"))
+	_, err := client.Do(context.Background(), buffered)
+	if err == nil {
+		t.Fatal("Do() unexpectedly trusted the test TLS certificate")
+	}
+	if retry.IsSafeTransportError(err) {
+		t.Fatalf("TLS verification error was marked safe to retry: %v", err)
+	}
+	if decision := decideTransportRetry(t, err); decision.Retry {
+		t.Fatalf("TLS verification error unexpectedly retried: %#v", decision)
+	}
+}
+
+func TestPostWriteConnectionFailureIsNotMarkedSafeToRetry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	serverResult := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+		request, err := http.ReadRequest(bufio.NewReader(connection))
+		if err == nil {
+			_, err = io.ReadAll(request.Body)
+			_ = request.Body.Close()
+		}
+		serverResult <- err
+	}()
+
+	client := newTestClient(t, "http://"+listener.Addr().String(), nil)
+	buffered := newTestRequest(t, http.MethodPost, "/v1/chat/completions", "", nil, []byte(`{"model":"fake/model"}`))
+	_, err = client.Do(context.Background(), buffered)
+	if err == nil {
+		t.Fatal("Do() unexpectedly succeeded without a response")
+	}
+	if retry.IsSafeTransportError(err) {
+		t.Fatalf("ambiguous post-write error was marked safe to retry: %v", err)
+	}
+	if decision := decideTransportRetry(t, err); decision.Retry {
+		t.Fatalf("ambiguous post-write error unexpectedly retried: %#v", decision)
+	}
+	if serverErr := <-serverResult; serverErr != nil {
+		t.Fatalf("raw upstream did not receive the complete request: %v", serverErr)
 	}
 }
 
@@ -527,6 +694,13 @@ func TestTransportIsBoundedAndPreservesWireEncoding(t *testing.T) {
 	}
 	if !transport.DisableCompression {
 		t.Fatal("DisableCompression = false, want wire-fidelity mode")
+	}
+}
+
+func TestNewClientNormalizesUppercaseUpstreamScheme(t *testing.T) {
+	client := newTestClient(t, "HTTPS://example.invalid/base", nil)
+	if got, want := client.baseURL.Scheme, "https"; got != want {
+		t.Fatalf("normalized upstream scheme = %q, want %q", got, want)
 	}
 }
 

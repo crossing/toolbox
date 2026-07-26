@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,30 @@ func daemonConfig(upstreamURL string) *config.Config {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
+func TestNewRejectsMissingOrSharedCredentials(t *testing.T) {
+	cfg := daemonConfig("http://127.0.0.1:9999")
+	for _, test := range []struct {
+		name     string
+		upstream string
+		local    string
+	}{
+		{name: "missing upstream", local: fakeLocalKey},
+		{name: "missing local", upstream: fakeUpstreamKey},
+		{name: "shared credential", upstream: fakeUpstreamKey, local: fakeUpstreamKey},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, err := New(cfg, test.upstream, test.local, discardLogger())
+			if err == nil {
+				service.Close()
+				t.Fatal("daemon accepted an unsafe credential configuration")
+			}
+			if strings.Contains(err.Error(), fakeUpstreamKey) || strings.Contains(err.Error(), fakeLocalKey) {
+				t.Fatalf("credential error exposed a credential value: %v", err)
+			}
+		})
+	}
 }
 
 func authorizedRequest(t *testing.T, handler http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {

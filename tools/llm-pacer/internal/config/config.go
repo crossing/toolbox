@@ -147,9 +147,11 @@ func (c *Config) Validate() error {
 	if err := validateLoopbackListen(c.ListenAddress); err != nil {
 		return err
 	}
-	if err := validateUpstreamBaseURL(c.UpstreamBaseURL); err != nil {
+	normalizedUpstreamBaseURL, err := validateUpstreamBaseURL(c.UpstreamBaseURL)
+	if err != nil {
 		return err
 	}
+	c.UpstreamBaseURL = normalizedUpstreamBaseURL
 	if err := positiveFinite("rpm", c.RPM); err != nil {
 		return err
 	}
@@ -207,25 +209,26 @@ func positiveFinite(name string, value float64) error {
 	return nil
 }
 
-func validateUpstreamBaseURL(raw string) error {
+func validateUpstreamBaseURL(raw string) (string, error) {
 	if raw == "" || raw != strings.TrimSpace(raw) {
-		return errors.New("upstream_base_url must be an absolute HTTP or HTTPS URL")
+		return "", errors.New("upstream_base_url must be an absolute HTTP or HTTPS URL")
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" || parsed.Opaque != "" {
-		return errors.New("upstream_base_url must be an absolute HTTP or HTTPS URL")
+		return "", errors.New("upstream_base_url must be an absolute HTTP or HTTPS URL")
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return errors.New("upstream_base_url must use http or https")
+		return "", errors.New("upstream_base_url must use http or https")
 	}
 	if parsed.User != nil {
-		return errors.New("upstream_base_url must not contain credentials")
+		return "", errors.New("upstream_base_url must not contain credentials")
 	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("upstream_base_url must not contain a query or fragment")
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", errors.New("upstream_base_url must not contain a query or fragment")
 	}
-	return nil
+	parsed.Scheme = scheme
+	return parsed.String(), nil
 }
 
 func validateLoopbackListen(address string) error {

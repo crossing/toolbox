@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -127,12 +128,40 @@ func newTestHandler(t *testing.T, options handlerOptions) (*Handler, *scheduler.
 }
 
 func inferenceRequest(ctx context.Context, body string) *http.Request {
-	request := httptest.NewRequest(http.MethodPost, "http://llm-pacer.invalid/v1/chat/completions?trace=1", strings.NewReader(body))
+	return inferenceRequestFor(ctx, http.MethodPost, "/v1/chat/completions?trace=1", body, "application/json")
+}
+
+func inferenceRequestFor(ctx context.Context, method, target, body, contentType string) *http.Request {
+	request := httptest.NewRequest(method, "http://llm-pacer.invalid"+target, strings.NewReader(body))
 	request = request.WithContext(ctx)
-	request.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
 	request.Header.Set("Authorization", "Bearer "+fakeLocalToken)
 	request.Header.Set("X-Request-Id", "test-request-id")
 	return request
+}
+
+func multipartInferenceBody(t *testing.T, models ...string) (string, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, model := range models {
+		if err := writer.WriteField("model", model); err != nil {
+			t.Fatalf("write multipart model: %v", err)
+		}
+	}
+	file, err := writer.CreateFormFile("file", "fixture.wav")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := file.Write([]byte("obviously-fake-audio")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart body: %v", err)
+	}
+	return body.String(), writer.FormDataContentType()
 }
 
 func modelBody(extra string) string {
@@ -227,6 +256,144 @@ func TestInvalidInferenceRequestsNeverReachUpstream(t *testing.T) {
 	}
 }
 
+func TestJSONInferenceRoutePolicy(t *testing.T) {
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		body         string
+		contentType  string
+		contentTypes []string
+		encoding     string
+		wantStatus   int
+		wantCode     string
+		wantCalls    int
+	}{
+		{name: "chat completions", method: http.MethodPost, path: "/v1/chat/completions", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "legacy completions", method: http.MethodPost, path: "/v1/completions", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "embeddings", method: http.MethodPost, path: "/v1/embeddings", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "moderations", method: http.MethodPost, path: "/v1/moderations", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "image generations", method: http.MethodPost, path: "/v1/images/generations", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "audio speech", method: http.MethodPost, path: "/v1/audio/speech", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "vendor extension plus json", method: http.MethodPost, path: "/v1/vendor/generate", body: modelBody(""), contentType: "application/vnd.vendor+json", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "vendor extension no content type", method: http.MethodPost, path: "/v1/vendor/generate", body: modelBody(""), wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "unknown json without model", method: http.MethodPost, path: "/v1/vendor/generate", body: `{}`, contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "proxy_model_required"},
+		{name: "duplicate json model", method: http.MethodPost, path: "/v1/vendor/generate", body: fmt.Sprintf(`{"model":%q,"model":%q}`, allowedModel, allowedModel), contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_model"},
+		{name: "opaque body", method: http.MethodPost, path: "/v1/vendor/generate", body: modelBody(""), contentType: "application/octet-stream", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "compressed json", method: http.MethodPost, path: "/v1/vendor/generate", body: modelBody(""), contentType: "application/json", encoding: "gzip", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "known management route", method: http.MethodPost, path: "/v1/files", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusNotFound, wantCode: "proxy_not_found"},
+		{name: "case variant management route", method: http.MethodPost, path: "/v1/FiLeS", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusNotFound, wantCode: "proxy_not_found"},
+		{name: "repeated slash management route", method: http.MethodPost, path: "/v1//files", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "ambiguous content type", method: http.MethodPost, path: "/v1/vendor/generate", body: modelBody(""), contentTypes: []string{"application/json", "application/octet-stream"}, wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "non post inference", method: http.MethodGet, path: "/v1/vendor/generate", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusMethodNotAllowed, wantCode: "proxy_method_not_allowed"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+				return response(http.StatusOK, `{"ok":true}`, nil), nil
+			}}
+			handler, _ := newTestHandler(t, handlerOptions{doer: doer})
+			request := inferenceRequestFor(context.Background(), test.method, test.path, test.body, test.contentType)
+			for _, contentType := range test.contentTypes {
+				request.Header.Add("Content-Type", contentType)
+			}
+			if test.encoding != "" {
+				request.Header.Set("Content-Encoding", test.encoding)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if test.wantCode != "" {
+				assertLocalError(t, recorder, test.wantStatus, test.wantCode)
+			} else if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if doer.Calls() != test.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", doer.Calls(), test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestMultipartInferenceRoutePolicy(t *testing.T) {
+	validBody, validContentType := multipartInferenceBody(t, allowedModel)
+	missingBody, missingContentType := multipartInferenceBody(t)
+	disallowedBody, disallowedContentType := multipartInferenceBody(t, "vendor/denied")
+	duplicateBody, duplicateContentType := multipartInferenceBody(t, allowedModel, allowedModel)
+	tests := []struct {
+		name        string
+		path        string
+		body        string
+		contentType string
+		wantStatus  int
+		wantCode    string
+		wantCalls   int
+	}{
+		{name: "audio transcriptions", path: "/v1/audio/transcriptions", body: validBody, contentType: validContentType, wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "audio translations", path: "/v1/audio/translations", body: validBody, contentType: validContentType, wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "image edits", path: "/v1/images/edits", body: validBody, contentType: validContentType, wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "image variations", path: "/v1/images/variations", body: validBody, contentType: validContentType, wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "missing model", path: "/v1/audio/transcriptions", body: missingBody, contentType: missingContentType, wantStatus: http.StatusBadRequest, wantCode: "proxy_model_required"},
+		{name: "disallowed model", path: "/v1/audio/transcriptions", body: disallowedBody, contentType: disallowedContentType, wantStatus: http.StatusBadRequest, wantCode: "proxy_model_not_allowed"},
+		{name: "duplicate model", path: "/v1/audio/transcriptions", body: duplicateBody, contentType: duplicateContentType, wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_model"},
+		{name: "json on multipart route", path: "/v1/audio/transcriptions", body: modelBody(""), contentType: "application/json", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "multipart on unknown route", path: "/v1/vendor/generate", body: validBody, contentType: validContentType, wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+		{name: "missing boundary", path: "/v1/audio/transcriptions", body: validBody, contentType: "multipart/form-data", wantStatus: http.StatusBadRequest, wantCode: "proxy_invalid_request"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+				return response(http.StatusOK, `{"ok":true}`, nil), nil
+			}}
+			handler, _ := newTestHandler(t, handlerOptions{doer: doer})
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, inferenceRequestFor(context.Background(), http.MethodPost, test.path, test.body, test.contentType))
+
+			if test.wantCode != "" {
+				assertLocalError(t, recorder, test.wantStatus, test.wantCode)
+			} else if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if doer.Calls() != test.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", doer.Calls(), test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestEncodedOrUnsafePathSegmentsNeverReachUpstream(t *testing.T) {
+	paths := []string{
+		"/v1/../files",
+		"/v1/%2e%2e/files",
+		"/v1/%2E./files",
+		"/v1/%252e%252e/files",
+		"/v1/safe/%2e/route",
+		"/v1/safe/%2e%2e%2fadmin",
+		"/v1/%66iles",
+		"/v1/%2566iles",
+		"/v1/vendor%2fgenerate",
+		"/v1/vendor\\generate",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+				return response(http.StatusOK, "unexpected", nil), nil
+			}}
+			handler, _ := newTestHandler(t, handlerOptions{doer: doer})
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, inferenceRequestFor(context.Background(), http.MethodPost, path, modelBody(""), "application/json"))
+
+			assertLocalError(t, recorder, http.StatusBadRequest, "proxy_invalid_request")
+			if doer.Calls() != 0 {
+				t.Fatalf("traversal path made %d upstream calls", doer.Calls())
+			}
+		})
+	}
+}
+
 func TestRequestBodyLimitRejectsBeforeUpstream(t *testing.T) {
 	body := modelBody(`"input":"body exceeds limit"`)
 	doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
@@ -240,6 +407,86 @@ func TestRequestBodyLimitRejectsBeforeUpstream(t *testing.T) {
 	assertLocalError(t, recorder, http.StatusRequestEntityTooLarge, "proxy_request_too_large")
 	if doer.Calls() != 0 {
 		t.Fatalf("oversized request made %d upstream calls", doer.Calls())
+	}
+}
+
+type gatedRequestReader struct {
+	reader  *strings.Reader
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (reader *gatedRequestReader) Read(destination []byte) (int, error) {
+	reader.once.Do(func() { close(reader.entered) })
+	<-reader.release
+	return reader.reader.Read(destination)
+}
+
+func TestUnknownLengthUploadReservesQueueCapacityBeforeRead(t *testing.T) {
+	const (
+		maximumRequest = int64(80)
+		maximumQueued  = int64(100)
+	)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	body := modelBody("")
+	slowBody := &gatedRequestReader{
+		reader:  strings.NewReader(body),
+		entered: entered,
+		release: release,
+	}
+	doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+		return response(http.StatusOK, `{"ok":true}`, nil), nil
+	}}
+	handler, scheduled := newTestHandler(t, handlerOptions{
+		doer:            doer,
+		maxRequestBytes: maximumRequest,
+		maxRetained:     maximumQueued,
+	})
+
+	first := httptest.NewRequest(http.MethodPost, "http://llm-pacer.invalid/v1/chat/completions", slowBody)
+	first.ContentLength = -1
+	first.Header.Set("Content-Type", "application/json")
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, first)
+		firstDone <- recorder
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("unknown-length request did not begin its body read")
+	}
+	snapshot := scheduled.Snapshot()
+	if snapshot.AdmittedRequests != 1 || snapshot.RetainedBodyBytes != maximumRequest {
+		close(release)
+		t.Fatalf("pre-read reservation = %+v", snapshot)
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, inferenceRequest(context.Background(), body))
+	assertLocalError(t, second, http.StatusTooManyRequests, "proxy_queue_full")
+	if doer.Calls() != 0 {
+		close(release)
+		t.Fatalf("overflow reached upstream %d times before slow upload completed", doer.Calls())
+	}
+
+	close(release)
+	select {
+	case completed := <-firstDone:
+		if completed.Code != http.StatusOK {
+			t.Fatalf("slow upload completion status = %d", completed.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow upload did not finish after release")
+	}
+	snapshot = scheduled.Snapshot()
+	if snapshot.AdmittedRequests != 0 || snapshot.RetainedBodyBytes != 0 {
+		t.Fatalf("slow upload leaked reservation: %+v", snapshot)
 	}
 }
 
@@ -366,6 +613,27 @@ func TestTransient503And429RetryAndSlowAdaptiveRate(t *testing.T) {
 	}
 }
 
+func TestRetryAfterHintPassedToSchedulerIsBounded(t *testing.T) {
+	doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+		return response(http.StatusTooManyRequests, "limited", http.Header{
+			"Retry-After-Ms": {"18446744073709551615"},
+		}), nil
+	}}
+	handler, scheduled := newTestHandler(t, handlerOptions{doer: doer})
+	recorder := httptest.NewRecorder()
+	started := time.Now()
+
+	handler.ServeHTTP(recorder, inferenceRequest(context.Background(), modelBody("")))
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", recorder.Code)
+	}
+	hint := scheduled.Snapshot().NotBefore.Sub(started)
+	if hint <= 0 || hint > 100*time.Millisecond {
+		t.Fatalf("scheduler retry hint = %s, want positive policy-bounded delay", hint)
+	}
+}
+
 func TestMaximumRetryBound(t *testing.T) {
 	doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
 		return response(http.StatusServiceUnavailable, "still unavailable", nil), nil
@@ -381,6 +649,40 @@ func TestMaximumRetryBound(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable || recorder.Body.String() != "still unavailable" {
 		t.Fatalf("terminal response = %d %q", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestOnlyExplicitlySafeTransportFailureIsRetried(t *testing.T) {
+	t.Run("marked pre-request failure", func(t *testing.T) {
+		doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, call int) (*http.Response, error) {
+			if call == 1 {
+				return nil, retry.MarkSafeTransportError(errors.New("fixture pre-request dial failure"))
+			}
+			return response(http.StatusOK, `{"retried":true}`, nil), nil
+		}}
+		handler, _ := newTestHandler(t, handlerOptions{doer: doer, maxRetries: 2})
+		recorder := httptest.NewRecorder()
+
+		handler.ServeHTTP(recorder, inferenceRequest(context.Background(), modelBody("")))
+
+		if doer.Calls() != 2 || recorder.Code != http.StatusOK {
+			t.Fatalf("safe transport retry calls=%d status=%d body=%q", doer.Calls(), recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("ambiguous failure", func(t *testing.T) {
+		doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+			return nil, errors.New("fixture ambiguous post-write failure")
+		}}
+		handler, _ := newTestHandler(t, handlerOptions{doer: doer, maxRetries: 2})
+		recorder := httptest.NewRecorder()
+
+		handler.ServeHTTP(recorder, inferenceRequest(context.Background(), modelBody("")))
+
+		if doer.Calls() != 1 {
+			t.Fatalf("ambiguous transport calls = %d, want 1", doer.Calls())
+		}
+		assertLocalError(t, recorder, http.StatusBadGateway, "proxy_upstream_error")
+	})
 }
 
 func TestNonRetryable4xxPassesThrough(t *testing.T) {
@@ -535,36 +837,95 @@ func TestSSEFlushesIncrementallyBeforeEOF(t *testing.T) {
 }
 
 type failingReadCloser struct {
-	err error
+	payload []byte
+	err     error
 }
 
-func (r *failingReadCloser) Read([]byte) (int, error) { return 0, r.err }
-func (*failingReadCloser) Close() error               { return nil }
+func (r *failingReadCloser) Read(destination []byte) (int, error) {
+	return copy(destination, r.payload), r.err
+}
+func (*failingReadCloser) Close() error { return nil }
 
-func TestFirstResponseReadFailureRetriesBeforeCommit(t *testing.T) {
+type committedFailureBody struct {
+	sent bool
+}
+
+func (body *committedFailureBody) Read(destination []byte) (int, error) {
+	if !body.sent {
+		body.sent = true
+		return copy(destination, []byte("data: partial\n\n")), nil
+	}
+	return 0, errors.New("fixture stream interrupted after commit")
+}
+
+func (*committedFailureBody) Close() error { return nil }
+
+func TestCommittedStreamFailureDoesNotCountTowardAdaptiveRecovery(t *testing.T) {
+	const configuredRPM = 1_000_000.0
 	doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, call int) (*http.Response, error) {
-		if call == 1 {
+		switch call {
+		case 1:
+			return response(http.StatusTooManyRequests, "limited", nil), nil
+		case 21:
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Header:     http.Header{"X-First-Attempt": {"must-not-commit"}},
-				Body:       &failingReadCloser{err: errors.New("early response read failed")},
+				Header:     http.Header{"Content-Type": {"text/event-stream"}},
+				Body:       &committedFailureBody{},
 			}, nil
+		default:
+			return response(http.StatusOK, `{"ok":true}`, nil), nil
 		}
-		return response(http.StatusOK, `{"retried":true}`, http.Header{"X-Second-Attempt": {"committed"}}), nil
 	}}
-	handler, _ := newTestHandler(t, handlerOptions{doer: doer, maxRetries: 1})
-	recorder := httptest.NewRecorder()
+	handler, scheduled := newTestHandler(t, handlerOptions{doer: doer, rpm: configuredRPM})
 
-	handler.ServeHTTP(recorder, inferenceRequest(context.Background(), modelBody("")))
+	for call := 1; call <= 22; call++ {
+		handler.ServeHTTP(httptest.NewRecorder(), inferenceRequest(context.Background(), modelBody("")))
+	}
 
-	if doer.Calls() != 2 {
-		t.Fatalf("upstream calls = %d, want 2", doer.Calls())
+	want := configuredRPM / scheduler.RateLimitSlowdownFactor
+	if got := scheduled.Snapshot().EffectiveRPM; got != want {
+		t.Fatalf("effective RPM after interrupted stream = %f, want %f", got, want)
 	}
-	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"retried":true}` {
-		t.Fatalf("response = %d %q", recorder.Code, recorder.Body.String())
+}
+
+func TestFirstResponseReadFailureFailsClosedBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		maxRetries int
+		payload    string
+		wantCalls  int
+	}{
+		{name: "successful status is not unsafely replayed", status: http.StatusOK, maxRetries: 3, wantCalls: 1},
+		{name: "data and error from first read is not committed", status: http.StatusOK, maxRetries: 3, payload: "partial upstream response", wantCalls: 1},
+		{name: "non retryable client error", status: http.StatusUnprocessableEntity, maxRetries: 3, wantCalls: 1},
+		{name: "exhausted server error", status: http.StatusServiceUnavailable, maxRetries: 1, wantCalls: 2},
 	}
-	if recorder.Header().Get("X-First-Attempt") != "" || recorder.Header().Get("X-Second-Attempt") != "committed" {
-		t.Fatalf("response headers show premature commit: %#v", recorder.Header())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doer := &fakeDoer{perform: func(_ context.Context, _ *upstream.BufferedRequest, _ int) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: test.status,
+					Header:     http.Header{"X-Upstream-Attempt": {"must-not-commit"}},
+					Body: &failingReadCloser{
+						payload: []byte(test.payload),
+						err:     errors.New("early response read failed"),
+					},
+				}, nil
+			}}
+			handler, _ := newTestHandler(t, handlerOptions{doer: doer, maxRetries: test.maxRetries})
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, inferenceRequest(context.Background(), modelBody("")))
+
+			if doer.Calls() != test.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", doer.Calls(), test.wantCalls)
+			}
+			assertLocalError(t, recorder, http.StatusBadGateway, "proxy_upstream_error")
+			if recorder.Header().Get("X-Upstream-Attempt") != "" || strings.Contains(recorder.Body.String(), test.payload) && test.payload != "" {
+				t.Fatalf("response committed failed upstream read: headers=%#v body=%q", recorder.Header(), recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -626,6 +987,11 @@ func TestLogsAndLocalErrorsExcludeSecretsAndPayloads(t *testing.T) {
 	for _, forbidden := range []string{fakeLocalToken, fakeUpstreamToken, sensitivePrompt, sensitiveResponse} {
 		if strings.Contains(combined, forbidden) {
 			t.Errorf("logs or local error leaked %q: %s", forbidden, combined)
+		}
+	}
+	for _, required := range []string{"active_attempts", "queued_attempts", "admitted_requests", "effective_rpm"} {
+		if !strings.Contains(logs.String(), required) {
+			t.Errorf("structured log omitted aggregate field %q: %s", required, logs.String())
 		}
 	}
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,9 @@ func New(cfg *config.Config, upstreamAPIKey, localAPIKey string, logger *slog.Lo
 	}
 	if upstreamAPIKey == "" || localAPIKey == "" {
 		return nil, errors.New("daemon credentials must be non-empty")
+	}
+	if len(upstreamAPIKey) == len(localAPIKey) && subtle.ConstantTimeCompare([]byte(upstreamAPIKey), []byte(localAPIKey)) == 1 {
+		return nil, errors.New("daemon upstream and local credentials must be distinct")
 	}
 	if logger == nil {
 		return nil, errors.New("daemon logger is required")

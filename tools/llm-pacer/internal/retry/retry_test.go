@@ -3,6 +3,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -29,8 +30,12 @@ func TestRetryableStatusesAndTransportErrors(t *testing.T) {
 			t.Fatalf("status %d decision = %#v", status, decision)
 		}
 	}
-	if decision := policy.Decide(0, 0, nil, errors.New("dial failed"), time.Time{}); !decision.Retry {
+	transportErr := errors.New("dial failed")
+	if decision := policy.Decide(0, 0, nil, MarkSafeTransportError(transportErr), time.Time{}); !decision.Retry {
 		t.Fatalf("transport decision = %#v", decision)
+	}
+	if decision := policy.Decide(0, 0, nil, transportErr, time.Time{}); decision.Retry {
+		t.Fatalf("unmarked transport decision = %#v", decision)
 	}
 	for _, status := range []int{400, 401, 403, 404} {
 		if decision := policy.Decide(0, status, nil, nil, time.Time{}); decision.Retry {
@@ -39,6 +44,45 @@ func TestRetryableStatusesAndTransportErrors(t *testing.T) {
 	}
 	if decision := policy.Decide(0, 0, nil, context.Canceled, time.Time{}); decision.Retry {
 		t.Fatal("context cancellation unexpectedly retried")
+	}
+}
+
+func TestSafeTransportErrorMarkerPreservesErrorChain(t *testing.T) {
+	sentinel := errors.New("sentinel")
+	marked := MarkSafeTransportError(sentinel)
+	if !IsSafeTransportError(marked) {
+		t.Fatal("marked error was not recognized")
+	}
+	if !errors.Is(marked, sentinel) {
+		t.Fatalf("marked error does not preserve errors.Is: %v", marked)
+	}
+	if got := MarkSafeTransportError(marked); got != marked {
+		t.Fatal("marking an already-marked error changed its identity")
+	}
+	if got := MarkSafeTransportError(nil); got != nil {
+		t.Fatalf("MarkSafeTransportError(nil) = %v", got)
+	}
+}
+
+func TestPermanentAndCancellationErrorsAreNotRetried(t *testing.T) {
+	policy := testPolicy(t, 2, 250*time.Millisecond)
+	for _, err := range []error{
+		errors.New("permanent transport failure"),
+		context.Canceled,
+		context.DeadlineExceeded,
+	} {
+		if decision := policy.Decide(0, 0, nil, err, time.Time{}); decision.Retry {
+			t.Fatalf("error %v unexpectedly retried", err)
+		}
+	}
+
+	markedCancellation := MarkSafeTransportError(context.Canceled)
+	if decision := policy.Decide(0, 0, nil, markedCancellation, time.Time{}); decision.Retry {
+		t.Fatal("marked context cancellation unexpectedly retried")
+	}
+	markedDeadline := MarkSafeTransportError(context.DeadlineExceeded)
+	if decision := policy.Decide(0, 0, nil, markedDeadline, time.Time{}); decision.Retry {
+		t.Fatal("marked context deadline unexpectedly retried")
 	}
 }
 
@@ -70,8 +114,16 @@ func TestRetryAfterDeltaDateMillisecondsAndMaximum(t *testing.T) {
 	}
 
 	header = http.Header{"Retry-After": {"9999"}}
+	if got := policy.RetryAfter(header, now); got != 5*time.Minute {
+		t.Fatalf("bounded policy retry hint = %s", got)
+	}
 	if got := policy.Decide(0, 429, header, nil, now).Delay; got != 5*time.Minute {
 		t.Fatalf("maximum retry delay = %s", got)
+	}
+
+	header = http.Header{"Retry-After-Ms": {"18446744073709551615"}}
+	if got := policy.RetryAfter(header, now); got != 5*time.Minute {
+		t.Fatalf("overflow-safe bounded policy retry hint = %s", got)
 	}
 }
 
@@ -84,5 +136,24 @@ func TestInvalidRetryConfiguration(t *testing.T) {
 		if _, err := New(config); err == nil {
 			t.Fatalf("New(%#v) unexpectedly succeeded", config)
 		}
+	}
+}
+
+func TestMaximumDurationJitterDoesNotOverflow(t *testing.T) {
+	policy, err := New(Config{
+		MaxRetries: 1,
+		BaseDelay:  time.Duration(math.MaxInt64),
+		MaxDelay:   time.Duration(math.MaxInt64),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	decision := policy.Decide(0, http.StatusTooManyRequests, nil, nil, time.Unix(0, 0))
+	if !decision.Retry {
+		t.Fatal("maximum-duration policy did not retry")
+	}
+	if decision.Delay < 0 || decision.Delay > time.Duration(math.MaxInt64) {
+		t.Fatalf("retry delay = %s, want a bounded non-negative duration", decision.Delay)
 	}
 }

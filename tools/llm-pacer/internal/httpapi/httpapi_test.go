@@ -10,7 +10,7 @@ import (
 	"github.com/crossing/toolbox/tools/llm-pacer/internal/catalog"
 )
 
-const testLocalKey = "sk-local-fake-test-key"
+const testLocalKey = "fixture-local-bearer-token"
 
 func testCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()

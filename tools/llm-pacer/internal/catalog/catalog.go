@@ -115,8 +115,8 @@ func (c *Catalog) Validate() error {
 	}
 
 	for id, model := range c.Models {
-		if strings.TrimSpace(id) == "" {
-			return errors.New("model catalog contains an empty model ID")
+		if strings.TrimSpace(id) == "" || id != strings.TrimSpace(id) {
+			return errors.New("model catalog contains an empty or whitespace-padded model ID")
 		}
 		if strings.TrimSpace(model.Name) == "" {
 			model.Name = id

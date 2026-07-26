@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,7 +14,9 @@ import (
 	"log/slog"
 	"math"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -93,6 +96,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	requestID := safeRequestID(request.Header.Get("X-Request-Id"))
 	w.Header().Set("X-Request-Id", requestID)
 
+	if localErr := validateForwardRoute(request); localErr != nil {
+		if localErr.status == http.StatusMethodNotAllowed {
+			w.Header().Set("Allow", http.MethodPost)
+		}
+		h.writeLocalError(w, request, requestID, "", 0, started, localErr)
+		return
+	}
+	reservedBodyBytes, localErr := bodyReservation(request, h.maxRequestBodyBytes)
+	if localErr != nil {
+		h.writeLocalError(w, request, requestID, "", 0, started, localErr)
+		return
+	}
+
+	// Reserve both admission count and worst-case retained body capacity before
+	// reading from the client. Unknown-length/chunked bodies reserve the full
+	// per-request limit, so slow uploads cannot sit outside the queue bounds.
+	ticket, err := h.scheduler.Admit(request.Context(), reservedBodyBytes)
+	if err != nil {
+		if errors.Is(err, scheduler.ErrQueueFull) {
+			delay := h.queueRetryDelay()
+			setRetryHeaders(w.Header(), delay)
+			h.writeLocalError(w, request, requestID, "", 0, started, newLocalError(
+				http.StatusTooManyRequests,
+				"proxy_queue_full",
+				"proxy admission queue is full",
+			))
+			return
+		}
+		if request.Context().Err() != nil {
+			return
+		}
+		h.writeLocalError(w, request, requestID, "", 0, started, newLocalError(
+			http.StatusServiceUnavailable,
+			"proxy_unavailable",
+			"proxy scheduler is unavailable",
+		))
+		return
+	}
+	defer func() { _ = ticket.Close() }()
+
 	body, localErr := readBody(request, h.maxRequestBodyBytes)
 	if localErr != nil {
 		h.writeLocalError(w, request, requestID, "", 0, started, localErr)
@@ -121,30 +164,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		))
 		return
 	}
-
-	ticket, err := h.scheduler.Admit(request.Context(), int64(len(body)))
-	if err != nil {
-		if errors.Is(err, scheduler.ErrQueueFull) {
-			delay := h.queueRetryDelay()
-			setRetryHeaders(w.Header(), delay)
-			h.writeLocalError(w, request, requestID, model, 0, started, newLocalError(
-				http.StatusTooManyRequests,
-				"proxy_queue_full",
-				"proxy admission queue is full",
-			))
-			return
-		}
-		if request.Context().Err() != nil {
-			return
-		}
-		h.writeLocalError(w, request, requestID, model, 0, started, newLocalError(
-			http.StatusServiceUnavailable,
-			"proxy_unavailable",
-			"proxy scheduler is unavailable",
-		))
-		return
-	}
-	defer func() { _ = ticket.Close() }()
 
 	retriesUsed := 0
 	for {
@@ -185,7 +204,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		}
 
 		now := h.now()
-		retryHint := retry.RetryAfter(response.Header, now)
+		retryHint := h.retryPolicy.RetryAfter(response.Header, now)
 		decision := h.retryPolicy.Decide(retriesUsed, response.StatusCode, response.Header, nil, now)
 		if decision.Retry {
 			_ = response.Body.Close()
@@ -204,21 +223,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		committed, bytesWritten, copyErr := copyResponse(w, request, response)
 		_ = response.Body.Close()
 		outcome := scheduler.Outcome{StatusCode: response.StatusCode, RetryAfter: retryHint}
-		if copyErr != nil && !committed {
+		// A truncated 2xx response is not a successful call, even when some
+		// bytes were already committed and therefore cannot be retried. Reset
+		// adaptive recovery without discarding meaningful 429/5xx outcomes.
+		if copyErr != nil && response.StatusCode >= 200 && response.StatusCode <= 299 {
 			outcome.StatusCode = 0
 		}
 		_ = attempt.Finish(outcome)
 
-		if copyErr != nil && !committed && request.Context().Err() == nil && response.StatusCode >= 200 && response.StatusCode <= 299 {
-			decision = h.retryPolicy.Decide(retriesUsed, 0, nil, copyErr, h.now())
-			if decision.Retry {
-				h.logRetry(request, requestID, model, retriesUsed+1, 0, decision.Delay)
-				retriesUsed++
-				if err := h.sleep(request.Context(), decision.Delay); err != nil {
-					return
-				}
-				continue
-			}
+		if copyErr != nil && !committed && request.Context().Err() == nil {
+			// The upstream has already processed this POST. A response-body read
+			// failure does not prove that replaying it is safe, even when the
+			// status was successful, so fail locally instead of duplicating work.
 			h.writeLocalError(w, request, requestID, model, retriesUsed+1, started, newLocalError(
 				http.StatusBadGateway,
 				"proxy_upstream_error",
@@ -227,6 +243,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 
+		snapshot := h.scheduler.Snapshot()
 		h.logger.Info("llm request complete",
 			"request_id", requestID,
 			"route", request.URL.Path,
@@ -234,10 +251,73 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 			"attempts", retriesUsed+1,
 			"upstream_status", response.StatusCode,
 			"response_bytes", bytesWritten,
+			"active_attempts", snapshot.ActiveAttempts,
+			"queued_attempts", snapshot.QueuedAttempts,
+			"admitted_requests", snapshot.AdmittedRequests,
+			"effective_rpm", snapshot.EffectiveRPM,
 			"duration_ms", h.now().Sub(started).Milliseconds(),
 			"outcome", outcomeName(copyErr, request.Context().Err()),
 		)
 		return
+	}
+}
+
+func bodyReservation(request *http.Request, maximum int64) (int64, *localError) {
+	if request.Body == nil || request.Body == http.NoBody {
+		return 0, nil
+	}
+	if request.ContentLength > maximum {
+		return 0, newLocalError(http.StatusRequestEntityTooLarge, "proxy_request_too_large", "request body exceeds configured limit")
+	}
+	if request.ContentLength > 0 {
+		return request.ContentLength, nil
+	}
+	return maximum, nil
+}
+
+func validateForwardRoute(request *http.Request) *localError {
+	if request.Method != http.MethodPost {
+		return newLocalError(http.StatusMethodNotAllowed, "proxy_method_not_allowed", "inference routes require POST")
+	}
+	if request.URL == nil || !strings.HasPrefix(request.URL.Path, "/v1/") {
+		return newLocalError(http.StatusNotFound, "proxy_not_found", "route not found")
+	}
+	if hasUnsafePathSegment(request.URL) {
+		return newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request path contains a forbidden segment")
+	}
+	if isManagementRoute(request.URL.Path) {
+		return newLocalError(http.StatusNotFound, "proxy_not_found", "route not found")
+	}
+	return nil
+}
+
+// hasUnsafePathSegment rejects all encoded path forms before forwarding. Model
+// IDs with escaped slashes are handled by the local model endpoint; inference
+// route names have no need for encoding. This also prevents encoded management
+// namespaces, encoded slashes, and layered dot-segment normalization upstream.
+func hasUnsafePathSegment(target *url.URL) bool {
+	if target == nil || target.EscapedPath() != target.Path ||
+		strings.Contains(target.Path, "\\") || strings.Contains(target.Path, "//") {
+		return true
+	}
+	for _, segment := range strings.Split(target.Path, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func isManagementRoute(path string) bool {
+	remainder := strings.TrimPrefix(path, "/v1/")
+	root, _, _ := strings.Cut(remainder, "/")
+	switch strings.ToLower(root) {
+	case "assistants", "batches", "containers", "conversations", "evals",
+		"files", "fine-tuning", "fine_tuning", "models", "organization",
+		"projects", "threads", "uploads", "vector_stores", "webhooks":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -257,36 +337,125 @@ func readBody(request *http.Request, maximum int64) ([]byte, *localError) {
 }
 
 func (h *Handler) validateModel(request *http.Request, body []byte) (string, *localError) {
-	required := routeRequiresModel(request.Method, request.URL.Path)
 	if len(body) == 0 {
-		if required {
-			return "", newLocalError(http.StatusBadRequest, "proxy_model_required", "request must contain an allowed model")
-		}
-		return "", nil
+		return "", newLocalError(http.StatusBadRequest, "proxy_model_required", "request must contain an allowed model")
 	}
 
-	contentEncoding := strings.TrimSpace(request.Header.Get("Content-Encoding"))
-	if required && contentEncoding != "" && !strings.EqualFold(contentEncoding, "identity") {
+	contentEncodings := request.Header.Values("Content-Encoding")
+	contentEncoding := strings.TrimSpace(strings.Join(contentEncodings, ","))
+	if contentEncoding != "" && !strings.EqualFold(contentEncoding, "identity") {
 		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "encoded inference request bodies are not supported")
 	}
-	jsonBody := required || hasJSONMediaType(request.Header.Get("Content-Type")) || firstNonSpace(body) == '{'
-	if !jsonBody {
-		return "", nil
-	}
 
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope == nil {
+	contentTypes := request.Header.Values("Content-Type")
+	if len(contentTypes) > 1 {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "inference request content type is ambiguous")
+	}
+	contentType := strings.TrimSpace(strings.Join(contentTypes, ""))
+	if contentType == "" {
+		if isMultipartModelRoute(request.URL.Path) || firstNonSpace(body) != '{' {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "inference request body must use a supported media type")
+		}
+		return h.validateJSONModel(body)
+	}
+	mediaType, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "inference request content type is invalid")
+	}
+	if mediaType == "multipart/form-data" {
+		if !isMultipartModelRoute(request.URL.Path) {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "multipart inference is not supported for this route")
+		}
+		return h.validateMultipartModel(body, parameters["boundary"])
+	}
+	if isMultipartModelRoute(request.URL.Path) || !isJSONMediaType(mediaType) {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "inference request body must use a supported media type")
+	}
+	return h.validateJSONModel(body)
+}
+
+func (h *Handler) validateJSONModel(body []byte) (string, *localError) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
 		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must be a JSON object")
 	}
-	rawModel, present := envelope["model"]
-	if !present {
-		if required {
-			return "", newLocalError(http.StatusBadRequest, "proxy_model_required", "request must contain an allowed model")
+	var rawModel json.RawMessage
+	modelFields := 0
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must be a JSON object")
 		}
-		return "", nil
+		name, ok := key.(string)
+		if !ok {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must be a JSON object")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must be a JSON object")
+		}
+		if name == "model" {
+			modelFields++
+			rawModel = value
+		}
+	}
+	if closing, err := decoder.Token(); err != nil || closing != json.Delim('}') {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must be a JSON object")
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "request body must contain exactly one JSON object")
+	}
+	if modelFields == 0 {
+		return "", newLocalError(http.StatusBadRequest, "proxy_model_required", "request must contain an allowed model")
+	}
+	if modelFields != 1 {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_model", "request must contain exactly one model field")
 	}
 	var model string
-	if err := json.Unmarshal(rawModel, &model); err != nil || strings.TrimSpace(model) == "" || model != strings.TrimSpace(model) {
+	if err := json.Unmarshal(rawModel, &model); err != nil {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_model", "model must be a non-empty string")
+	}
+	return h.validateModelName(model)
+}
+
+func (h *Handler) validateMultipartModel(body []byte, boundary string) (string, *localError) {
+	if boundary == "" {
+		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "multipart inference boundary is required")
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var model string
+	found := false
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "multipart inference body is invalid")
+		}
+		if part.FormName() != "model" {
+			continue
+		}
+		if found || part.FileName() != "" {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_model", "multipart inference must contain exactly one model field")
+		}
+		value, err := io.ReadAll(part)
+		if err != nil {
+			return "", newLocalError(http.StatusBadRequest, "proxy_invalid_request", "multipart model field could not be read")
+		}
+		model = string(value)
+		found = true
+	}
+	if !found {
+		return "", newLocalError(http.StatusBadRequest, "proxy_model_required", "request must contain an allowed model")
+	}
+	return h.validateModelName(model)
+}
+
+func (h *Handler) validateModelName(model string) (string, *localError) {
+	if strings.TrimSpace(model) == "" || model != strings.TrimSpace(model) {
 		return "", newLocalError(http.StatusBadRequest, "proxy_invalid_model", "model must be a non-empty string")
 	}
 	if !h.catalog.Allows(model) {
@@ -295,26 +464,16 @@ func (h *Handler) validateModel(request *http.Request, body []byte) (string, *lo
 	return model, nil
 }
 
-func routeRequiresModel(method, path string) bool {
-	if method != http.MethodPost {
-		return false
-	}
+func isMultipartModelRoute(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses":
+	case "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/images/edits", "/v1/images/variations":
 		return true
 	default:
 		return false
 	}
 }
 
-func hasJSONMediaType(value string) bool {
-	if strings.TrimSpace(value) == "" {
-		return false
-	}
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
-		return false
-	}
+func isJSONMediaType(mediaType string) bool {
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
@@ -333,7 +492,7 @@ func firstNonSpace(body []byte) byte {
 func copyResponse(w http.ResponseWriter, request *http.Request, response *http.Response) (committed bool, written int64, err error) {
 	buffer := make([]byte, firstResponseChunkBytes)
 	count, readErr := response.Body.Read(buffer)
-	if count == 0 && readErr != nil && !errors.Is(readErr, io.EOF) {
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return false, 0, readErr
 	}
 
@@ -471,6 +630,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 func (h *Handler) logRetry(request *http.Request, requestID, model string, attempt, status int, delay time.Duration) {
+	snapshot := h.scheduler.Snapshot()
 	h.logger.Warn("llm request retry scheduled",
 		"request_id", requestID,
 		"route", request.URL.Path,
@@ -478,12 +638,16 @@ func (h *Handler) logRetry(request *http.Request, requestID, model string, attem
 		"attempt", attempt,
 		"upstream_status", status,
 		"retry_delay_ms", delay.Milliseconds(),
-		"effective_rpm", h.scheduler.Snapshot().EffectiveRPM,
+		"active_attempts", snapshot.ActiveAttempts,
+		"queued_attempts", snapshot.QueuedAttempts,
+		"admitted_requests", snapshot.AdmittedRequests,
+		"effective_rpm", snapshot.EffectiveRPM,
 	)
 }
 
 func (h *Handler) writeLocalError(w http.ResponseWriter, request *http.Request, requestID, model string, attempts int, started time.Time, localErr *localError) {
 	writeError(w, localErr.status, localErr.code, localErr.message)
+	snapshot := h.scheduler.Snapshot()
 	h.logger.Warn("llm request rejected",
 		"request_id", requestID,
 		"route", request.URL.Path,
@@ -491,6 +655,10 @@ func (h *Handler) writeLocalError(w http.ResponseWriter, request *http.Request, 
 		"attempts", attempts,
 		"status", localErr.status,
 		"error_code", localErr.code,
+		"active_attempts", snapshot.ActiveAttempts,
+		"queued_attempts", snapshot.QueuedAttempts,
+		"admitted_requests", snapshot.AdmittedRequests,
+		"effective_rpm", snapshot.EffectiveRPM,
 		"duration_ms", h.now().Sub(started).Milliseconds(),
 	)
 }
