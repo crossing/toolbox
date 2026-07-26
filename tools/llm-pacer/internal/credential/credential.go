@@ -67,15 +67,22 @@ func ReadFile(path string, maximum int64) ([]byte, error) {
 		return nil, errors.New("credential path is not a regular file")
 	}
 
-	value, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	return Read(file, maximum)
+}
+
+func Read(source io.Reader, maximum int64) ([]byte, error) {
+	if source == nil || maximum <= 0 {
+		return nil, errors.New("invalid credential input")
+	}
+	value, err := io.ReadAll(io.LimitReader(source, maximum+1))
 	if err != nil {
-		return nil, fmt.Errorf("read credential file: %w", err)
+		return nil, fmt.Errorf("read credential: %w", err)
 	}
 	if len(value) == 0 {
-		return nil, errors.New("credential file is empty")
+		return nil, errors.New("credential is empty")
 	}
 	if int64(len(value)) > maximum {
-		return nil, errors.New("credential file exceeds maximum size")
+		return nil, errors.New("credential exceeds maximum size")
 	}
 	if bytes.ContainsAny(value, "\r\n\x00") {
 		return nil, errors.New("credential contains a forbidden control character")

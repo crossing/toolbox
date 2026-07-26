@@ -93,6 +93,16 @@ func TestReadFileRejectsDirectory(t *testing.T) {
 	}
 }
 
+func TestReadValidatesPipeInput(t *testing.T) {
+	value, err := Read(strings.NewReader(fakeCredential), 1024)
+	if err != nil || string(value) != fakeCredential {
+		t.Fatalf("Read() = %q, %v", value, err)
+	}
+	if _, err := Read(strings.NewReader("secret\n"), 1024); err == nil {
+		t.Fatal("Read() accepted a newline")
+	}
+}
+
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("fake read failure") }

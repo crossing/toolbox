@@ -6,10 +6,11 @@ Updated: 2026-07-26
 
 - Repository: `/home/xing/works/home/safe-cli`
 - Branch: `feature/llm-pacer`
-- Base: `master` at `2cf6400`
-- Plan/bottom commit: `f983b3d docs(llm-pacer): record implementation plan`
-- Working tree: tested config, scheduler, and upstream packages awaiting the
-  next implementation checkpoint commit
+- Base: Snowfall refactor `0a117d1`
+- Plan/bottom commit: `e40f7f6 docs(llm-pacer): record implementation plan`
+- Current checkpoint: `1c5df18 feat(llm-pacer): enforce paced request scheduling`
+- Working tree: forwarding daemon/CLI complete and tested; Snowfall/OpenCode
+  packaging is the next separate checkpoint
 - Full contract: `docs/llm-pacer/implementation-plan.md`
 
 Do not rebase the plan above later commits: the user explicitly requires it to
@@ -37,9 +38,9 @@ remain the bottom commit on the implementation branch.
   values, and default absent custom-provider capabilities conservatively to
   false rather than letting tool-call support be overclaimed.
 - Package and Home Manager export work waits for the concurrent Snowfall Lib
-  layout to stabilize. That refactor is now committed as `0a117d1`; rebase onto
-  it after the current core checkpoint, then add integration against its
-  discovered package/check/module layout.
+  layout to stabilize. The implementation branch is now rebased onto that
+  refactor at `0a117d1`; add integration through its discovered
+  package/check/module layout.
 - The user unit will use absolute `%t/llm-pacer/credentials/...` sources with
   `LoadCredential=`, pass only `%d/...` file paths to the daemon, set
   `X-SwitchMethod=keep-old`, omit activation and restart directives, and clean
@@ -71,6 +72,20 @@ ok all seven packages (go test -count=1 -timeout=30s ./...)
 
 full nested module race run
 ok all seven packages (go test -race -count=1 -timeout=60s ./...)
+
+full daemon/CLI/forwarding module
+ok all eleven packages (go test -count=1 -timeout=60s ./...)
+ok all eleven packages (go test -race -count=1 -timeout=90s ./...)
+go vet ./... passed
+
+Nix package build through the nested module
+all internal package tests ran and passed during checkPhase
+
+Home Manager render check
+zero failed assertions; LoadCredential sources, Restart=no,
+X-SwitchMethod=keep-old, no Install section; generated plugin declares only the
+local-token env name and has no options.apiKey; systemd unit and JavaScript parse
+checks passed
 ```
 
 The upstream adapter initially appeared to hang because two delayed-header mock
@@ -80,19 +95,24 @@ explicit cancellation already returned correctly. The tests now assert those
 observable contracts and release the handlers deterministically; focused and
 race suites pass. No production timeout or assertion was weakened.
 
+The first generated Home Manager evaluation exposed that the concurrent Snowfall
+refactor omitted its internal `pkgs` output while generated module wrappers
+resolve packages through `self.pkgs`. The branch now preserves that Snowfall
+output alongside `homeModules`; the real wrapper evaluates successfully. The
+systemd verifier also needed a private user-runtime lookup path inside the Nix
+sandbox; this was a check-harness fix, not a unit relaxation.
+
 The test used the repository-locked Nix Go 1.26.2 shell. Host `go` is not on
 `PATH`; use a task-specific writable Nix cache below `/tmp`.
 
 ## Next actions
 
-1. Commit the validated configuration, scheduler, and upstream packages.
-2. Rebase onto Snowfall commit `0a117d1`, preserving the plan as the first
-   llm-pacer commit.
-3. Integrate admission, retry, model validation, JSON, and SSE forwarding.
-4. Add the CLI/server and credential-file-only startup path.
-5. Add OpenCode provider discovery and hermetic 1.18.5 acceptance.
-6. Add Snowfall package, check, and Home Manager exports.
-7. Update this file after each verified phase and include it in phase commits.
+1. Commit the completed daemon/CLI/forwarding checkpoint.
+2. Complete the hermetic OpenCode 1.18.5 acceptance run.
+3. Finish the Snowfall package, check, Home Manager, starter, and plugin
+   checkpoint.
+4. Run full `nix flake check`, load evidence, and secret scans.
+5. Update this file after each verified phase and include it in phase commits.
 
 ## Safety boundaries
 

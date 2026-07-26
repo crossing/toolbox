@@ -17,7 +17,8 @@ type Snapshot struct {
 	MaxInflight    int     `json:"max_inflight"`
 	Active         int     `json:"active"`
 	Queued         int     `json:"queued"`
-	BackingOff     int     `json:"backing_off"`
+	BackingOff     bool    `json:"backing_off"`
+	Admitted       int     `json:"admitted"`
 	QueueLimit     int     `json:"queue_limit"`
 	QueuedBytes    int64   `json:"queued_bytes"`
 	MaxQueuedBytes int64   `json:"max_queued_bytes"`
