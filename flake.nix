@@ -61,12 +61,24 @@
       # before; only sibling package resolution uses pkgs.toolbox-internal internally.
       inherit (snowfallOutputs) packages checks devShells formatter;
 
+      # Snowfall's generated module wrapper replaces the consumer's package set with
+      # self.pkgs, which would require exposing the private namespace. Export the raw
+      # Home Manager module instead and inject only its two toolbox packages.
+      homeModules.llm-pacer = moduleArgs@{ pkgs, ... }:
+        let
+          packages = snowfallOutputs.packages.${pkgs.stdenv.hostPlatform.system};
+        in
+        import ./modules/home/llm-pacer/default.nix (moduleArgs // {
+          llmPacerPackage = packages.llm-pacer;
+          safeOpPackage = packages.safe-op;
+        });
+
       overlays.default = _final: prev:
         let
           packages = snowfallOutputs.packages.${prev.stdenv.hostPlatform.system};
         in
         {
-          inherit (packages) safe-op op-oauth2c freeagent toolbox-skills;
+          inherit (packages) safe-op op-oauth2c freeagent llm-pacer toolbox-skills;
         }
         // lib.optionalAttrs prev.stdenv.hostPlatform.isLinux {
           inherit (packages) ibkr-cli ibgateway ibkr-local;

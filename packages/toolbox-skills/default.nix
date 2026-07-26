@@ -8,6 +8,7 @@ let
     { name = "op-oauth2c"; skill = ../../tools/op-oauth2c/SKILL.md; }
     { name = "freeagent"; skill = ../../tools/freeagent/SKILL.md; }
     { name = "ibkr-local"; skill = ../../tools/ibkr-local/SKILL.md; }
+    { name = "llm-pacer"; skill = ../../tools/llm-pacer/SKILL.md; }
   ];
 in
 runCommand "toolbox-skills" { } ''
