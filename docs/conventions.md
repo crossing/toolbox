@@ -51,7 +51,8 @@ When a tool needs a secret:
 ## Skills
 
 One `SKILL.md` per tool, in the tool's own directory. It ships with the code, so it
-cannot drift. `nix/skills.nix` collects them into a `toolbox-skills` package.
+cannot drift. `packages/toolbox-skills/default.nix` collects them into a
+`toolbox-skills` package.
 
 Write it for an agent deciding *whether* to reach for the tool, not just how to call it.
 State what it is for, what it refuses to do, and what its limits are. `tools/safe-op/SKILL.md`
@@ -59,9 +60,9 @@ documents its own bypasses — a skill that oversells its guarantees is worse th
 
 ## Naming
 
-Binary name == directory name == SKILL.md `name:`. Under `buildGoModule`,
-`subPackages = [ "tools/foo" ]` produces a binary called `foo`, so the directory name is
-already load-bearing.
+Binary name == directory name == SKILL.md `name:`. Package-specific dependency manifests
+and lockfiles live under `tools/<name>/`; for example, a Go tool keeps `go.mod` and
+`go.sum` beside its source and builds its module root with `subPackages = [ "." ]`.
 
 ## Verifying the sops recovery key
 

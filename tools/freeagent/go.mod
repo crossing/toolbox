@@ -1,4 +1,4 @@
-module github.com/crossing/toolbox
+module github.com/crossing/toolbox/tools/freeagent
 
 go 1.26.2
 

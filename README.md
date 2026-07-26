@@ -14,7 +14,9 @@ structured errors, and guardrails around the mistakes agents actually make.
 | [`ibkr-cli`](tools/ibkr-cli) | Packaging of upstream `fatwang2/ibkr-cli`, patched and pinned (Linux) |
 | [`ibgateway`](tools/ibgateway) | IB Gateway + IBC runtime, image and installer pinned (Linux) |
 
-Each tool directory holds its source, its `SKILL.md`, and its tests.
+Each tool directory holds its source, package derivation, `SKILL.md`, and tests.
+Snowfall Lib discovers the thin package entrypoints, checks, and development shell from
+`packages/`, `checks/`, and `shells/` while the exported flake paths remain unchanged.
 
 ## Use
 
