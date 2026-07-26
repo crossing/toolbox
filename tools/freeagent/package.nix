@@ -4,16 +4,14 @@ buildGoModule {
   pname = "freeagent";
   version = "0.1.0";
 
-  # Scoped with fileset rather than `src = ../..`: the Go module root is the repo root,
-  # so an unscoped source would make every bash script and uv.lock in tools/ part of
-  # this derivation's input hash -- editing tools/ibkr-local/order-entry.sh would
-  # rebuild freeagent.
+  # Keep the derivation input scoped to this tool. Its module metadata lives here too,
+  # so unrelated toolbox changes do not rebuild freeagent.
   src = lib.fileset.toSource {
-    root = ../..;
+    root = ./.;
     fileset = lib.fileset.unions [
-      ../../go.mod
-      ../../go.sum
-      (lib.fileset.fileFilter (f: f.hasExt "go") ../../tools)
+      ./go.mod
+      ./go.sum
+      (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
     ];
   };
 
@@ -21,9 +19,7 @@ buildGoModule {
   # not alter the module download set, so the vendor hash carries over.
   vendorHash = "sha256-7K17JaXFsjf163g5PXCb5ng2gYdotnZ2IDKk8KFjNj0=";
 
-  # Names the binary after the last path element, so this must stay in step with the
-  # directory name.
-  subPackages = [ "tools/freeagent" ];
+  subPackages = [ "." ];
 
   # No cgo is needed and gcc is absent from the minimal build env.
   env.CGO_ENABLED = 0;

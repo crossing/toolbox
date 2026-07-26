@@ -64,11 +64,32 @@ Then:
 
 ## 4. Register it
 
-In `flake.nix`, add one line to `overlays.default`, one to the `packages` inherit, and
-an entry to `toolbox-skills`. In `nix/checks.nix`, add a `mkToolTest` block.
+Add a thin Snowfall entrypoint at `packages/<name>/default.nix` which delegates to the
+co-located derivation:
 
-For a Linux-only tool, add it under the `linuxSystems` branch instead so `nix flake
-check` still passes on darwin.
+```nix
+{ callPackage, ... }:
+
+callPackage ../../tools/<name>/package.nix { }
+```
+
+If the package consumes another toolbox package, resolve the sibling through Snowfall's
+internal namespace rather than calling its file directly:
+
+```nix
+{ callPackage, pkgs, namespace, ... }:
+
+callPackage ../../tools/<name>/package.nix {
+  inherit (pkgs.${namespace}) <sibling>;
+}
+```
+
+Add `checks/<name>/default.nix` for its check output and add agent-facing skills to the
+list in `packages/toolbox-skills/default.nix`. Snowfall discovers these directories;
+do not add per-tool wiring to `flake.nix`.
+
+For a Linux-only tool or check, set `meta.platforms = lib.platforms.linux`; Snowfall
+uses package metadata to omit it on Darwin.
 
 ## 5. Verify
 
