@@ -6,7 +6,12 @@ let
   ibgatewayInstaller = fetchurl {
     name = "ibgateway-${ibgatewayVersion}-standalone-linux-x64.sh";
     url = "https://download2.interactivebrokers.com/installers/ibgateway/latest-standalone/ibgateway-latest-standalone-linux-x64.sh";
-    hash = "sha256-5zwXjP5B7Qfe/so7OggmZY8p1XgKj9dZSGjrvoSQ9Fs=";
+    # Refreshed 2026-07-27. The URL above is a rolling `latest-standalone`, so IB
+    # replaces the bytes under it without notice and this hash breaks each time --
+    # it is a reminder to pin a versioned URL, not a one-off. The replacement
+    # differs by ~1.7 KiB on 336 MiB and carries the same internal version strings,
+    # i.e. a repack rather than a new release.
+    hash = "sha256-eRq+EllMDZyHNnaf2O5jaIYbDRprcOESdbMt7f7BZpI=";
   };
   ibc = stdenvNoCC.mkDerivation {
     pname = "ibc";
