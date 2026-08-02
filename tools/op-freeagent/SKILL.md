@@ -26,7 +26,7 @@ Do not call bare `freeagent` — it has no token configured.
 
 ## Configuration
 
-The 1Password item is baked in at build time (`op-freeagent.override { item = "..."; }`
+The 1Password item is baked in at build time (`op-freeagent.withConfig { item = "..."; }`
 in home-ops) and can be overridden via environment:
 
 - `OP_FREEAGENT_ITEM` — 1Password item holding `client_id`, `client_secret`,

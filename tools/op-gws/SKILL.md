@@ -40,7 +40,7 @@ domain, pick the matching account from this list; otherwise the default applies.
 
 ## Configuration
 
-Account-to-item mappings are baked in at build time (`op-gws.override { accounts = ...; }`
+Account-to-item mappings are baked in at build time (`op-gws.withConfig { accounts = ...; }`
 in home-ops) and can be overridden via environment:
 
 - `OP_GWS_ITEMS` — comma-separated `<account>=<1password-item>` pairs
