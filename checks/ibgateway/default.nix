@@ -7,7 +7,7 @@ mkToolTest {
   name = "ibgateway";
   src = ../../tools/ibgateway;
   tests = [
-    ../../tools/ibgateway/tests/test-runtime-pinning.sh
+    ../../tools/ibgateway/tests/test-installer-acquisition.sh
     ../../tools/ibgateway/tests/test-network-isolation.sh
   ];
   meta.platforms = lib.platforms.linux;
