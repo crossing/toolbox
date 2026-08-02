@@ -18,9 +18,9 @@ if [[ "\$*" == *"item get"* ]]; then
     echo "mock-op: \$*" >&2
     cat <<JSON
 {"fields":[
-  {"label":"client_id","value":"mock-client-id"},
-  {"label":"client_secret","value":"mock-client-secret"},
-  {"label":"refresh_token","value":"mock-refresh-token"}
+  {"label":"gws_client_id","value":"mock-client-id"},
+  {"label":"gws_client_secret","value":"mock-client-secret"},
+  {"label":"gws_refresh_token","value":"mock-refresh-token"}
   \${MOCK_TOKEN_FIELDS:-}
 ]}
 JSON
@@ -74,13 +74,13 @@ echo "  Success: unconfigured invocation is rejected."
 OUTPUT=$(OP_GWS_ITEM="my-item" bash "$OP_GWS" drive files list 2>&1)
 echo "$OUTPUT" | grep -q "mock-curl: .*grant_type=refresh_token" || fail "curl refresh grant not called"
 echo "$OUTPUT" | grep -q "mock-curl: .*refresh_token=mock-refresh-token" || fail "stored refresh token not sent"
-echo "$OUTPUT" | grep -q "mock-op: item edited with item edit my-item access_token\[password\]=minted-token" \
+echo "$OUTPUT" | grep -q "mock-op: item edited with item edit my-item gws_access_token\[password\]=minted-token" \
     || fail "minted token not saved"
 echo "$OUTPUT" | grep -q "mock-gws: token=minted-token args=drive files list" || fail "gws not exec'd with minted token"
 echo "  Success: expired/missing token is refreshed and cached."
 
 # 3. Cached token still valid -> no curl call, cached token used.
-export MOCK_TOKEN_FIELDS=',{"label":"access_token","value":"cached-token"},{"label":"expires_at","value":"9999999999"}'
+export MOCK_TOKEN_FIELDS=',{"label":"gws_access_token","value":"cached-token"},{"label":"gws_expires_at","value":"9999999999"}'
 OUTPUT=$(OP_GWS_ITEM="my-item" bash "$OP_GWS" drive files list 2>&1)
 echo "$OUTPUT" | grep -q "mock-curl" && fail "curl called despite valid cached token"
 echo "$OUTPUT" | grep -q "mock-gws: token=cached-token args=drive files list" || fail "cached token not used"

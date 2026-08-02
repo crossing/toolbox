@@ -37,12 +37,15 @@ in home-ops) and can be overridden via environment:
 
 ## Token handling
 
-1. Reads `client_id`, `client_secret`, `refresh_token`, and any cached
-   `access_token`/`expires_at` from the item (via `safe-op` when available).
+Fields are `gws_`-prefixed so the items can be ordinary Google login items shared with
+a human password.
+
+1. Reads `gws_client_id`, `gws_client_secret`, `gws_refresh_token`, and any cached
+   `gws_access_token`/`gws_expires_at` from the item (via `safe-op` when available).
 2. If the cached token has more than 5 minutes left, uses it — one op read, no network.
 3. Otherwise does a refresh-token grant against `https://oauth2.googleapis.com/token`
-   and writes the new `access_token` (password field) and `expires_at` (unix seconds)
-   back into the item.
+   and writes the new `gws_access_token` (password field) and `gws_expires_at` (unix
+   seconds) back into the item.
 
 ## Exit codes
 
@@ -58,9 +61,11 @@ Requires a Desktop-type OAuth client in a GCP project with the Workspace APIs en
 
 ```bash
 export GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$(mktemp -d)
+export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 gws auth login          # browser flow; pick the account
-gws auth export         # prints client id/secret + refresh token
-# Copy client_id, client_secret, refresh_token into the 1Password item, then:
+# Harvest without displaying: capture `gws auth export` with command substitution and
+# write gws_client_id (text), gws_client_secret and gws_refresh_token (password)
+# into the 1Password item with `op item edit`.
 rm -rf "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"; unset GOOGLE_WORKSPACE_CLI_CONFIG_DIR
 ```
 

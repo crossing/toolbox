@@ -100,18 +100,20 @@ fi
 
 ITEM_JSON=$($OP_CMD item get "$ITEM" "${VAULT_ARGS[@]}" --format json)
 
+# Fields are gws_-prefixed: the items are ordinary Google login items shared with a
+# human password, and the prefix keeps the OAuth machinery visually separate.
 field() {
     jq -r --arg l "$1" '[.fields[] | select(.label == $l) | .value // empty][0] // empty' <<< "$ITEM_JSON"
 }
 
-CLIENT_ID=$(field client_id)
-CLIENT_SECRET=$(field client_secret)
-REFRESH_TOKEN=$(field refresh_token)
-ACCESS_TOKEN=$(field access_token)
-EXPIRES_AT=$(field expires_at)
+CLIENT_ID=$(field gws_client_id)
+CLIENT_SECRET=$(field gws_client_secret)
+REFRESH_TOKEN=$(field gws_refresh_token)
+ACCESS_TOKEN=$(field gws_access_token)
+EXPIRES_AT=$(field gws_expires_at)
 
-if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" || -z "$REFRESH_TOKEN" ]]; then
-    echo "Error: item '$ITEM' must have client_id, client_secret, and refresh_token fields." >&2
+if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" || -z "$REFRESH_TOKEN" || "$REFRESH_TOKEN" == "REPLACE_ME" ]]; then
+    echo "Error: item '$ITEM' must have gws_client_id, gws_client_secret, and gws_refresh_token fields." >&2
     echo "See the op-gws skill for the one-time onboarding steps (gws auth login/export)." >&2
     exit 2
 fi
@@ -148,8 +150,8 @@ if [[ "$FRESH" == false ]]; then
     EXPIRES_AT=$((NOW + EXPIRES_IN))
 
     op item edit "$ITEM" "${VAULT_ARGS[@]}" \
-        "access_token[password]=$ACCESS_TOKEN" \
-        "expires_at[text]=$EXPIRES_AT" > /dev/null
+        "gws_access_token[password]=$ACCESS_TOKEN" \
+        "gws_expires_at[text]=$EXPIRES_AT" > /dev/null
 fi
 
 GOOGLE_WORKSPACE_CLI_TOKEN="$ACCESS_TOKEN" exec gws "$@"
