@@ -44,8 +44,10 @@ if command -v safe-op &> /dev/null; then
 fi
 
 echo "Retrieving client credentials from 1Password item: $ITEM" >&2
-CLIENT_ID=$($OP_CMD item get "$ITEM" --field label=client_id)
-CLIENT_SECRET=$($OP_CMD item get "$ITEM" --field label=client_secret)
+# --reveal matters: for concealed fields op otherwise returns the op:// secret
+# reference, not the value. It is a no-op for plain text fields.
+CLIENT_ID=$($OP_CMD item get "$ITEM" --field label=client_id --reveal)
+CLIENT_SECRET=$($OP_CMD item get "$ITEM" --field label=client_secret --reveal)
 
 if [[ -z "$CLIENT_ID" ]] || [[ -z "$CLIENT_SECRET" ]]; then
     echo "Error: Could not find client_id or client_secret in item '$ITEM'." >&2

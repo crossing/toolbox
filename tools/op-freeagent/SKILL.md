@@ -57,6 +57,7 @@ interactive flow seeds the tokens:
 ```bash
 op-oauth2c "FreeAgent" https://api.freeagent.com \
   --grant-type authorization_code \
+  --response-types code --response-mode query \
   --authorization-endpoint https://api.freeagent.com/v2/approve_app \
   --token-endpoint https://api.freeagent.com/v2/token_endpoint \
   --auth-method client_secret_basic

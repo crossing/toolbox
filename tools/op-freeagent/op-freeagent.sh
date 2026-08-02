@@ -40,7 +40,8 @@ if command -v safe-op &> /dev/null; then
 fi
 
 read_token() {
-    $OP_CMD item get "$OP_FREEAGENT_ITEM" --field label=access_token
+    # --reveal: concealed fields otherwise come back as op:// references.
+    $OP_CMD item get "$OP_FREEAGENT_ITEM" --field label=access_token --reveal
 }
 
 refresh_tokens() {
