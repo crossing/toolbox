@@ -324,36 +324,29 @@ fi
 if [ ! -f "$install_marker_path" ]; then
   acquire_installer
   echo "Installing $APP_LABEL to $INSTALL_DIR..."
-  I4J_TEMP=$(mktemp -d)
-  chmod 777 "$I4J_TEMP"
 
-  echo "Step 1: Running installer..."
+  # Install and capture the bundled JRE in ONE container run: install4j unpacks the
+  # JRE under the passwd home of the mapped uid (e.g. /home/ubuntu/.local/share/
+  # i4j_jres -- NOT $HOME, which it ignores; 10.48 used /opt/i4j_jres instead), and
+  # that location is ephemeral container filesystem, gone once this run exits.
+  echo "Running installer and capturing the bundled JRE..."
   podman run --rm \
     --userns=keep-id \
     -u "$USER_ID:$GROUP_ID" \
     -v "$INSTALL_DIR:/opt/ibgateway/latest" \
-    -v "$I4J_TEMP:/opt/i4j_jres" \
     -v "$INSTALLER_PATH:/tmp/$APP_ID-installer.sh:ro" \
     -e "HOME=/home/ibgateway" \
     "$IMAGE_NAME" \
-    bash -c "INSTALL4J_KEEP_TEMP=true bash /tmp/$APP_ID-installer.sh -q -dir '/opt/ibgateway/latest'"
-
-  echo "Installer finished. Proceeding to Step 2..."
-
-  echo "Step 2: Relocating JRE and fixing permissions..."
-  podman run --rm \
-    --userns=keep-id \
-    -u "$USER_ID:$GROUP_ID" \
-    -v "$INSTALL_DIR:/opt/ibgateway/latest" \
-    -v "$I4J_TEMP:/opt/i4j_jres" \
-    -e "HOME=/home/ibgateway" \
-    "$IMAGE_NAME" \
-    bash -c "JRE_BIN=\$(find /opt/i4j_jres -maxdepth 3 -name bin -type d | head -n 1) ; \
+    bash -c "set -e ; \
+             INSTALL4J_KEEP_TEMP=true bash /tmp/$APP_ID-installer.sh -q -dir '/opt/ibgateway/latest' ; \
+             JRE_BIN=\$(find /opt/i4j_jres /home/*/.local/share/i4j_jres \"\$HOME/.local/share/i4j_jres\" -maxdepth 3 -name bin -type d 2>/dev/null | head -n 1) ; \
              if [ -n \"\$JRE_BIN\" ]; then \
                JRE_DIR=\$(dirname \"\$JRE_BIN\") ; \
-               echo \"Moving bundled JRE from \$JRE_DIR to /opt/ibgateway/latest/jre...\" ; \
+               echo \"Capturing bundled JRE from \$JRE_DIR to /opt/ibgateway/latest/jre...\" ; \
                mkdir -p '/opt/ibgateway/latest/jre' ; \
                cp -r \"\$JRE_DIR\"/* '/opt/ibgateway/latest/jre/' ; \
+             else \
+               echo 'WARNING: no bundled JRE found after install; the gateway launcher will likely fail' >&2 ; \
              fi ; \
              if [ -f '/opt/ibgateway/latest/ibgateway' ]; then \
                sed -i 's/ver_minor -lt 16/ver_minor -lt 0/' '/opt/ibgateway/latest/ibgateway' ; \
@@ -361,7 +354,6 @@ if [ ! -f "$install_marker_path" ]; then
              fi ; \
              chown -R $USER_ID:$GROUP_ID '/opt/ibgateway/latest'"
 
-  rm -rf "$I4J_TEMP"
   cleanup_installer
 fi
 

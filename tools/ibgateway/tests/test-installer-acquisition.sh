@@ -32,6 +32,11 @@ grep -q 'IBCLinux-${ibcVersion}.zip' "$package" \
 
 grep -Fq '$INSTALLER_PATH:/tmp/$APP_ID-installer.sh:ro' "$wrapper" \
   || fail "wrapper does not mount the acquired installer"
+# The stable-channel installer unpacks its JRE under the mapped uid's passwd home
+# (found the hard way on 10.45: /home/ubuntu, not $HOME, not /opt/i4j_jres). The JRE
+# search must cover all drop locations and run in the same container as the install.
+grep -Fq '/home/*/.local/share/i4j_jres' "$wrapper" \
+  || fail "wrapper does not search passwd-home install4j JRE drop locations"
 
 # --- Functional: mocked podman/curl ------------------------------------------
 
