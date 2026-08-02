@@ -4,9 +4,11 @@
 # 1Password. One 1Password item per Google account; nothing touches disk.
 #
 # Usage: op-gws [<account>] <gws args...>
+#        op-gws --accounts            list configured accounts as JSON
 #
 # Configuration (baked in by package.nix, environment always wins):
 #   OP_GWS_ITEMS            comma-separated <account>=<1password-item> pairs
+#   OP_GWS_ACCOUNT_NOTES    comma-separated <account>=<note> pairs for --accounts
 #   OP_GWS_DEFAULT_ACCOUNT  account used when the first argument names no account
 #   OP_GWS_VAULT            optional 1Password vault to scope item lookups
 #   OP_GWS_ITEM             direct item override; skips account resolution entirely
@@ -19,6 +21,7 @@
 set -euo pipefail
 
 : "${OP_GWS_ITEMS:=}"
+: "${OP_GWS_ACCOUNT_NOTES:=}"
 : "${OP_GWS_DEFAULT_ACCOUNT:=}"
 : "${OP_GWS_VAULT:=}"
 : "${OP_GWS_ITEM:=}"
@@ -53,6 +56,29 @@ if [[ -n "$OP_GWS_ITEMS" ]]; then
         fi
         ACCOUNT_ITEMS["$name"]="$item"
     done
+fi
+
+# --accounts: emit the configured account names (with optional notes and the default
+# marker) as JSON, so agents and skills can discover at runtime which accounts exist
+# and what each is for. Names and notes only -- no item references, no op calls.
+if [[ "${1:-}" == "--accounts" ]]; then
+    declare -A ACCOUNT_NOTES=()
+    if [[ -n "$OP_GWS_ACCOUNT_NOTES" ]]; then
+        IFS=',' read -ra npairs <<< "$OP_GWS_ACCOUNT_NOTES"
+        for pair in "${npairs[@]}"; do
+            [[ -z "$pair" || "${pair%%=*}" == "$pair" ]] && continue
+            ACCOUNT_NOTES["${pair%%=*}"]="${pair#*=}"
+        done
+    fi
+    for name in "${!ACCOUNT_ITEMS[@]}"; do
+        is_default=false
+        if [[ "$name" == "$OP_GWS_DEFAULT_ACCOUNT" ]]; then
+            is_default=true
+        fi
+        jq -n --arg account "$name" --arg note "${ACCOUNT_NOTES[$name]:-}" \
+            --argjson default "$is_default" '{account: $account, note: $note, default: $default}'
+    done | jq -cs 'sort_by(.account)'
+    exit 0
 fi
 
 # Resolve which 1Password item to use. Precedence: OP_GWS_ITEM, then a leading

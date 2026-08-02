@@ -66,7 +66,7 @@
           packages = snowfallOutputs.packages.${prev.stdenv.hostPlatform.system};
         in
         {
-          inherit (packages) safe-op op-oauth2c op-gws op-gws-onboard freeagent op-freeagent toolbox-skills;
+          inherit (packages) safe-op op-oauth2c op-gws op-gws-onboard patch-gws-skills freeagent op-freeagent toolbox-skills;
         }
         // lib.optionalAttrs prev.stdenv.hostPlatform.isLinux {
           inherit (packages) ibkr-cli ibgateway ibkr-local;

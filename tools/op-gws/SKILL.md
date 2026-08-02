@@ -25,6 +25,19 @@ op-gws drive files list --params '{"pageSize": 10}'   # default account
 
 Do not call bare `gws` for data access — it has no credentials configured.
 
+## Discovering accounts
+
+```bash
+op-gws --accounts
+# [{"account":"personal","note":"home stuff","default":false},
+#  {"account":"work","note":"org account","default":true}]
+```
+
+This is the canonical way for an agent (or another skill) to learn which Google
+accounts are available and what each is for: names, free-text notes, and the default
+marker — never item references or secrets. When a task names a person, mailbox, or
+domain, pick the matching account from this list; otherwise the default applies.
+
 ## Configuration
 
 Account-to-item mappings are baked in at build time (`op-gws.override { accounts = ...; }`
