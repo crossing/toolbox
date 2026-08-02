@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 
 # op-oauth2c: OAuth2 flow with 1Password integration
-# Usage: op-oauth2c <1password-item> <oauth-issuer-url>
+# Usage:
+#   op-oauth2c <1password-item> <oauth-issuer-url> [flags...]            interactive flow
+#   op-oauth2c --refresh <1password-item> <oauth-issuer-url> [flags...]  refresh grant
 
 set -euo pipefail
 
+MODE="interactive"
+if [[ "${1:-}" == "--refresh" ]]; then
+    MODE="refresh"
+    shift
+fi
+
 if [[ $# -lt 2 ]]; then
-    echo "Usage: op-oauth2c <1password-item> <oauth-issuer-url> [additional-oauth2c-flags...]" >&2
+    {
+        echo "Usage: op-oauth2c <1password-item> <oauth-issuer-url> [additional-oauth2c-flags...]"
+        echo "       op-oauth2c --refresh <1password-item> <oauth-issuer-url> [additional-oauth2c-flags...]"
+        echo ""
+        echo "--refresh exchanges the item's stored refresh_token for new tokens without"
+        echo "any browser interaction."
+    } >&2
     exit 1
 fi
 
@@ -30,18 +44,36 @@ if command -v safe-op &> /dev/null; then
 fi
 
 echo "Retrieving client credentials from 1Password item: $ITEM" >&2
-CLIENT_ID=$($OP_CMD item get "$ITEM" --field label=client_id)
-CLIENT_SECRET=$($OP_CMD item get "$ITEM" --field label=client_secret)
+# --reveal matters: for concealed fields op otherwise returns the op:// secret
+# reference, not the value. It is a no-op for plain text fields.
+CLIENT_ID=$($OP_CMD item get "$ITEM" --field label=client_id --reveal)
+CLIENT_SECRET=$($OP_CMD item get "$ITEM" --field label=client_secret --reveal)
 
 if [[ -z "$CLIENT_ID" ]] || [[ -z "$CLIENT_SECRET" ]]; then
     echo "Error: Could not find client_id or client_secret in item '$ITEM'." >&2
     exit 1
 fi
 
-echo "Starting OAuth2 flow for $ISSUER..." >&2
-# Run oauth2c. It will output JSON to stdout.
-# We pass through any additional flags.
-TOKEN_JSON=$(oauth2c "$ISSUER" --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" "$@")
+if [[ "$MODE" == "refresh" ]]; then
+    # The refresh_token field is concealed (password type), so op needs --reveal.
+    # safe-op allows this inside command substitution because stdout is a pipe.
+    REFRESH_TOKEN=$($OP_CMD item get "$ITEM" --field label=refresh_token --reveal)
+
+    if [[ -z "$REFRESH_TOKEN" ]]; then
+        echo "Error: Item '$ITEM' has no refresh_token. Run the interactive flow first:" >&2
+        echo "  op-oauth2c '$ITEM' '$ISSUER' ..." >&2
+        exit 1
+    fi
+
+    echo "Refreshing tokens for $ISSUER..." >&2
+    TOKEN_JSON=$(oauth2c "$ISSUER" --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" \
+        --grant-type refresh_token --refresh-token "$REFRESH_TOKEN" "$@")
+else
+    echo "Starting OAuth2 flow for $ISSUER..." >&2
+    # Run oauth2c. It will output JSON to stdout.
+    # We pass through any additional flags.
+    TOKEN_JSON=$(oauth2c "$ISSUER" --client-id "$CLIENT_ID" --client-secret "$CLIENT_SECRET" "$@")
+fi
 
 if [[ -z "$TOKEN_JSON" ]]; then
     echo "Error: oauth2c produced no output." >&2

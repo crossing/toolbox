@@ -6,7 +6,9 @@ let
   tools = [
     { name = "safe-op"; skill = ../../tools/safe-op/SKILL.md; }
     { name = "op-oauth2c"; skill = ../../tools/op-oauth2c/SKILL.md; }
+    { name = "op-gws"; skill = ../../tools/op-gws/SKILL.md; }
     { name = "freeagent"; skill = ../../tools/freeagent/SKILL.md; }
+    { name = "op-freeagent"; skill = ../../tools/op-freeagent/SKILL.md; }
     { name = "ibkr-local"; skill = ../../tools/ibkr-local/SKILL.md; }
   ];
 in

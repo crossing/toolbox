@@ -21,6 +21,8 @@ if [[ "\$*" == *"item get"* ]]; then
         echo "mock-client-id"
     elif [[ "\$*" == *"client_secret"* ]]; then
         echo "mock-client-secret"
+    elif [[ "\$*" == *"refresh_token"* ]]; then
+        echo "mock-stored-refresh-token"
     fi
 elif [[ "\$*" == *"item edit"* ]]; then
     echo "mock-op: item edited with \$*" >&2
@@ -40,6 +42,7 @@ chmod +x "$MOCK_SAFE_OP"
 MOCK_OAUTH2C="$TEST_DIR/bin/oauth2c"
 cat > "$MOCK_OAUTH2C" <<EOF
 #!$(command -v bash)
+echo "mock-oauth2c: called with \$*" >&2
 echo '{"access_token": "mock-access-token", "refresh_token": "mock-refresh-token"}'
 EOF
 chmod +x "$MOCK_OAUTH2C"
@@ -81,6 +84,32 @@ if echo "$OUTPUT" | grep -q "mock-op: item edited with item edit my-item refresh
     echo "  Success: refresh_token was saved."
 else
     echo "  Failure: refresh_token save command not found."
+    exit 1
+fi
+
+# --refresh mode: must read the stored refresh_token and pass the refresh grant to oauth2c.
+OUTPUT=$(bash "$OP_OAUTH2C" --refresh "my-item" "https://issuer.com" 2>&1)
+
+echo "$OUTPUT"
+
+if echo "$OUTPUT" | grep -q "Refreshing tokens for https://issuer.com"; then
+    echo "  Success: refresh mode selected."
+else
+    echo "  Failure: refresh mode was not selected."
+    exit 1
+fi
+
+if echo "$OUTPUT" | grep -q -- "--grant-type refresh_token --refresh-token mock-stored-refresh-token"; then
+    echo "  Success: refresh grant passed to oauth2c."
+else
+    echo "  Failure: refresh grant not passed to oauth2c."
+    exit 1
+fi
+
+if echo "$OUTPUT" | grep -q "mock-op: item edited with item edit my-item access_token\[text\]=mock-access-token"; then
+    echo "  Success: refreshed access_token was saved."
+else
+    echo "  Failure: refreshed access_token save command not found."
     exit 1
 fi
 

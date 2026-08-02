@@ -11,18 +11,37 @@ Performs an OAuth2 flow without any token touching disk. Credentials come out of
 ## Usage
 
 ```bash
-op-oauth2c <1password-item> <oauth-issuer-url> [extra oauth2c flags]
+op-oauth2c <1password-item> <oauth-issuer-url> [extra oauth2c flags]            # interactive
+op-oauth2c --refresh <1password-item> <oauth-issuer-url> [extra oauth2c flags]  # non-interactive
 ```
 
-Example:
+`--refresh` exchanges the item's stored `refresh_token` for a new access token without a
+browser. Use it whenever a stored access token has expired; fall back to the interactive
+flow only when there is no refresh token yet (first run) or the refresh grant is
+rejected.
+
+FreeAgent example (FreeAgent has no OIDC discovery document, so the endpoints must be
+given explicitly):
 
 ```bash
-op-oauth2c "FreeAgent Dev" https://api.freeagent.com
+# First run — browser flow, seeds access_token + refresh_token in the item:
+op-oauth2c "FreeAgent" https://api.freeagent.com \
+  --grant-type authorization_code \
+  --response-types code --response-mode query \
+  --authorization-endpoint https://api.freeagent.com/v2/approve_app \
+  --token-endpoint https://api.freeagent.com/v2/token_endpoint \
+  --auth-method client_secret_basic
+
+# Every renewal after that — no browser:
+op-oauth2c --refresh "FreeAgent" https://api.freeagent.com \
+  --token-endpoint https://api.freeagent.com/v2/token_endpoint \
+  --auth-method client_secret_basic
 ```
 
 ## What it does
 
-1. Reads `client_id` and `client_secret` from the named 1Password item.
+1. Reads `client_id` and `client_secret` from the named 1Password item (and, with
+   `--refresh`, the stored `refresh_token`).
 2. Runs the `oauth2c` flow against the issuer.
 3. Writes `access_token` (text field) and `refresh_token` (password field) back to that
    same item.
