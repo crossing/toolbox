@@ -41,6 +41,13 @@ Environment:
 USAGE
 
   cat <<'USAGE'
+  IBGATEWAY_CHANNEL           Installer channel: stable (default) or latest.
+  IBGATEWAY_INSTALLER         Local installer file to use; skips the download.
+  IBGATEWAY_INSTALLER_URL     Full installer URL override.
+  IBGATEWAY_INSTALLER_SHA256  Refuse any installer with a different checksum.
+USAGE
+
+  cat <<'USAGE'
   IBGATEWAY_DIR            Gateway install directory alias.
   IBGATEWAY_CONFIG_DIR     Gateway Jts config directory alias.
   IBGATEWAY_LOG_DIR        Gateway log directory alias.
@@ -229,7 +236,77 @@ if [ "$APP_MODE" = "ibc" ]; then
 fi
 
 DOCKERFILE="${DOCKERFILE:?DOCKERFILE is required}"
-IBGATEWAY_INSTALLER="${IBGATEWAY_INSTALLER:?IBGATEWAY_INSTALLER is required}"
+
+# IB publishes the gateway only at mutable channel URLs -- there is no versioned
+# archive -- so the installer is fetched here at install time instead of in the nix
+# build, where a fixed-output hash would break on every IB release. Integrity is
+# handled by trust-on-first-use provenance plus an optional hard pin.
+INSTALLER_CHANNEL="${IBGATEWAY_CHANNEL:-stable}"
+case "$INSTALLER_CHANNEL" in
+  stable|latest)
+    ;;
+  *)
+    echo "$APP_CLI_NAME: unsupported IBGATEWAY_CHANNEL: $INSTALLER_CHANNEL (use stable or latest)" >&2
+    exit 2
+    ;;
+esac
+INSTALLER_URL="${IBGATEWAY_INSTALLER_URL:-https://download2.interactivebrokers.com/installers/ibgateway/${INSTALLER_CHANNEL}-standalone/ibgateway-${INSTALLER_CHANNEL}-standalone-linux-x64.sh}"
+
+INSTALLER_PATH=""
+installer_tmp=""
+
+acquire_installer() {
+  if [ -n "${IBGATEWAY_INSTALLER:-}" ]; then
+    INSTALLER_PATH="$IBGATEWAY_INSTALLER"
+    if [ ! -f "$INSTALLER_PATH" ]; then
+      echo "$APP_CLI_NAME: IBGATEWAY_INSTALLER points at a missing file: $INSTALLER_PATH" >&2
+      exit 2
+    fi
+  else
+    installer_tmp=$(mktemp -d)
+    INSTALLER_PATH="$installer_tmp/$APP_ID-installer.sh"
+    echo "Downloading $APP_LABEL installer ($INSTALLER_CHANNEL channel)..."
+    curl -fL --retry 3 -o "$INSTALLER_PATH" "$INSTALLER_URL"
+  fi
+
+  local installer_sha previous_sha provenance_file
+  installer_sha=$(sha256sum "$INSTALLER_PATH" | cut -d' ' -f1)
+
+  if [ -n "${IBGATEWAY_INSTALLER_SHA256:-}" ] && [ "$installer_sha" != "$IBGATEWAY_INSTALLER_SHA256" ]; then
+    echo "$APP_CLI_NAME: installer sha256 mismatch" >&2
+    echo "  expected: $IBGATEWAY_INSTALLER_SHA256" >&2
+    echo "  actual:   $installer_sha" >&2
+    exit 1
+  fi
+
+  # Trust-on-first-use: the provenance file lives in CONFIG_DIR so it survives an
+  # install-dir wipe, which is exactly when the comparison matters.
+  provenance_file="$CONFIG_DIR/installer-provenance"
+  if [ -f "$provenance_file" ]; then
+    previous_sha=$(sed -n 's/^sha256=//p' "$provenance_file" | head -n 1)
+    if [ -n "$previous_sha" ] && [ "$previous_sha" != "$installer_sha" ]; then
+      {
+        echo "WARNING: $APP_LABEL installer checksum changed since the last install."
+        echo "  previous: $previous_sha"
+        echo "  current:  $installer_sha"
+        echo "  Expected when IB ships a new $INSTALLER_CHANNEL release. Set"
+        echo "  IBGATEWAY_INSTALLER_SHA256 to refuse unexpected installers."
+      } >&2
+    fi
+  fi
+  {
+    echo "sha256=$installer_sha"
+    echo "source=${IBGATEWAY_INSTALLER:-$INSTALLER_URL}"
+    echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$provenance_file"
+}
+
+cleanup_installer() {
+  if [ -n "$installer_tmp" ]; then
+    rm -rf "$installer_tmp"
+    installer_tmp=""
+  fi
+}
 
 IMAGE_NAME="$APP_ID:$(md5sum "$DOCKERFILE" | cut -c1-8)"
 USER_ID=$(id -u)
@@ -245,37 +322,31 @@ if ! podman image exists "$IMAGE_NAME" 2>/dev/null; then
 fi
 
 if [ ! -f "$install_marker_path" ]; then
+  acquire_installer
   echo "Installing $APP_LABEL to $INSTALL_DIR..."
-  I4J_TEMP=$(mktemp -d)
-  chmod 777 "$I4J_TEMP"
 
-  echo "Step 1: Running installer..."
+  # Install and capture the bundled JRE in ONE container run: install4j unpacks the
+  # JRE under the passwd home of the mapped uid (e.g. /home/ubuntu/.local/share/
+  # i4j_jres -- NOT $HOME, which it ignores; 10.48 used /opt/i4j_jres instead), and
+  # that location is ephemeral container filesystem, gone once this run exits.
+  echo "Running installer and capturing the bundled JRE..."
   podman run --rm \
     --userns=keep-id \
     -u "$USER_ID:$GROUP_ID" \
     -v "$INSTALL_DIR:/opt/ibgateway/latest" \
-    -v "$I4J_TEMP:/opt/i4j_jres" \
-    -v "$IBGATEWAY_INSTALLER:/tmp/$APP_ID-installer.sh:ro" \
+    -v "$INSTALLER_PATH:/tmp/$APP_ID-installer.sh:ro" \
     -e "HOME=/home/ibgateway" \
     "$IMAGE_NAME" \
-    bash -c "INSTALL4J_KEEP_TEMP=true bash /tmp/$APP_ID-installer.sh -q -dir '/opt/ibgateway/latest'"
-
-  echo "Installer finished. Proceeding to Step 2..."
-
-  echo "Step 2: Relocating JRE and fixing permissions..."
-  podman run --rm \
-    --userns=keep-id \
-    -u "$USER_ID:$GROUP_ID" \
-    -v "$INSTALL_DIR:/opt/ibgateway/latest" \
-    -v "$I4J_TEMP:/opt/i4j_jres" \
-    -e "HOME=/home/ibgateway" \
-    "$IMAGE_NAME" \
-    bash -c "JRE_BIN=\$(find /opt/i4j_jres -maxdepth 3 -name bin -type d | head -n 1) ; \
+    bash -c "set -e ; \
+             INSTALL4J_KEEP_TEMP=true bash /tmp/$APP_ID-installer.sh -q -dir '/opt/ibgateway/latest' ; \
+             JRE_BIN=\$(find /opt/i4j_jres /home/*/.local/share/i4j_jres \"\$HOME/.local/share/i4j_jres\" -maxdepth 3 -name bin -type d 2>/dev/null | head -n 1) ; \
              if [ -n \"\$JRE_BIN\" ]; then \
                JRE_DIR=\$(dirname \"\$JRE_BIN\") ; \
-               echo \"Moving bundled JRE from \$JRE_DIR to /opt/ibgateway/latest/jre...\" ; \
+               echo \"Capturing bundled JRE from \$JRE_DIR to /opt/ibgateway/latest/jre...\" ; \
                mkdir -p '/opt/ibgateway/latest/jre' ; \
                cp -r \"\$JRE_DIR\"/* '/opt/ibgateway/latest/jre/' ; \
+             else \
+               echo 'WARNING: no bundled JRE found after install; the gateway launcher will likely fail' >&2 ; \
              fi ; \
              if [ -f '/opt/ibgateway/latest/ibgateway' ]; then \
                sed -i 's/ver_minor -lt 16/ver_minor -lt 0/' '/opt/ibgateway/latest/ibgateway' ; \
@@ -283,7 +354,7 @@ if [ ! -f "$install_marker_path" ]; then
              fi ; \
              chown -R $USER_ID:$GROUP_ID '/opt/ibgateway/latest'"
 
-  rm -rf "$I4J_TEMP"
+  cleanup_installer
 fi
 
 restore_ibc_launchers

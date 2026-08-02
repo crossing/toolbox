@@ -1,13 +1,12 @@
-{ lib, fetchurl, stdenvNoCC, unzip, writeShellApplication, symlinkJoin, makeDesktopItem, podman, coreutils, findutils, gnused, xvfb-run }:
+{ lib, fetchurl, stdenvNoCC, unzip, writeShellApplication, symlinkJoin, makeDesktopItem, podman, coreutils, curl, findutils, gnused, xvfb-run }:
 
+# The IB Gateway installer is deliberately NOT fetched here. IB only serves mutable
+# channel URLs (latest/stable) with no versioned archive, so a fixed-output fetch
+# breaks every time IB releases. The wrapper downloads the installer at install time
+# instead, with trust-on-first-use provenance and an optional sha256 pin. IBC below
+# stays pinned: it has real versioned release URLs.
 let
   ibcVersion = "3.24.1";
-  ibgatewayVersion = "10.48";
-  ibgatewayInstaller = fetchurl {
-    name = "ibgateway-${ibgatewayVersion}-standalone-linux-x64.sh";
-    url = "https://download2.interactivebrokers.com/installers/ibgateway/latest-standalone/ibgateway-latest-standalone-linux-x64.sh";
-    hash = "sha256-5zwXjP5B7Qfe/so7OggmZY8p1XgKj9dZSGjrvoSQ9Fs=";
-  };
   ibc = stdenvNoCC.mkDerivation {
     pname = "ibc";
     version = ibcVersion;
@@ -26,13 +25,12 @@ let
   };
   wrapper = writeShellApplication {
     name = "ibgateway";
-    runtimeInputs = [ podman coreutils findutils gnused xvfb-run ];
+    runtimeInputs = [ podman coreutils curl findutils gnused xvfb-run ];
     text = builtins.readFile ./wrapper.sh;
     runtimeEnv = {
       DOCKERFILE = ./Dockerfile;
       IBC_DIR = ibc;
       IBC_VERSION = ibcVersion;
-      IBGATEWAY_INSTALLER = ibgatewayInstaller;
     };
   };
 in
