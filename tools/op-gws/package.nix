@@ -6,6 +6,7 @@
 , gws
 , safe-op
 , accounts ? { }
+, accountNotes ? { }
 , defaultAccount ? null
 , vault ? null
 }:
@@ -22,10 +23,15 @@
 let
   itemsSpec = lib.concatStringsSep ","
     (lib.mapAttrsToList (name: item: "${name}=${item}") accounts);
+  # Free-text notes surfaced by `op-gws --accounts`; same pair encoding as the item
+  # map, so notes must not contain `,` or `=`.
+  notesSpec = lib.concatStringsSep ","
+    (lib.mapAttrsToList (name: note: "${name}=${note}") accountNotes);
 
   bakedConfig = ''
     # Build-time configuration; the environment always wins.
     : "''${OP_GWS_ITEMS:=${itemsSpec}}"
+    : "''${OP_GWS_ACCOUNT_NOTES:=${notesSpec}}"
     ${lib.optionalString (defaultAccount != null) '': "''${OP_GWS_DEFAULT_ACCOUNT:=${defaultAccount}}"''}
     ${lib.optionalString (vault != null) '': "''${OP_GWS_VAULT:=${vault}}"''}
   '';

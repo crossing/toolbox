@@ -6,6 +6,7 @@
 callPackage ../../tools/op-gws/package.nix {
   inherit (pkgs.${namespace}) safe-op;
   accounts = { };
+  accountNotes = { };
   defaultAccount = null;
   vault = null;
 }

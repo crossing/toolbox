@@ -107,4 +107,17 @@ echo "$OUTPUT" | grep -q "mock-op: item get my-item --vault Private --format jso
 echo "  Success: vault scoping is applied."
 unset MOCK_TOKEN_FIELDS
 
+# 7. --accounts: JSON listing with notes and default marker, sorted, no op calls.
+OUTPUT=$(OP_GWS_ITEMS="work=gws-work,personal=gws-personal" OP_GWS_DEFAULT_ACCOUNT="work" \
+    OP_GWS_ACCOUNT_NOTES="work=org account,personal=home stuff" bash "$OP_GWS" --accounts 2>&1)
+echo "$OUTPUT" | grep -qF '[{"account":"personal","note":"home stuff","default":false},{"account":"work","note":"org account","default":true}]' \
+    || fail "--accounts JSON incorrect"
+echo "$OUTPUT" | grep -q "mock-op" && fail "op was called for --accounts"
+echo "  Success: --accounts lists accounts with notes and default."
+
+# 8. --accounts without any configuration -> empty array, exit 0.
+OUTPUT=$(bash "$OP_GWS" --accounts 2>&1)
+[ "$OUTPUT" = "[]" ] || fail "--accounts with no config should print []"
+echo "  Success: --accounts with no config prints []."
+
 echo "All op-gws tests passed!"
