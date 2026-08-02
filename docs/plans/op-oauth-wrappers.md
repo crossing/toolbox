@@ -20,7 +20,7 @@ Everything a human still has to do, in order; details in the sections below.
 - [ ] FreeAgent: create the app at dev.freeagent.com, then run the one interactive
       `op-oauth2c` seed flow (command below).
 - [ ] home-ops: install `op-gws`/`op-freeagent` from `overlays.default` with the
-      `.override` item references (snippet below), plus `toolbox-skills`.
+      `.withConfig` item references (snippet below), plus `toolbox-skills`.
 - [ ] Verify: `op-gws <account> drive files list --params '{"pageSize": 1}'` per
       account, and `op-freeagent bills list`.
 
@@ -40,16 +40,16 @@ Everything a human still has to do, in order; details in the sections below.
   runs `op-oauth2c --refresh` and retries exactly once.
 
 Configuration is baked in as environment-variable *defaults* (the environment always
-wins), so consumers configure concrete 1Password item references with `.override`:
+wins), so consumers configure concrete 1Password item references with `.withConfig`:
 
 ```nix
 home.packages = with pkgs; [
-  (op-gws.override {
+  (op-gws.withConfig {
     accounts = { work = "gws-work"; personal = "gws-personal"; };
     defaultAccount = "work";
     vault = "Private";
   })
-  (op-freeagent.override { item = "FreeAgent"; })
+  (op-freeagent.withConfig { item = "FreeAgent"; })
 ];
 ```
 
@@ -104,5 +104,5 @@ op-oauth2c "FreeAgent" https://api.freeagent.com \
 ### home-ops
 
 Consume `op-gws` and `op-freeagent` from `overlays.default` (both are exported flat)
-and apply the `.override` configuration above. The SKILL.mds ship in `toolbox-skills`
+and apply the `.withConfig` configuration above. The SKILL.mds ship in `toolbox-skills`
 already; agents are told to use the wrappers and never bare `gws`/`freeagent`.
