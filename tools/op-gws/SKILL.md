@@ -63,9 +63,10 @@ Requires a Desktop-type OAuth client in a GCP project with the Workspace APIs en
 export GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$(mktemp -d)
 export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 gws auth login          # browser flow; pick the account
-# Harvest without displaying: capture `gws auth export` with command substitution and
-# write gws_client_id (text), gws_client_secret and gws_refresh_token (password)
-# into the 1Password item with `op item edit`.
+# Harvest without displaying: capture `gws auth export --unmasked` with command
+# substitution and write gws_client_id (text), gws_client_secret and
+# gws_refresh_token (password) into the 1Password item with `op item edit`.
+# Without --unmasked, gws masks the secrets ("GOCS...xyz") and you store junk.
 rm -rf "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"; unset GOOGLE_WORKSPACE_CLI_CONFIG_DIR
 ```
 
