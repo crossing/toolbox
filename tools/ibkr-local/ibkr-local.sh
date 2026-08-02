@@ -20,10 +20,11 @@ Profile options:
   --raw                    Print upstream JSON without local account filtering
 
 Flex history options:
+  --kind KIND              raw (default) | trades | transfers | dividends
   --flex-query NAME        Named profile Flex query (required when ambiguous)
   --from YYYY-MM-DD        First report date (requires --to)
   --to YYYY-MM-DD          Last report date, inclusive (requires --from)
-  -d, --days DAYS          Backward-compatible lookback ending today
+  -d, --days DAYS          Lookback ending today (default 365)
 
 Commands:
   doctor                   JSON connectivity/config diagnostic
@@ -31,10 +32,7 @@ Commands:
   positions                JSON positions with market value and P&L fields
   balances                 JSON account summary
   executions               JSON order executions
-  flex-trades              JSON Flex trades
-  transfers                JSON Flex transfers
-  dividends                JSON Flex dividends/cash transactions
-  flex-statement           JSON envelope of raw Flex statement XML chunks
+  flex                     JSON Flex history: raw statement XML chunks (default) or parsed rows
   order-preview buy|sell   What-if order preview only; --submit is blocked
   order-prepare buy|sell   Preview and create a short-lived guarded order ticket
   order-submit TICKET      Submit one prepared ticket with matching confirmation
@@ -46,8 +44,8 @@ Commands:
 Examples:
   ibkr positions --profile main-paper --group isa
   ibkr balances --profile main-live --account U1234567
-  ibkr flex-trades --profile main-live --flex-query tax-history --account U1234567 --from 2025-04-06 --to 2026-04-05
-  ibkr flex-statement --profile main-live --flex-query nav-daily --json
+  ibkr flex --profile main-live --flex-query nav-daily --json
+  ibkr flex --kind trades --profile main-live --flex-query tax-activity --account U1234567 --from 2025-04-06 --to 2026-04-05
   ibkr order-preview buy AAPL 1 --profile main-paper --limit 100 --json
 USAGE
 }
@@ -216,8 +214,6 @@ extract_json_payload() {
 }
 
 resolve_flex_dates() {
-  local kind=$1
-  shift
   local from_date="" to_date="" days=""
 
   while (($#)); do
@@ -253,11 +249,7 @@ resolve_flex_dates() {
     [[ -n "$from_date" && -n "$to_date" ]] || die "--from and --to must be provided together"
   else
     if [[ -z "$days" ]]; then
-      case "$kind" in
-        transfers) days=90 ;;
-        raw) days=365 ;;
-        *) days=30 ;;
-      esac
+      days=365
     fi
     [[ "$days" =~ ^[1-9][0-9]*$ ]] || die "--days must be a positive integer"
     to_date=$(date -I)
@@ -282,21 +274,23 @@ resolve_flex_dates() {
   flex_to_date=$to_date
 }
 
-run_flex_json() {
-  local profile=$1 group=$2 requested_account=$3 kind=$4
-  shift 4
+run_flex() {
+  local profile=$1 group=$2 requested_account=$3
+  shift 3
 
   [[ -z "$group" ]] || die "--group is not supported for Flex history"
-  if [[ "$kind" == "raw" && -n "$requested_account" ]]; then
-    die "--account is not supported for flex-statement; the caller validates account coverage"
-  fi
   jq -e --arg profile "$profile" '.profiles[$profile] != null' "$profiles_json" >/dev/null \
     || die "unknown profile: $profile"
 
-  local requested_query="" query_count query query_id token_ref
+  local kind="raw" requested_query="" query_count query query_id token_ref
   local -a date_args=()
   while (($#)); do
     case "$1" in
+      --kind)
+        (($# >= 2)) || die "$1 requires a value"
+        kind=$2
+        shift 2
+        ;;
       --flex-query)
         (($# >= 2)) || die "$1 requires a value"
         requested_query=$2
@@ -308,6 +302,16 @@ run_flex_json() {
         ;;
     esac
   done
+
+  case "$kind" in
+    raw|trades|transfers|dividends) ;;
+    *)
+      die "unknown Flex kind: $kind (expected raw, trades, transfers, or dividends)"
+      ;;
+  esac
+  if [[ "$kind" == "raw" && -n "$requested_account" ]]; then
+    die "--account is not supported for raw statements; the caller validates account coverage"
+  fi
 
   query_count=$(jq -er --arg profile "$profile" \
     '(.profiles[$profile].flex.queries // {}) | length' "$profiles_json")
@@ -342,7 +346,7 @@ run_flex_json() {
   [[ "$token_ref" == op://* ]] \
     || die "Flex token reference for profile $profile must use op://"
 
-  resolve_flex_dates "$kind" "${date_args[@]}"
+  resolve_flex_dates "${date_args[@]}"
 
   command -v safe-op >/dev/null 2>&1 \
     || die "safe-op is required; refusing to read the Flex token with raw op"
@@ -590,21 +594,9 @@ main() {
       parse_common "$@"; require_config
       run_ibkr_json "$profile" "$group" "$account" "$raw" 1 orders executions "${remaining[@]}"
       ;;
-    flex-trades)
+    flex)
       parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" trades "${remaining[@]}"
-      ;;
-    transfers)
-      parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" transfers "${remaining[@]}"
-      ;;
-    dividends)
-      parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" dividends "${remaining[@]}"
-      ;;
-    flex-statement)
-      parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" raw "${remaining[@]}"
+      run_flex "$profile" "$group" "$account" "${remaining[@]}"
       ;;
     order-prepare)
       cmd_order_prepare "$@"

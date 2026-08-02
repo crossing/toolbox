@@ -115,7 +115,8 @@ assert_failure_contains() {
 }
 
 rm -f "$CAPTURE_DIR"/*
-run_wrapper flex-trades \
+run_wrapper flex \
+  --kind trades \
   --profile main-live \
   --flex-query tax-history \
   --account ACCOUNT_SYNTH_A \
@@ -136,7 +137,7 @@ expected_args=(
 [[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "explicit date arguments were routed incorrectly"
 
 rm -f "$CAPTURE_DIR"/*
-run_wrapper dividends --profile main-live --flex-query income --account ACCOUNT_SYNTH_B --days 500 >/dev/null
+run_wrapper flex --kind dividends --profile main-live --flex-query income --account ACCOUNT_SYNTH_B --days 500 >/dev/null
 assert_file_equals "op://synthetic/main/token" "$CAPTURE_DIR/safe-op-ref"
 mapfile -t flex_args <"$CAPTURE_DIR/flex-args"
 end_date=$(date -I)
@@ -151,7 +152,7 @@ expected_args=(
 [[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "--days compatibility routing was incorrect"
 
 rm -f "$CAPTURE_DIR"/*
-run_wrapper transfers --profile single-live --from 2026-01-01 --to 2026-01-31 >/dev/null
+run_wrapper flex --kind transfers --profile single-live --from 2026-01-01 --to 2026-01-31 >/dev/null
 assert_file_equals "op://synthetic/single/token" "$CAPTURE_DIR/safe-op-ref"
 grep -qx '100003' "$CAPTURE_DIR/flex-args" || fail "single configured query was not selected"
 if grep -qx -- '--account' "$CAPTURE_DIR/flex-args"; then
@@ -159,7 +160,7 @@ if grep -qx -- '--account' "$CAPTURE_DIR/flex-args"; then
 fi
 
 rm -f "$CAPTURE_DIR"/*
-run_wrapper flex-statement --profile main-live --flex-query tax-history --from 2025-04-06 --to 2026-04-05 --json >/dev/null
+run_wrapper flex --profile main-live --flex-query tax-history --from 2025-04-06 --to 2026-04-05 --json >/dev/null
 assert_file_equals "op://synthetic/main/token" "$CAPTURE_DIR/safe-op-ref"
 mapfile -t flex_args <"$CAPTURE_DIR/flex-args"
 expected_args=(
@@ -168,10 +169,10 @@ expected_args=(
   --from-date 2025-04-06
   --to-date 2026-04-05
 )
-[[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "flex-statement raw routing was incorrect"
+[[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "default raw kind routing was incorrect"
 
 rm -f "$CAPTURE_DIR"/*
-run_wrapper flex-statement --profile single-live >/dev/null
+run_wrapper flex --profile single-live >/dev/null
 mapfile -t flex_args <"$CAPTURE_DIR/flex-args"
 end_date=$(date -I)
 start_date=$(date -I -d "$end_date - 364 days")
@@ -181,38 +182,44 @@ expected_args=(
   --from-date "$start_date"
   --to-date "$end_date"
 )
-[[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "flex-statement default 365-day window was incorrect"
+[[ "${flex_args[*]}" == "${expected_args[*]}" ]] || fail "default 365-day window was incorrect"
 
 rm -f "$CAPTURE_DIR"/*
 assert_failure_contains \
-  "--account is not supported for flex-statement" \
-  run_wrapper flex-statement --profile single-live --account ACCOUNT_SYNTH_A >/dev/null
-[[ ! -e "$CAPTURE_DIR/safe-op-ref" ]] || fail "safe-op ran before the flex-statement account rejection"
+  "--account is not supported for raw statements" \
+  run_wrapper flex --profile single-live --account ACCOUNT_SYNTH_A >/dev/null
+[[ ! -e "$CAPTURE_DIR/safe-op-ref" ]] || fail "safe-op ran before the raw account rejection"
+
+rm -f "$CAPTURE_DIR"/*
+assert_failure_contains \
+  "unknown Flex kind: nav" \
+  run_wrapper flex --kind nav --profile single-live >/dev/null
+[[ ! -e "$CAPTURE_DIR/safe-op-ref" ]] || fail "safe-op ran before the unknown kind rejection"
 
 rm -f "$CAPTURE_DIR"/*
 assert_failure_contains \
   "multiple Flex queries configured for profile main-live; pass --flex-query" \
-  run_wrapper flex-trades --profile main-live --days 30 >/dev/null
+  run_wrapper flex --kind trades --profile main-live --days 30 >/dev/null
 [[ ! -e "$CAPTURE_DIR/safe-op-ref" ]] || fail "safe-op ran before ambiguous query selection was rejected"
 
 assert_failure_contains \
   "no Flex query named missing configured for profile main-live" \
-  run_wrapper flex-trades --profile main-live --flex-query missing --days 30 >/dev/null
+  run_wrapper flex --kind trades --profile main-live --flex-query missing --days 30 >/dev/null
 
 assert_failure_contains \
   "no Flex queries configured for profile empty-live" \
-  run_wrapper flex-trades --profile empty-live --days 30 >/dev/null
+  run_wrapper flex --kind trades --profile empty-live --days 30 >/dev/null
 
 assert_failure_contains \
   "--group is not supported for Flex history" \
-  run_wrapper flex-trades --profile single-live --group isa --days 30 >/dev/null
+  run_wrapper flex --kind trades --profile single-live --group isa --days 30 >/dev/null
 
 rm -f "$CAPTURE_DIR"/*
 SAFE_OP_TEST_MODE=fail
 export SAFE_OP_TEST_MODE
 safe_op_output=$(assert_failure_contains \
   "unable to retrieve Flex token from 1Password for profile single-live" \
-  run_wrapper flex-trades --profile single-live --days 30)
+  run_wrapper flex --kind trades --profile single-live --days 30)
 runtime_secret=$(cat "$secret_file")
 [[ "$safe_op_output" != *"$runtime_secret"* ]] || fail "safe-op failure leaked the runtime secret"
 unset SAFE_OP_TEST_MODE
@@ -222,7 +229,7 @@ FLEX_TEST_MODE=fail
 export FLEX_TEST_MODE
 flex_output=$(assert_failure_contains \
   "Flex history request failed for profile single-live" \
-  run_wrapper flex-trades --profile single-live --days 30)
+  run_wrapper flex --kind trades --profile single-live --days 30)
 [[ "$flex_output" != *"$runtime_secret"* ]] || fail "Flex helper failure leaked the runtime secret"
 unset FLEX_TEST_MODE
 
