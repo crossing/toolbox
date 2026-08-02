@@ -3,6 +3,7 @@
 # inside home-ops; callPackage supplies them from the overlay here.
 { lib
 , writeShellApplication
+, writeTextFile
 , runCommand
 , symlinkJoin
 , coreutils
@@ -10,15 +11,29 @@
 , gnugrep
 , gnused
 , jq
+, python3
 , ibkr-cli
 , ibgateway
 }:
 
 let
+  # Stdlib-only Flex Web Service client. The token arrives on stdin (never
+  # argv or the environment) and errors are sanitized; see flex-fetch.py.
+  flexFetch = writeTextFile {
+    name = "ibkr-flex-fetch";
+    destination = "/bin/ibkr-flex-fetch";
+    executable = true;
+    text = ''
+      #!${python3}/bin/python3
+      ${builtins.readFile ./flex-fetch.py}
+    '';
+  };
+
   ibkr = writeShellApplication {
     name = "ibkr";
     runtimeInputs = [
       ibgateway
+      flexFetch
       coreutils
       gawk
       gnugrep
@@ -45,6 +60,7 @@ symlinkJoin {
     ibkr
     compatibility
     ibgateway
+    flexFetch
   ];
 
   meta = {

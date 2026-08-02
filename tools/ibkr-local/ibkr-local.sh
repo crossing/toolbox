@@ -19,6 +19,12 @@ Profile options:
   --account ACCOUNT        Restrict to one IBKR account id
   --raw                    Print upstream JSON without local account filtering
 
+Flex history options:
+  --flex-query NAME        Named profile Flex query (required when ambiguous)
+  --from YYYY-MM-DD        First report date (requires --to)
+  --to YYYY-MM-DD          Last report date, inclusive (requires --from)
+  -d, --days DAYS          Backward-compatible lookback ending today
+
 Commands:
   doctor                   JSON connectivity/config diagnostic
   connect                  JSON TCP/API connectivity test
@@ -28,6 +34,7 @@ Commands:
   flex-trades              JSON Flex trades
   transfers                JSON Flex transfers
   dividends                JSON Flex dividends/cash transactions
+  flex-statement           JSON envelope of raw Flex statement XML chunks
   order-preview buy|sell   What-if order preview only; --submit is blocked
   order-prepare buy|sell   Preview and create a short-lived guarded order ticket
   order-submit TICKET      Submit one prepared ticket with matching confirmation
@@ -39,6 +46,8 @@ Commands:
 Examples:
   ibkr positions --profile main-paper --group isa
   ibkr balances --profile main-live --account U1234567
+  ibkr flex-trades --profile main-live --flex-query tax-history --account U1234567 --from 2025-04-06 --to 2026-04-05
+  ibkr flex-statement --profile main-live --flex-query nav-daily --json
   ibkr order-preview buy AAPL 1 --profile main-paper --limit 100 --json
 USAGE
 }
@@ -206,26 +215,173 @@ extract_json_payload() {
   jq -c . <<<"$payload"
 }
 
+resolve_flex_dates() {
+  local kind=$1
+  shift
+  local from_date="" to_date="" days=""
+
+  while (($#)); do
+    case "$1" in
+      --from|--from-date)
+        (($# >= 2)) || die "$1 requires a value"
+        from_date=$2
+        shift 2
+        ;;
+      --to|--to-date)
+        (($# >= 2)) || die "$1 requires a value"
+        to_date=$2
+        shift 2
+        ;;
+      -d|--days)
+        (($# >= 2)) || die "$1 requires a value"
+        days=$2
+        shift 2
+        ;;
+      --json)
+        shift
+        ;;
+      *)
+        die "unknown Flex history option: $1"
+        ;;
+    esac
+  done
+
+  if [[ -n "$days" && ( -n "$from_date" || -n "$to_date" ) ]]; then
+    die "--days cannot be combined with --from or --to"
+  fi
+  if [[ -n "$from_date" || -n "$to_date" ]]; then
+    [[ -n "$from_date" && -n "$to_date" ]] || die "--from and --to must be provided together"
+  else
+    if [[ -z "$days" ]]; then
+      case "$kind" in
+        transfers) days=90 ;;
+        raw) days=365 ;;
+        *) days=30 ;;
+      esac
+    fi
+    [[ "$days" =~ ^[1-9][0-9]*$ ]] || die "--days must be a positive integer"
+    to_date=$(date -I)
+    from_date=$(date -I -d "$to_date - $((days - 1)) days")
+  fi
+
+  local normalized_from normalized_to
+  [[ "$from_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+    || die "--from must use YYYY-MM-DD"
+  [[ "$to_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+    || die "--to must use YYYY-MM-DD"
+  normalized_from=$(date -I -d "$from_date" 2>/dev/null) \
+    || die "--from must be a valid calendar date"
+  normalized_to=$(date -I -d "$to_date" 2>/dev/null) \
+    || die "--to must be a valid calendar date"
+  [[ "$normalized_from" == "$from_date" ]] || die "--from must be a valid calendar date"
+  [[ "$normalized_to" == "$to_date" ]] || die "--to must be a valid calendar date"
+  [[ "$from_date" < "$to_date" || "$from_date" == "$to_date" ]] \
+    || die "--from must not be after --to"
+
+  flex_from_date=$from_date
+  flex_to_date=$to_date
+}
+
 run_flex_json() {
-  local profile=$1 group=$2 account=$3 raw=$4
+  local profile=$1 group=$2 requested_account=$3 kind=$4
   shift 4
 
-  local output
-  if ! output=$(XDG_CONFIG_HOME="$ibkr_xdg_home" "${IBKR_UPSTREAM:?IBKR_UPSTREAM is required}" "$@" --json); then
-    printf '%s\n' "$output" >&2
-    return 1
+  [[ -z "$group" ]] || die "--group is not supported for Flex history"
+  if [[ "$kind" == "raw" && -n "$requested_account" ]]; then
+    die "--account is not supported for flex-statement; the caller validates account coverage"
   fi
+  jq -e --arg profile "$profile" '.profiles[$profile] != null' "$profiles_json" >/dev/null \
+    || die "unknown profile: $profile"
 
-  local json_output
-  if ! json_output=$(extract_json_payload "$output"); then
-    printf '%s\n' "$output" >&2
-    return 1
-  fi
+  local requested_query="" query_count query query_id token_ref
+  local -a date_args=()
+  while (($#)); do
+    case "$1" in
+      --flex-query)
+        (($# >= 2)) || die "$1 requires a value"
+        requested_query=$2
+        shift 2
+        ;;
+      *)
+        date_args+=("$1")
+        shift
+        ;;
+    esac
+  done
 
-  if [[ "$raw" == "1" ]]; then
-    printf '%s\n' "$json_output"
+  query_count=$(jq -er --arg profile "$profile" \
+    '(.profiles[$profile].flex.queries // {}) | length' "$profiles_json")
+  if [[ -n "$requested_query" ]]; then
+    jq -e --arg profile "$profile" --arg query "$requested_query" \
+      '.profiles[$profile].flex.queries[$query] != null' "$profiles_json" >/dev/null \
+      || die "no Flex query named $requested_query configured for profile $profile"
+    query=$requested_query
   else
-    printf '%s\n' "$json_output" | filter_accounts "$profile" "$group" "$account"
+    case "$query_count" in
+      0)
+        die "no Flex queries configured for profile $profile"
+        ;;
+      1)
+        query=$(jq -er --arg profile "$profile" \
+          '.profiles[$profile].flex.queries | keys[0]' "$profiles_json")
+        ;;
+      *)
+        die "multiple Flex queries configured for profile $profile; pass --flex-query"
+        ;;
+    esac
+  fi
+
+  query_id=$(jq -er --arg profile "$profile" --arg query "$query" \
+    '.profiles[$profile].flex.queries[$query].queryId
+      | select(type == "string" and length > 0)' "$profiles_json") \
+    || die "Flex query ID is missing for query $query in profile $profile"
+  token_ref=$(jq -er --arg profile "$profile" \
+    '.profiles[$profile].flex.tokenRef // empty
+      | select(type == "string" and length > 0)' "$profiles_json") \
+    || die "Flex token reference is missing for profile $profile"
+  [[ "$token_ref" == op://* ]] \
+    || die "Flex token reference for profile $profile must use op://"
+
+  resolve_flex_dates "$kind" "${date_args[@]}"
+
+  command -v safe-op >/dev/null 2>&1 \
+    || die "safe-op is required; refusing to read the Flex token with raw op"
+  command -v ibkr-flex-fetch >/dev/null 2>&1 \
+    || die "ibkr-flex-fetch is required"
+
+  local token output
+  if ! token=$(safe-op read "$token_ref" --no-newline 2>/dev/null); then
+    token=""
+    unset token
+    die "unable to retrieve Flex token from 1Password for profile $profile"
+  fi
+  if [[ -z "$token" ]]; then
+    unset token
+    die "1Password returned an empty Flex token for profile $profile"
+  fi
+
+  local -a helper_args=(
+    --query-id "$query_id"
+    --kind "$kind"
+  )
+  if [[ -n "$requested_account" ]]; then
+    helper_args+=(--account "$requested_account")
+  fi
+  helper_args+=(
+    --from-date "$flex_from_date"
+    --to-date "$flex_to_date"
+  )
+
+  if output=$(printf '%s' "$token" | ibkr-flex-fetch "${helper_args[@]}" 2>/dev/null); then
+    token=""
+    unset token
+    printf '%s\n' "$output"
+  else
+    token=""
+    unset token
+    output=""
+    unset output
+    die "Flex history request failed for profile $profile"
   fi
 }
 
@@ -436,15 +592,19 @@ main() {
       ;;
     flex-trades)
       parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" "$raw" trades "${remaining[@]}"
+      run_flex_json "$profile" "$group" "$account" trades "${remaining[@]}"
       ;;
     transfers)
       parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" "$raw" transfers "${remaining[@]}"
+      run_flex_json "$profile" "$group" "$account" transfers "${remaining[@]}"
       ;;
     dividends)
       parse_common "$@"; require_config
-      run_flex_json "$profile" "$group" "$account" "$raw" dividends "${remaining[@]}"
+      run_flex_json "$profile" "$group" "$account" dividends "${remaining[@]}"
+      ;;
+    flex-statement)
+      parse_common "$@"; require_config
+      run_flex_json "$profile" "$group" "$account" raw "${remaining[@]}"
       ;;
     order-prepare)
       cmd_order_prepare "$@"
