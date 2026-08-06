@@ -24,6 +24,31 @@ ibkr executions --profile main-live --json
 Profiles select which Gateway (and therefore which account set and API port) to talk
 to. Never guess one — read it from the caller's configuration.
 
+## Flex history (read-only, no Gateway needed)
+
+`flex` fetches broker-reported history through the IBKR Flex Web Service instead of
+the Gateway. It needs per-profile configuration in `profiles.json`: a `flex.tokenRef`
+(an `op://` 1Password reference — the token itself is piped to the fetch helper on
+stdin and never appears in argv, the environment, or output) and one or more named
+queries. When a profile has several queries, pass `--flex-query NAME`; with exactly
+one it is selected automatically. The date window defaults to the last 365 days;
+`--from/--to` request an exact inclusive range and long windows are chunked at 365
+days automatically.
+
+```bash
+ibkr flex --profile main-live --flex-query nav-daily --json
+ibkr flex --kind trades --profile main-live --flex-query tax-activity --from 2025-04-06 --to 2026-04-05
+ibkr flex --kind dividends --profile main-live --flex-query tax-activity --days 90
+```
+
+The default `--kind raw` returns the raw statement XML as a JSON envelope of
+`{from, to, xml}` chunks for callers that do their own parsing and validation; it
+rejects `--account` because account-coverage checks belong to the caller. The parsed
+kinds (`trades`, `transfers`, `dividends`) return row objects and accept `--account`
+to filter to one account, failing closed if that account is absent from the
+statement. Data may be delayed up to T-1; a failed fetch reports a sanitized error
+with no URL, token, or upstream response text.
+
 ## Order entry
 
 **Do not place an order unless the user has explicitly authorized that specific order
