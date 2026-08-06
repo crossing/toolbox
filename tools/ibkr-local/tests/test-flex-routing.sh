@@ -11,7 +11,11 @@ mkdir -p "$test_root/bin" "$test_root/capture" "$test_root/runtime"
 secret_file="$test_root/runtime-secret"
 printf 'runtime-secret-%s' "$$" >"$secret_file"
 
-cat >"$test_root/profiles.json" <<'EOF'
+token_file="$test_root/flex-token"
+printf 'runtime-secret-%s' "$$" >"$token_file"
+chmod 600 "$token_file"
+
+cat >"$test_root/profiles.json" <<EOF
 {
   "defaultProfile": "main-live",
   "accounts": {},
@@ -34,6 +38,37 @@ cat >"$test_root/profiles.json" <<'EOF'
         "tokenRef": "op://synthetic/single/token",
         "queries": {
           "activity": {"queryId": "100003"}
+        }
+      }
+    },
+    "file-live": {
+      "ibkrProfile": "file-live",
+      "accounts": {},
+      "flex": {
+        "tokenFile": "$token_file",
+        "queries": {
+          "activity": {"queryId": "100004"}
+        }
+      }
+    },
+    "relative-file-live": {
+      "ibkrProfile": "relative-file-live",
+      "accounts": {},
+      "flex": {
+        "tokenFile": "flex-token",
+        "queries": {
+          "activity": {"queryId": "100005"}
+        }
+      }
+    },
+    "both-live": {
+      "ibkrProfile": "both-live",
+      "accounts": {},
+      "flex": {
+        "tokenRef": "op://synthetic/both/token",
+        "tokenFile": "$token_file",
+        "queries": {
+          "activity": {"queryId": "100006"}
         }
       }
     },
@@ -232,6 +267,40 @@ flex_output=$(assert_failure_contains \
   run_wrapper flex --kind trades --profile single-live --days 30)
 [[ "$flex_output" != *"$runtime_secret"* ]] || fail "Flex helper failure leaked the runtime secret"
 unset FLEX_TEST_MODE
+
+rm -f "$CAPTURE_DIR"/*
+run_wrapper flex --profile file-live --from 2026-01-01 --to 2026-01-31 >/dev/null
+[[ ! -e "$CAPTURE_DIR/safe-op-ref" ]] || fail "tokenFile profile invoked safe-op"
+grep -qx '100004' "$CAPTURE_DIR/flex-args" || fail "tokenFile profile did not route its query"
+
+rm -f "$CAPTURE_DIR"/*
+assert_failure_contains \
+  "must be an absolute path" \
+  run_wrapper flex --profile relative-file-live --days 30 >/dev/null
+[[ ! -e "$CAPTURE_DIR/flex-args" ]] || fail "a relative token file still reached the fetch helper"
+
+assert_failure_contains \
+  "configures both flex.tokenRef and flex.tokenFile" \
+  run_wrapper flex --profile both-live --days 30 >/dev/null
+
+chmod 644 "$token_file"
+perm_output=$(assert_failure_contains \
+  "must be owner-only" \
+  run_wrapper flex --profile file-live --days 30)
+[[ "$perm_output" != *"$(cat "$secret_file")"* ]] || fail "permission failure leaked the token"
+chmod 600 "$token_file"
+
+: >"$token_file"
+assert_failure_contains \
+  "Flex token file is empty" \
+  run_wrapper flex --profile file-live --days 30 >/dev/null
+printf 'runtime-secret-%s' "$$" >"$token_file"
+
+mv "$token_file" "$token_file.away"
+assert_failure_contains \
+  "Flex token file is missing" \
+  run_wrapper flex --profile file-live --days 30 >/dev/null
+mv "$token_file.away" "$token_file"
 
 rm -f "$CAPTURE_DIR"/*
 run_wrapper config show >/dev/null

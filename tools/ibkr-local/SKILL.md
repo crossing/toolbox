@@ -27,10 +27,11 @@ to. Never guess one — read it from the caller's configuration.
 ## Flex history (read-only, no Gateway needed)
 
 `flex` fetches broker-reported history through the IBKR Flex Web Service instead of
-the Gateway. It needs per-profile configuration in `profiles.json`: a `flex.tokenRef`
-(an `op://` 1Password reference — the token itself is piped to the fetch helper on
-stdin and never appears in argv, the environment, or output) and one or more named
-queries. When a profile has several queries, pass `--flex-query NAME`; with exactly
+the Gateway. It needs per-profile configuration in `profiles.json`: exactly one token
+source — `flex.tokenRef` (an `op://` 1Password reference) or `flex.tokenFile` (an
+absolute path to an owner-only file holding the token, e.g. a sops-nix secret) — and
+one or more named queries. Either way the token itself is piped to the fetch helper
+on stdin and never appears in argv, the environment, or output. When a profile has several queries, pass `--flex-query NAME`; with exactly
 one it is selected automatically. The date window defaults to the last 365 days;
 `--from/--to` request an exact inclusive range and long windows are chunked at 365
 days automatically.
