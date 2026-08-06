@@ -282,7 +282,7 @@ run_flex() {
   jq -e --arg profile "$profile" '.profiles[$profile] != null' "$profiles_json" >/dev/null \
     || die "unknown profile: $profile"
 
-  local kind="raw" requested_query="" query_count query query_id token_ref
+  local kind="raw" requested_query="" query_count query query_id token_ref token_file
   local -a date_args=()
   while (($#)); do
     case "$1" in
@@ -342,26 +342,64 @@ run_flex() {
   token_ref=$(jq -er --arg profile "$profile" \
     '.profiles[$profile].flex.tokenRef // empty
       | select(type == "string" and length > 0)' "$profiles_json") \
-    || die "Flex token reference is missing for profile $profile"
-  [[ "$token_ref" == op://* ]] \
-    || die "Flex token reference for profile $profile must use op://"
+    || token_ref=""
+  token_file=$(jq -er --arg profile "$profile" \
+    '.profiles[$profile].flex.tokenFile // empty
+      | select(type == "string" and length > 0)' "$profiles_json") \
+    || token_file=""
+  if [[ -n "$token_ref" && -n "$token_file" ]]; then
+    die "profile $profile configures both flex.tokenRef and flex.tokenFile; pick one"
+  fi
+  if [[ -z "$token_ref" && -z "$token_file" ]]; then
+    die "Flex token reference is missing for profile $profile"
+  fi
+  if [[ -n "$token_ref" ]]; then
+    [[ "$token_ref" == op://* ]] \
+      || die "Flex token reference for profile $profile must use op://"
+  else
+    [[ "$token_file" == /* ]] \
+      || die "Flex token file for profile $profile must be an absolute path"
+  fi
 
   resolve_flex_dates "${date_args[@]}"
 
-  command -v safe-op >/dev/null 2>&1 \
-    || die "safe-op is required; refusing to read the Flex token with raw op"
+  if [[ -n "$token_ref" ]]; then
+    command -v safe-op >/dev/null 2>&1 \
+      || die "safe-op is required; refusing to read the Flex token with raw op"
+  fi
   command -v ibkr-flex-fetch >/dev/null 2>&1 \
     || die "ibkr-flex-fetch is required"
 
   local token output
-  if ! token=$(safe-op read "$token_ref" --no-newline 2>/dev/null); then
-    token=""
-    unset token
-    die "unable to retrieve Flex token from 1Password for profile $profile"
-  fi
-  if [[ -z "$token" ]]; then
-    unset token
-    die "1Password returned an empty Flex token for profile $profile"
+  if [[ -n "$token_file" ]]; then
+    # A decrypted secret delivered as a file (e.g. sops-nix). The symlink chain is
+    # followed, but the file itself must be owner-only before it is read.
+    [[ -f "$token_file" ]] \
+      || die "Flex token file is missing for profile $profile"
+    local token_mode
+    token_mode=$(stat -Lc '%a' "$token_file" 2>/dev/null) \
+      || die "unable to inspect the Flex token file for profile $profile"
+    case "$token_mode" in
+      400|600) ;;
+      *)
+        die "Flex token file for profile $profile must be owner-only (mode 0400 or 0600)"
+        ;;
+    esac
+    token=$(<"$token_file")
+    if [[ -z "$token" ]]; then
+      unset token
+      die "Flex token file is empty for profile $profile"
+    fi
+  else
+    if ! token=$(safe-op read "$token_ref" --no-newline 2>/dev/null); then
+      token=""
+      unset token
+      die "unable to retrieve Flex token from 1Password for profile $profile"
+    fi
+    if [[ -z "$token" ]]; then
+      unset token
+      die "1Password returned an empty Flex token for profile $profile"
+    fi
   fi
 
   local -a helper_args=(
