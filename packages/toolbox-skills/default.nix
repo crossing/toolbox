@@ -12,6 +12,7 @@ let
     { name = "freeagent"; skill = ../../tools/freeagent/SKILL.md; }
     { name = "op-freeagent"; skill = ../../tools/op-freeagent/SKILL.md; }
     { name = "ibkr-local"; skill = ../../tools/ibkr-local/SKILL.md; }
+    { name = "ibkr-x11"; skill = ../../tools/ibkr-x11/SKILL.md; }
   ];
 in
 runCommand "toolbox-skills" { } ''
