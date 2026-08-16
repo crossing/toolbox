@@ -28,6 +28,7 @@ type BankTransactionExplanation struct {
 	TransferBankAccount  string      `json:"transfer_bank_account,omitempty"`
 	SalesTaxRate         string      `json:"sales_tax_rate,omitempty"`
 	ManualSalesTaxAmount string      `json:"manual_sales_tax_amount,omitempty"`
+	ECStatus             string      `json:"ec_status,omitempty"`
 	MarkedForReview      *bool       `json:"marked_for_review,omitempty"`
 	Attachment           *Attachment `json:"attachment,omitempty"`
 }

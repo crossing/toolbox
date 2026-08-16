@@ -17,6 +17,7 @@ var (
 	expTransferAccount string
 	expSalesTaxRate    string
 	expManualTax       string
+	expECStatus        string
 	expCreateFile      string
 )
 
@@ -41,6 +42,7 @@ Optionally attach a receipt in the same call via --file.`,
 			TransferBankAccount:  expTransferAccount,
 			SalesTaxRate:         expSalesTaxRate,
 			ManualSalesTaxAmount: expManualTax,
+			ECStatus:             expECStatus,
 		}
 
 		if expCreateFile != "" {
@@ -73,6 +75,7 @@ func init() {
 	explanationsCreateCmd.Flags().StringVar(&expTransferAccount, "transfer-account", "", "Other bank account URI for a transfer")
 	explanationsCreateCmd.Flags().StringVar(&expSalesTaxRate, "sales-tax-rate", "", "Sales tax (VAT) rate percentage, e.g. 20")
 	explanationsCreateCmd.Flags().StringVar(&expManualTax, "manual-sales-tax-amount", "", "Explicit sales tax amount when a rate does not apply cleanly")
+	explanationsCreateCmd.Flags().StringVar(&expECStatus, "ec-status", "", "EC/VAT status: 'UK/Non-EC' (default) or 'Reverse Charge' for services from overseas suppliers")
 	explanationsCreateCmd.Flags().StringVar(&expCreateFile, "file", "", "Path to a receipt/invoice to attach")
 
 	_ = explanationsCreateCmd.MarkFlagRequired("date")
