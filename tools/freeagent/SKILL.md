@@ -31,7 +31,7 @@ The tool requires `FREEAGENT_ACCESS_TOKEN` environment variable.
 
 ### Explanations
 - **Create an explanation:**
-  `freeagent explanations create --date <yyyy-mm-dd> --value <amount> [--transaction <tx_uri> | --bank-account <account_uri>] [--sales-tax-rate <pct>] [--file <local_path>]`
+  `freeagent explanations create --date <yyyy-mm-dd> --value <amount> [--transaction <tx_uri> | --bank-account <account_uri>] [--sales-tax-rate <pct>] [--ec-status <status>] [--file <local_path>]`
   with exactly one of:
   - `--category <cat_uri>` — ordinary spending/income
   - `--paid-bill <bill_uri>` — payment settling a bill
@@ -46,10 +46,18 @@ The tool requires `FREEAGENT_ACCESS_TOKEN` environment variable.
 ### Out-of-pocket Expenses
 - **List expenses:** `freeagent expenses list [--from <yyyy-mm-dd>]`
 - **Create an expense:**
-  `freeagent expenses create --user <user_uri> --category <cat_uri> --date <yyyy-mm-dd> --value <amount> [--currency <code>] [--sales-tax-rate <pct>] [--file <local_path>]`
+  `freeagent expenses create --user <user_uri> --category <cat_uri> --date <yyyy-mm-dd> --value <amount> [--currency <code>] [--sales-tax-rate <pct>] [--ec-status <status>] [--file <local_path>]`
   - Value is negative for money the user paid out.
   - `--currency` takes the invoice currency (e.g. `USD`); FreeAgent converts to the
     company's native currency automatically.
+
+### VAT on purchases from overseas suppliers
+B2B services bought from suppliers outside the UK (SaaS subscriptions, cloud, domains)
+fall under the HMRC reverse charge (VAT Notice 741A s.5). Record them with
+`--sales-tax-rate 0 --ec-status "Reverse Charge"` — FreeAgent then accounts for the
+notional 20% in VAT-return boxes 1 and 4 and the value in boxes 6 and 7. Omitting
+`--ec-status` books the purchase as a plain zero-rated UK cost and under-reports the
+return.
 
 ## Usage Guidelines
 - Use `--human` flag for readable output when interacting with humans, but omit it for machine-readable JSON (default).

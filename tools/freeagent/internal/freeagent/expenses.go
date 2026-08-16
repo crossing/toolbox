@@ -17,6 +17,7 @@ type Expense struct {
 	Description          string      `json:"description,omitempty"`
 	SalesTaxRate         string      `json:"sales_tax_rate,omitempty"`
 	ManualSalesTaxAmount string      `json:"manual_sales_tax_amount,omitempty"`
+	ECStatus             string      `json:"ec_status,omitempty"`
 	Attachment           *Attachment `json:"attachment,omitempty"`
 }
 

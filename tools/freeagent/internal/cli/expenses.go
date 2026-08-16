@@ -37,6 +37,7 @@ var (
 	expenseManualTax   string
 	expenseFile        string
 	expenseCurrency    string
+	expenseECStatus    string
 )
 
 var expensesCreateCmd = &cobra.Command{
@@ -53,6 +54,7 @@ var expensesCreateCmd = &cobra.Command{
 			SalesTaxRate:         expenseSalesTax,
 			ManualSalesTaxAmount: expenseManualTax,
 			Currency:             expenseCurrency,
+			ECStatus:             expenseECStatus,
 		}
 
 		if expenseFile != "" {
@@ -88,6 +90,7 @@ func init() {
 	expensesCreateCmd.Flags().StringVar(&expenseManualTax, "manual-sales-tax-amount", "", "Explicit sales tax amount when a rate does not apply cleanly")
 	expensesCreateCmd.Flags().StringVar(&expenseFile, "file", "", "Path to a receipt/invoice to attach")
 	expensesCreateCmd.Flags().StringVar(&expenseCurrency, "currency", "", "Currency code when not the company's native currency, e.g. USD")
+	expensesCreateCmd.Flags().StringVar(&expenseECStatus, "ec-status", "", "EC/VAT status: 'UK/Non-EC' (default) or 'Reverse Charge' for services from overseas suppliers")
 
 	_ = expensesCreateCmd.MarkFlagRequired("user")
 	_ = expensesCreateCmd.MarkFlagRequired("category")
