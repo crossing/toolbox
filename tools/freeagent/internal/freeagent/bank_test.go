@@ -24,7 +24,7 @@ func TestClient_ListBankTransactions(t *testing.T) {
 	client := NewClient("test-token")
 	client.BaseURL = server.URL + "/v2"
 
-	txs, err := client.ListBankTransactions("123")
+	txs, err := client.ListBankTransactions("123", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
