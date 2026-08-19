@@ -171,6 +171,11 @@ optional idle timeout auto-stops a forgotten service (default open — see below
 - Whether `plan run` re-previews live data before confirming (e.g. re-fetch the
   invoice contact) or trusts the plan's recorded steps as reviewed.
 
+Phase 1 (2026-08) shipped `tools/op-mcp/` with interim choices — the working name
+`op-mcp`, idle timeout off by default (`idleTimeoutMinutes = 0`), and no live
+re-preview in `plan run` (it shows the plan's recorded steps) — all three items
+remain open.
+
 ## Non-goals
 
 - Remote access (e.g. from `gk` over SSH): out of scope; the service binds a local
