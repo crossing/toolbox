@@ -16,7 +16,10 @@ This skill allows an agent to interact with the FreeAgent accounting platform us
 ## Commands
 
 ### Authentication
-The tool requires `FREEAGENT_ACCESS_TOKEN` environment variable.
+The tool requires `FREEAGENT_ACCESS_TOKEN` environment variable. Prefer the
+op-mcp `freeagent` MCP tool when available (same argv, token handled by the
+service; reads run directly, writes become human-reviewed plans); otherwise run
+commands through `op-freeagent`, never bare `freeagent`.
 
 ### Bills
 - **List bills:** `freeagent bills list`

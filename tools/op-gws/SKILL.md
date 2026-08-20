@@ -1,6 +1,6 @@
 ---
 name: op-gws
-description: Run gws (Google Workspace CLI) with credentials from 1Password, supporting multiple Google accounts. Use instead of bare gws whenever Workspace data is needed.
+description: Run gws (Google Workspace CLI) with credentials from 1Password, supporting multiple Google accounts. Use instead of bare gws whenever Workspace data is needed; when the op-mcp service is running, prefer its gws MCP tool for reads.
 ---
 
 # op-gws
@@ -8,6 +8,15 @@ description: Run gws (Google Workspace CLI) with credentials from 1Password, sup
 Wrapper around `gws` that mints a Google access token from a 1Password item and execs
 `gws` with `GOOGLE_WORKSPACE_CLI_TOKEN` set. One item per Google account; tokens never
 touch disk, and `gws`'s own on-disk credential store stays empty.
+
+## Prefer op-mcp for reads
+
+When the op-mcp MCP tools are available in your session, use its `gws` tool for
+read operations instead of this CLI: the running service holds tokens in memory,
+so reads need no 1Password authorization. This CLI is the fallback when the
+service is not running — each invocation then needs the desktop-app
+authorization. Writes differ by path: through op-mcp they become plans a human
+reviews and runs; through this CLI they execute directly. See the op-mcp skill.
 
 ## Usage
 
