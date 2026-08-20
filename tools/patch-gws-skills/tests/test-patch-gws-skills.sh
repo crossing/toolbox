@@ -70,11 +70,13 @@ grep -q '(../gws-fake-send/SKILL.md)' "$skill" || fail "hyphenated link was corr
 grep -q '../gws-shared/SKILL.md' "$skill" || fail "shared-skill path was corrupted"
 echo "  ok: commands rewritten, names and links preserved"
 
-# 3. Accounts section inserted right after the H1 title.
-awk '/^# fake \(v1\)$/{found=1; next} found && NF{if ($0 == "## Accounts") exit 0; exit 1}' "$skill" \
-    || fail "Accounts section not directly after the title"
+# 3. Inserted sections sit right after the H1 title: the op-mcp read-path note
+# first (inserted last, so it lands closest to the title), then Accounts.
+awk '/^# fake \(v1\)$/{found=1; next} found && NF{if ($0 == "## Prefer op-mcp for reads") exit 0; exit 1}' "$skill" \
+    || fail "op-mcp section not directly after the title"
 grep -q 'op-gws --accounts' "$skill" || fail "accounts discovery hint missing"
-echo "  ok: Accounts section inserted after title"
+grep -q '^## Accounts' "$skill" || fail "Accounts section missing"
+echo "  ok: op-mcp and Accounts sections inserted after title"
 
 # 4. Non-gws skill untouched.
 grep -q '^gws is mentioned' "$TEST_DIR/skills/other-skill/SKILL.md" \
@@ -87,5 +89,15 @@ OUT=$(bash "$PATCH" "$TEST_DIR/skills" 2> /dev/null)
 [ "$OUT" = '{"patched":0,"skipped":1}' ] || fail "second run not skipped: $OUT"
 cmp -s "$skill" "$TEST_DIR/before-rerun" || fail "second run changed the file"
 echo "  ok: idempotent"
+
+# 6. A skill patched before the op-mcp note existed gains it without a re-rewrite.
+grep -v '^## Prefer op-mcp for reads$' "$skill" \
+    | grep -v 'op-mcp' > "$TEST_DIR/skills/gws-fake/SKILL.md.old"
+mv "$TEST_DIR/skills/gws-fake/SKILL.md.old" "$skill"
+OUT=$(bash "$PATCH" "$TEST_DIR/skills" 2> /dev/null)
+[ "$OUT" = '{"patched":1,"skipped":0}' ] || fail "upgrade run not counted as patched: $OUT"
+grep -q '^## Prefer op-mcp for reads' "$skill" || fail "op-mcp note not added on upgrade"
+[ "$(grep -c 'op-gws fake --help' "$skill")" -eq 1 ] || fail "upgrade re-ran the command rewrite"
+echo "  ok: pre-op-mcp skills upgraded in place"
 
 echo "All patch-gws-skills tests passed!"

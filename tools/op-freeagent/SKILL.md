@@ -1,6 +1,6 @@
 ---
 name: op-freeagent
-description: Run the freeagent CLI with credentials from 1Password, auto-refreshing expired tokens. Use instead of bare freeagent, which needs FREEAGENT_ACCESS_TOKEN set manually.
+description: Run the freeagent CLI with credentials from 1Password, auto-refreshing expired tokens. Use instead of bare freeagent, which needs FREEAGENT_ACCESS_TOKEN set manually; when the op-mcp service is running, prefer its freeagent MCP tool for reads.
 ---
 
 # op-freeagent
@@ -8,6 +8,16 @@ description: Run the freeagent CLI with credentials from 1Password, auto-refresh
 Wrapper around the `freeagent` CLI that supplies `FREEAGENT_ACCESS_TOKEN` from a
 1Password item and transparently refreshes it (via `op-oauth2c --refresh`) when
 FreeAgent answers 401. Tokens never touch disk.
+
+## Prefer op-mcp for reads
+
+When the op-mcp MCP tools are available in your session, use its `freeagent`
+tool for read operations (`<resource> list|get`) instead of this CLI: the
+running service holds tokens in memory, so reads need no 1Password
+authorization. This CLI is the fallback when the service is not running — each
+invocation then needs the desktop-app authorization. Writes differ by path:
+through op-mcp they become plans a human reviews and runs; through this CLI
+they execute directly. See the op-mcp skill.
 
 ## Usage
 
