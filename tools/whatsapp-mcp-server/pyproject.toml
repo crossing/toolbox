@@ -1,0 +1,18 @@
+[project]
+name = "whatsapp-mcp-server"
+version = "0.1.0"
+description = "MCP server over the whatsapp-bridge message store (read-only by default)"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    # <2: the 2.0 SDK removed mcp.server.fastmcp, which this vendored fork uses
+    "mcp[cli]>=1.6.0,<2",
+    "requests>=2.32.3",
+]
+
+[project.scripts]
+whatsapp-mcp-server = "whatsapp_mcp_server.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

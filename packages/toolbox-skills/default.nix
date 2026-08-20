@@ -14,6 +14,8 @@ let
     { name = "ibkr-local"; skill = ../../tools/ibkr-local/SKILL.md; }
     { name = "ibkr-x11"; skill = ../../tools/ibkr-x11/SKILL.md; }
     { name = "op-mcp"; skill = ../../tools/op-mcp/SKILL.md; }
+    { name = "whatsapp-bridge"; skill = ../../tools/whatsapp-bridge/SKILL.md; }
+    { name = "whatsapp-mcp-server"; skill = ../../tools/whatsapp-mcp-server/SKILL.md; }
   ];
 in
 runCommand "toolbox-skills" { } ''
