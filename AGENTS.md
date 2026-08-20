@@ -32,6 +32,10 @@ repository root.
   `.agents/skills/freeagent-cli/SKILL.md` — the commit claiming to add it added nothing.
   Anchor with a leading `/`.
 - **Never `git add -f`.** If a file is ignored, the ignore rule is wrong.
+- **Longer work happens in a worktree.** Several agent sessions share this checkout;
+  never switch its branch for multi-step work. `git worktree add
+  ../toolbox-wt-<topic> -b <branch> origin/master`, work there, and
+  `git worktree remove` it once the branch has merged.
 - **This repo is public.** It must never contain account numbers, portfolio values,
   holdings, or anything else identifying real financial positions. Test fixtures use
   obviously-fake identifiers (`U00000001`…). Check before committing anything copied out
