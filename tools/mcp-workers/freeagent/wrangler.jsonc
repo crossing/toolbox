@@ -3,6 +3,12 @@
   "name": "freeagent-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  // Served at https://freeagent-mcp.xing.works — the custom domain is attached
+  // once via the Workers Domains API (PUT /accounts/:id/workers/domains), not
+  // via a routes entry here, because the deploy token deliberately has no
+  // zone-scoped permissions. workers.dev stays off so the OAuth issuer/resource
+  // URL is single and stable.
+  "workers_dev": false,
   "compatibility_flags": ["nodejs_compat"],
   "alias": {
     // Optional peer of the agents package; only its AI-chat path needs it.
