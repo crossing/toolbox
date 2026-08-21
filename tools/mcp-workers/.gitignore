@@ -4,3 +4,6 @@
 /freeagent/node_modules/
 /freeagent/.wrangler/
 /freeagent/.dev.vars
+/gws/node_modules/
+/gws/.wrangler/
+/gws/.dev.vars
