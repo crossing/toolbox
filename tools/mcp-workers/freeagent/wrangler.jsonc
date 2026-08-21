@@ -17,8 +17,10 @@
     ]
   },
   "kv_namespaces": [
-    // id is filled in per-account: `wrangler kv namespace create freeagent-mcp-oauth`
-    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
+    // "freeagent-mcp-oauth" namespace; recreate with
+    // `wrangler kv namespace create freeagent-mcp-oauth` if it is ever lost
+    // (grants are invalidated, connectors just need reconnecting).
+    { "binding": "OAUTH_KV", "id": "99314c0bcbb84fbeb93d9c65f010cb5c" }
   ],
   "observability": { "enabled": true }
 }
