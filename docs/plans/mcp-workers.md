@@ -23,21 +23,33 @@ connection model below.
 
 ## Read/write separation
 
-Two MCP endpoints per worker, added to claude.ai as *distinct connectors*:
+One MCP endpoint per worker (`/mcp`), one connector in claude.ai. Write
+access is decided at OAuth consent time and enforced server-side:
 
-- `/mcp` — read tools only; grants carry scope `read`.
-- `/rw` — adds write tools; grants require scope `write`, approved explicitly
-  on the consent page.
+- Consent page has an "allow write tools" checkbox, default off. Unticked →
+  the grant carries scope `read` and the write tools are never registered
+  for that session; there is nothing client-side to bypass. Ticked → scope
+  `read write`, write tools registered alongside the reads.
+- Escalating or dropping write access = reconnect the connector and toggle
+  the checkbox.
+- Per-call friction for writes is the client's tool-permission system,
+  steered by MCP tool annotations: every read tool carries
+  `readOnlyHint: true` so reads can sit on always-allow while writes prompt
+  per call.
 
-Enforcement is server-side, not cosmetic: the `/rw` handler rejects tokens
-whose grant lacks `write` (`shared/src/endpoints.ts`), and write tools are
-conditionally registered per-grant. The write connector stays disconnected
-except when deliberately in use. Write safety on top: claude.ai's per-tool
-approval, an audit log in DO SQLite, no send/delete tools initially, and
-`confirm: true` parameters on destructive tools. This is deliberately weaker
-than op-mcp's human-runs-the-plan gate; the medium differs (a human is present
-in the chat) and the reduced write surface plus off-by-default connector is
-the compensation.
+(The original design used a second `/rw` endpoint as a distinct connector;
+it duplicated the whole read surface per worker and was dropped — the
+consent-time scope plus conditional registration is the same server-side
+enforcement without the duplication. Trade-off accepted: with writes
+approved at consent, an active session always sees the write tools; the
+per-call barrier is the client prompt, not a deliberately-attached second
+connector.)
+
+Write safety on top: claude.ai's per-tool approval, an audit log in DO
+SQLite, no send/delete tools initially, and `confirm: true` parameters on
+destructive tools. This is deliberately weaker than op-mcp's
+human-runs-the-plan gate; the medium differs (a human is present in the
+chat) and the reduced write surface is the compensation.
 
 ## Identity
 
@@ -77,7 +89,7 @@ refresh tokens are never contended.
 - **gws-mcp** — a new Web-application OAuth client (the CLI's Desktop client
   cannot take a Worker redirect URI); `access_type=offline&prompt=consent`;
   read scopes `gmail.readonly drive.readonly calendar.readonly` (+`userinfo.email`
-  for the gate), rw adds `gmail.compose gmail.modify calendar.events` — far
+  for the gate), write scope adds `gmail.compose gmail.modify calendar.events` — far
   narrower than the gws binary's baked-in scopes. Never request
   `cloud-platform`: Workspace accounts then die on Google Cloud session
   reauth (RAPT). Reads: gmail search/get message/thread/labels/attachment,
@@ -112,7 +124,7 @@ refresh tokens are never contended.
    handshake; claude.ai and Claude Desktop connect and call a dummy tool.
 1. freeagent-mcp read.
 2. gws-mcp read.
-3. `/rw` on both + audit log.
+3. Write tools on both + audit log.
 4. whatsapp: time-boxed Baileys-on-DO spike (pairing from the web page,
    alarm-driven drain persisting across DO evictions, one image decrypted to
    R2), then the full bridge-DO, history import, read connector; send last.
@@ -121,20 +133,14 @@ refresh tokens are never contended.
 
 ## Verification
 
-Per worker: MCP inspector against both endpoints; protected-resource metadata
+Per worker: MCP inspector against `/mcp`; protected-resource metadata
 `resource` exactly matches the connector URL as typed; claude.ai + Desktop
 complete OAuth and one real query; the connection survives a token refresh and
 7+ days unattended. Negative: non-allowlisted identity → 403 at callback;
-read-scope token on `/rw` → 403; handshake paths free of Access/WAF
+a read-only grant lists no write tools; handshake paths free of Access/WAF
 interception. Parity spot-checks against the local CLIs. `nix flake check`
 gates every push (`checks/mcp-workers` typechecks and unit-tests the
 workspace offline from the lockfile).
-
-## Open items
-
-- Whether claude.ai's connector flow forwards the `write` scope request for
-  the `/rw` resource automatically or the consent checkbox carries it — the
-  Phase 0 spike answers this.
 - Secrets Store is beta; the sync tool keeps a fallback to classic per-worker
   secrets from the same manifest.
 - KV namespace recreation invalidates grants (connector shows as needing
