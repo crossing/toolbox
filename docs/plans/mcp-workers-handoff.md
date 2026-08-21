@@ -13,11 +13,18 @@ connectors (OAuth handshake, real tool calls against live data):
 |---|---|---|---|
 | freeagent-mcp | `https://freeagent-mcp.xing.works/mcp` | 10 read + `ping_write` spike | Phase 1 done |
 | gws-mcp | `https://gws-mcp.xing.works/mcp` | Gmail 9r+8w, Drive 3r+3w | Phase 2 done |
-| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts (+echo demo) | G0 done (see mcp-gateway.md) |
+| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (all with `account` param) | G1 done (see mcp-gateway.md) |
 
 Work happens on branch `feature/mcp-workers` in a dedicated worktree
-(`git worktree list`); the branch is **not yet pushed** — landing on master
-via PR is the next housekeeping step. `nix flake check` is green.
+(`git worktree list`); the branch is pushed with a PR open to master.
+`nix flake check` is green.
+
+The gateway's `/manage` page owns Google account linking: a link stores the
+approved account's refresh token AES-GCM-encrypted in the owner's vault DO
+(read-only or read+write scopes per a checkbox at link time), unlink revokes
+the upstream grant best-effort, and the per-service default account serves
+tools called without an `account` argument. Linked accounts must themselves
+be on `ALLOWED_EMAILS`.
 
 ## Architecture recap (what you must not regress)
 
