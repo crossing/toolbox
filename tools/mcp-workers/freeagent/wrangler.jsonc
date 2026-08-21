@@ -4,6 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    // Optional peer of the agents package; only its AI-chat path needs it.
+    "ai": "../shared/src/ai-stub.ts"
+  },
   "migrations": [
     {
       "tag": "v1",
