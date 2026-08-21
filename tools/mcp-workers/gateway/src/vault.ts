@@ -11,6 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 export interface AccountInfo {
   service: string;
   label: string;
+  scopes: string[];
   enabled: boolean;
   isDefault: boolean;
 }
@@ -88,11 +89,12 @@ export class UserVault extends DurableObject<unknown> {
 
   listAccounts(): AccountInfo[] {
     return this.sql
-      .exec("SELECT service, label, enabled, is_default FROM accounts ORDER BY service, label")
+      .exec("SELECT service, label, scopes, enabled, is_default FROM accounts ORDER BY service, label")
       .toArray()
       .map((row) => ({
         service: row.service as string,
         label: row.label as string,
+        scopes: (row.scopes as string).split(" ").filter((s) => s.length > 0),
         enabled: row.enabled === 1,
         isDefault: row.is_default === 1,
       }));
@@ -117,24 +119,44 @@ export class UserVault extends DurableObject<unknown> {
     );
   }
 
-  // Returns the ciphertext for a labelled account, or the service default
-  // when label is omitted. Null when nothing is linked.
-  getAccountCiphertext(service: string, label?: string): string | null {
+  // Returns the labelled account, or the service default when label is
+  // omitted. Null when nothing matches. The label comes back so callers can
+  // cache per resolved account even when they asked for "the default".
+  getAccount(service: string, label?: string): { label: string; ciphertext: string } | null {
     const rows = label
       ? this.sql.exec(
-          "SELECT ciphertext FROM accounts WHERE service = ? AND label = ? AND enabled = 1",
+          "SELECT label, ciphertext FROM accounts WHERE service = ? AND label = ? AND enabled = 1",
           service,
           label,
         ).toArray()
       : this.sql.exec(
-          "SELECT ciphertext FROM accounts WHERE service = ? AND is_default = 1 AND enabled = 1",
+          "SELECT label, ciphertext FROM accounts WHERE service = ? AND is_default = 1 AND enabled = 1",
           service,
         ).toArray();
-    return rows.length > 0 ? (rows[0]!.ciphertext as string) : null;
+    if (rows.length === 0) return null;
+    return { label: rows[0]!.label as string, ciphertext: rows[0]!.ciphertext as string };
+  }
+
+  setDefaultAccount(service: string, label: string): void {
+    this.sql.exec("UPDATE accounts SET is_default = 0 WHERE service = ?", service);
+    this.sql.exec("UPDATE accounts SET is_default = 1 WHERE service = ? AND label = ?", service, label);
   }
 
   deleteAccount(service: string, label: string): void {
+    const wasDefault = this.sql
+      .exec("SELECT is_default FROM accounts WHERE service = ? AND label = ?", service, label)
+      .toArray();
     this.sql.exec("DELETE FROM accounts WHERE service = ? AND label = ?", service, label);
+    // Unlinking the default promotes the oldest remaining account so the
+    // no-account-parameter path keeps working.
+    if (wasDefault.length > 0 && wasDefault[0]!.is_default === 1) {
+      this.sql.exec(
+        `UPDATE accounts SET is_default = 1 WHERE service = ? AND label =
+           (SELECT label FROM accounts WHERE service = ? ORDER BY created_at, label LIMIT 1)`,
+        service,
+        service,
+      );
+    }
   }
 
   appendAudit(entry: AuditEntry): void {
