@@ -167,7 +167,15 @@ function renderManagePage(
             (acct) => `<tr>
       <td>${escapeHtml(acct.service)}</td>
       <td>${escapeHtml(acct.label)}${acct.isDefault ? " <strong>(default)</strong>" : ""}</td>
-      <td>${scopesAllowWrite(acct.scopes) ? "read + write" : "read-only"}</td>
+      <td>${
+        // Google links carry granted scopes; FreeAgent grants are always
+        // full-access upstream (write tools are gated by the connector tier).
+        acct.service === GOOGLE_ACCOUNT_SERVICE
+          ? scopesAllowWrite(acct.scopes)
+            ? "read + write"
+            : "read-only"
+          : "full"
+      }</td>
       <td>
         ${
           acct.isDefault
