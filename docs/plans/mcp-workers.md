@@ -1,5 +1,10 @@
 # Plan: mcp-workers — hosted MCP connectors on Cloudflare Workers
 
+> **Superseded in part** (2026-08-21): phases 3–5 and the one-worker-per-
+> service direction are folded into [mcp-gateway.md](mcp-gateway.md) — a
+> single gateway endpoint with a management interface. Phases 0–2 shipped as
+> written here and their workers stay live until the gateway reaches parity.
+
 Remote MCP servers for the toolbox connectors (FreeAgent, Google Workspace,
 WhatsApp), connectable from claude.ai and Claude Desktop as custom connectors
 with a web-driven OAuth flow. The local CLIs, op-mcp, and the local WhatsApp

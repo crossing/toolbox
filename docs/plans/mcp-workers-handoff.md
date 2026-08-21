@@ -100,18 +100,12 @@ revocation from the CLIs').
   (`buildNodeModules` skips workspace deps). Node major is pinned.
 - The flake only sees tracked files — `git add` before `nix flake check`.
 
-## Remaining phases (per mcp-workers.md)
+## Remaining phases
 
-3. Real write tools for freeagent (bill/explanation/expense create,
-   explanation approve/delete with `confirm`) + the audit log DO for both
-   workers; negative tests.
-4. WhatsApp: time-boxed Baileys-on-DO spike (web-page pairing, alarm-driven
-   drain surviving DO eviction, WebCrypto media decrypt), then the bridge
-   DO + read tools + history import; send last. Plan B (home sidecar +
-   tunnel) documented in the design doc.
-5. Reassess: more Google accounts (per-account path prefixes = separate
-   connectors), calendar tools (deferred from Phase 2), retiring the home
-   WhatsApp bridge only after probation.
+Superseded: the original phases 3–5 (writes, WhatsApp, multi-account) are
+folded into the gateway plan — see [mcp-gateway.md](mcp-gateway.md) for the
+current phasing (G0–G5). The two live workers above keep serving until the
+gateway reaches parity per service, then retire.
 
 Also pending: push the branch + PR to master; local CLIs/op-mcp/WhatsApp
 stack stay untouched until then (and after — different medium).
