@@ -13,6 +13,7 @@ connectors (OAuth handshake, real tool calls against live data):
 |---|---|---|---|
 | freeagent-mcp | `https://freeagent-mcp.xing.works/mcp` | 10 read + `ping_write` spike | Phase 1 done |
 | gws-mcp | `https://gws-mcp.xing.works/mcp` | Gmail 9r+8w, Drive 3r+3w | Phase 2 done |
+| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts (+echo demo) | G0 done (see mcp-gateway.md) |
 
 Work happens on branch `feature/mcp-workers` in a dedicated worktree
 (`git worktree list`); the branch is **not yet pushed** — landing on master

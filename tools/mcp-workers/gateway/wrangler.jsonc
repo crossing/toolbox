@@ -27,7 +27,7 @@
     // "gateway-mcp-oauth" namespace; recreate with
     // `wrangler kv namespace create gateway-mcp-oauth` if it is ever lost
     // (grants are invalidated, connectors just need reconnecting).
-    { "binding": "OAUTH_KV", "id": "PLACEHOLDER" }
+    { "binding": "OAUTH_KV", "id": "f8aeeff8216d4b3e9b43ba5f74d77113" }
   ],
   "observability": { "enabled": true }
 }
