@@ -62,6 +62,12 @@ class TestFreeagentDefaults(unittest.TestCase):
         self.assertTrue(is_read(["transactions", "list", "--human"], FREEAGENT))
         self.assertTrue(is_read(["expenses", "get", "12345"], FREEAGENT))
 
+    def test_report_commands_are_reads(self):
+        self.assertTrue(is_read(["balance-sheet"], FREEAGENT))
+        self.assertTrue(is_read(["balance-sheet", "--as-at", "2026-08-21"], FREEAGENT))
+        self.assertTrue(is_read(["profit-and-loss", "--accounting-period", "2025/26"], FREEAGENT))
+        self.assertTrue(is_read(["trial-balance", "--to", "2026-08-21"], FREEAGENT))
+
     def test_mutating_verbs_are_writes(self):
         self.assertFalse(is_read(["bills", "create"], FREEAGENT))
         self.assertFalse(is_read(["explanations", "approve", "12345"], FREEAGENT))

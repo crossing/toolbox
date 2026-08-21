@@ -25,7 +25,8 @@ calls that became plans, `{"status": "error", "error"}` otherwise.
 ## Reads are ordinary, writes yield plans
 
 Each toolset has a **read allowlist** (initially: gmail search/get/attachment
-fetch, drive list/download, calendar list; freeagent `<resource> list|get`).
+fetch, drive list/download, calendar list; freeagent `<resource> list|get` and
+the report commands `balance-sheet`, `profit-and-loss`, `trial-balance`).
 Classification is default-deny:
 
 - A call matching the allowlist executes immediately.

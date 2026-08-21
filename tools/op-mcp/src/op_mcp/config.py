@@ -47,10 +47,14 @@ DEFAULT_READ_ALLOWLISTS: dict[str, list[list[str]]] = {
         ["calendar", "calendarList", "list"],
     ],
     "freeagent": [
-        # The freeagent CLI's read surface is uniformly `<resource> list|get`;
-        # everything else (create/delete/approve/attach) is a write.
+        # The freeagent CLI's read surface is `<resource> list|get` plus the
+        # top-level accounting report commands; everything else
+        # (create/delete/approve/attach) is a write.
         ["*", "list"],
         ["*", "get"],
+        ["balance-sheet"],
+        ["profit-and-loss"],
+        ["trial-balance"],
     ],
 }
 
