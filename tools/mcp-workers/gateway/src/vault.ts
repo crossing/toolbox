@@ -137,6 +137,17 @@ export class UserVault extends DurableObject<unknown> {
     return { label: rows[0]!.label as string, ciphertext: rows[0]!.ciphertext as string };
   }
 
+  // Token-rotation write-back: replaces only the ciphertext, leaving scopes,
+  // enablement, and default flag untouched.
+  updateAccountCiphertext(service: string, label: string, ciphertext: string): void {
+    this.sql.exec(
+      "UPDATE accounts SET ciphertext = ? WHERE service = ? AND label = ?",
+      ciphertext,
+      service,
+      label,
+    );
+  }
+
   setDefaultAccount(service: string, label: string): void {
     this.sql.exec("UPDATE accounts SET is_default = 0 WHERE service = ?", service);
     this.sql.exec("UPDATE accounts SET is_default = 1 WHERE service = ? AND label = ?", service, label);

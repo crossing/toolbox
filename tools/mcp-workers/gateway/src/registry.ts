@@ -10,21 +10,25 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
+import { registerFreeagentReadTools } from "./freeagent";
+import type { FreeAgentClient } from "./freeagentapi";
 import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
 import type { GoogleClient } from "./googleapi";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
 
-// The account namespace a Google link is stored under.
+// The account namespaces links are stored under.
 export const GOOGLE_ACCOUNT_SERVICE = "google";
+export const FREEAGENT_ACCOUNT_SERVICE = "freeagent";
 
 // What tool handlers get: identity, grant tier, and live vault-backed
-// resolvers. googleClient asserts the service is still enabled, then
-// resolves (account label | default) → an authenticated client.
+// resolvers. The client resolvers assert the service is still enabled, then
+// resolve (account label | default) → an authenticated client.
 export interface GatewayToolContext {
   email: string;
   canWrite: boolean;
   googleClient(service: string, account?: string): Promise<GoogleClient>;
+  freeagentClient(): Promise<FreeAgentClient>;
   listAccounts(): Promise<AccountInfo[]>;
 }
 
@@ -63,7 +67,17 @@ const driveService: ServiceDef = {
   },
 };
 
-export const SERVICES: ServiceDef[] = [gmailService, driveService];
+const freeagentService: ServiceDef = {
+  id: "freeagent",
+  title: "FreeAgent",
+  description: "Accounting reads: bank accounts/transactions, bills, expenses, contacts, reports. No write tools yet.",
+  defaultEnabled: true,
+  registerRead(server, ctx) {
+    registerFreeagentReadTools(server, () => ctx.freeagentClient());
+  },
+};
+
+export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService];
 
 export function defaultServiceToggles(): Record<string, boolean> {
   return Object.fromEntries(SERVICES.map((svc) => [svc.id, svc.defaultEnabled]));
