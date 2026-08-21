@@ -46,6 +46,14 @@ commands through `op-freeagent`, never bare `freeagent`.
 - **Attach a file to an explanation:**
   `freeagent explanations attach --url <explanation_uri> --file <local_path>`
 
+### Accounting Reports (read-only)
+- **Balance sheet:** `freeagent balance-sheet [--as-at <yyyy-mm-dd>]`
+  (assets, liabilities, owners' equity; default as at today)
+- **Profit and loss:** `freeagent profit-and-loss [--from <yyyy-mm-dd> --to <yyyy-mm-dd> | --accounting-period <yyyy/yy>]`
+  (default: current accounting period to date)
+- **Trial balance:** `freeagent trial-balance [--from <yyyy-mm-dd>] [--to <yyyy-mm-dd>]`
+  (per-category totals; use `display_nominal_code` when cross-referencing FreeAgent reports)
+
 ### Out-of-pocket Expenses
 - **List expenses:** `freeagent expenses list [--from <yyyy-mm-dd>]`
 - **Create an expense:**
