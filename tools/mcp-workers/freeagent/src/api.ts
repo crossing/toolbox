@@ -3,7 +3,7 @@
 // mandatory User-Agent, list endpoints capped at per_page=100 (single page,
 // same as the CLI).
 
-import { FREEAGENT_BASE_URL, USER_AGENT, type Fetcher } from "./upstream";
+import { boundFetch, FREEAGENT_BASE_URL, USER_AGENT, type Fetcher } from "./upstream";
 
 export class FreeAgentApiError extends Error {
   constructor(
@@ -41,7 +41,7 @@ function errorMessage(status: number, body: string): string {
 export class FreeAgentClient {
   constructor(
     private accessToken: string,
-    private fetcher: Fetcher = fetch,
+    private fetcher: Fetcher = boundFetch,
     private baseUrl: string = FREEAGENT_BASE_URL,
   ) {}
 

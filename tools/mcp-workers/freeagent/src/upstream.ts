@@ -13,6 +13,11 @@ export const USER_AGENT = "freeagent-mcp";
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
+// Never default to a bare `fetch` reference: calling it detached from
+// globalThis throws "Illegal invocation" in workerd (Node is tolerant, so
+// tests won't catch it).
+export const boundFetch: Fetcher = (input, init) => fetch(input, init);
+
 export interface UpstreamTokens {
   accessToken: string;
   refreshToken: string;
@@ -64,7 +69,22 @@ async function postTokenEndpoint(
     throw new UpstreamError(`token endpoint unreachable: ${err instanceof Error ? err.message : "fetch failed"}`);
   }
   const text = await response.text();
-  if (!response.ok) throw new UpstreamError(sanitizedTokenError(text));
+  if (!response.ok) {
+    // FreeAgent answers invalid/expired grants with a bare 401 HTML page, not
+    // an OAuth error JSON — surface the status so that case reads sensibly.
+    let parses = false;
+    try {
+      JSON.parse(text);
+      parses = true;
+    } catch {
+      /* not JSON */
+    }
+    throw new UpstreamError(
+      parses
+        ? sanitizedTokenError(text)
+        : `token endpoint rejected the request (status ${response.status}); the authorization code may have expired — retry the connection`,
+    );
+  }
   let payload: unknown;
   try {
     payload = JSON.parse(text);
@@ -98,7 +118,7 @@ export async function exchangeCode(opts: {
     { grant_type: "authorization_code", code: opts.code, redirect_uri: opts.redirectUri },
     opts.clientId,
     opts.clientSecret,
-    opts.fetcher ?? fetch,
+    opts.fetcher ?? boundFetch,
   );
   return toTokens(resp, opts.now ?? Date.now());
 }
@@ -114,7 +134,7 @@ export async function refreshUpstream(opts: {
     { grant_type: "refresh_token", refresh_token: opts.refreshToken },
     opts.clientId,
     opts.clientSecret,
-    opts.fetcher ?? fetch,
+    opts.fetcher ?? boundFetch,
   );
   return toTokens(resp, opts.now ?? Date.now(), opts.refreshToken);
 }
