@@ -46,6 +46,7 @@ import {
   type GatewayToolContext,
 } from "./registry";
 import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
+import { bridgeFor } from "./whatsapp";
 import type { VaultBlob } from "./manage";
 
 export { UserVault } from "./vault";
@@ -126,6 +127,10 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
           );
         }
         return new FreeAgentClient(this.freeagentSource);
+      },
+      whatsappBridge: async () => {
+        await assertEnabled("whatsapp");
+        return bridgeFor(this.env);
       },
       listAccounts: async () => vault.listAccounts(),
       audit: async (tool, summary, status) =>

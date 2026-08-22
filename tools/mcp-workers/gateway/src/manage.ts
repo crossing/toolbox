@@ -9,6 +9,8 @@
 // on Google's top-level redirect back to /callback).
 
 import { escapeHtml } from "@toolbox/mcp-shared";
+import { page } from "./html";
+import { handleWhatsappManage } from "./manage-whatsapp";
 import { encryptJson, decryptJson, importVaultKey, randomToken, signToken, verifyToken } from "./crypto";
 import { vaultFor, type Env } from "./env";
 import {
@@ -103,25 +105,6 @@ export async function sessionEmail(request: Request, env: Env): Promise<string |
   return payload.email;
 }
 
-function page(title: string, body: string, status = 200, headers: Record<string, string> = {}): Response {
-  const html = `<!doctype html>
-<html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
-  table { border-collapse: collapse; width: 100%; margin: .8rem 0 1.6rem; }
-  th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #ddd; vertical-align: top; }
-  form { display: inline; }
-  button { padding: .25rem .9rem; }
-  .muted { color: #666; font-size: .9rem; }
-  .linkbox { border: 1px solid #ddd; padding: .8rem 1rem; margin: .8rem 0 1.6rem; }
-</style></head>
-<body>${body}</body></html>`;
-  return new Response(html, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8", ...headers },
-  });
-}
 
 function renderAuditRows(audit: AuditEntry[]): string {
   if (audit.length === 0) {
@@ -226,6 +209,11 @@ ${accountRows}
   </form>
   <div class="muted">Opens FreeAgent's sign-in; only the allowlisted company can complete the
   link. Relinking replaces the stored grant.</div>
+</div>
+<div class="linkbox">
+  <a href="/manage/whatsapp">WhatsApp bridge</a>
+  <div class="muted">Pair the cloud device, check sync health, import history. WhatsApp is not an
+  OAuth account, so it is paired there rather than linked above.</div>
 </div>
 <h2>Audit log</h2>
 <p class="muted">The most recent write-tool calls (including refused and failed ones).</p>
@@ -476,6 +464,11 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
   }
 
   const email = await sessionEmail(request, env);
+
+  if (url.pathname === "/manage/whatsapp" || url.pathname.startsWith("/manage/whatsapp/")) {
+    return handleWhatsappManage(request, env, url, email);
+  }
+
   if (url.pathname === "/manage" && request.method === "GET") {
     if (!email) {
       return page(

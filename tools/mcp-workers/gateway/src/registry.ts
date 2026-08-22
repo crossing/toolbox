@@ -16,6 +16,8 @@ import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
 import type { GoogleClient } from "./googleapi";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
+import { registerWhatsappReadTools, registerWhatsappWriteTools } from "./whatsapp";
+import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 
 // The account namespaces links are stored under.
 export const GOOGLE_ACCOUNT_SERVICE = "google";
@@ -29,6 +31,7 @@ export interface GatewayToolContext {
   canWrite: boolean;
   googleClient(service: string, account?: string): Promise<GoogleClient>;
   freeagentClient(): Promise<FreeAgentClient>;
+  whatsappBridge(): Promise<WhatsAppBridgeApi>;
   listAccounts(): Promise<AccountInfo[]>;
   // Best-effort write audit into the vault; failures never fail a tool call.
   audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
@@ -125,7 +128,24 @@ const freeagentService: ServiceDef = {
   },
 };
 
-export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService];
+// Off until a device is paired on /manage/whatsapp: an unpaired bridge would
+// otherwise add a dozen tools to the live catalog that can only answer "not
+// paired yet".
+const whatsappService: ServiceDef = {
+  id: "whatsapp",
+  title: "WhatsApp",
+  description:
+    "Chats, messages, contacts and media from the cloud bridge (a second linked device); sending is confirm-gated.",
+  defaultEnabled: false,
+  registerRead(server, ctx) {
+    registerWhatsappReadTools(server, () => ctx.whatsappBridge());
+  },
+  registerWrite(server, ctx) {
+    registerWhatsappWriteTools(auditedServer(server, ctx), () => ctx.whatsappBridge());
+  },
+};
+
+export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService, whatsappService];
 
 export function defaultServiceToggles(): Record<string, boolean> {
   return Object.fromEntries(SERVICES.map((svc) => [svc.id, svc.defaultEnabled]));

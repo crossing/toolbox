@@ -1,19 +1,31 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "whatsapp-spike",
-  "main": "src/spike.ts",
+  // Not to be confused with tools/whatsapp-bridge, the local Go bridge this
+  // one mirrors. That stack keeps running; this is the cloud second device.
+  "name": "whatsapp-bridge",
+  "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
-  // nodejs_compat gives Buffer/crypto/events that Baileys and its deps reach
-  // for; the WASM bridge instantiates at module top-level (startup), which
-  // workerd permits — the spike proves whether that actually holds.
+  // nodejs_compat gives Buffer/crypto/events/async_hooks that Baileys and its
+  // deps reach for; the WASM crypto bridge instantiates at module top-level
+  // (startup), which workerd permits — proven by the G4 spike.
   "compatibility_flags": ["nodejs_compat"],
   "alias": {
     // Baileys hardcodes `import WebSocket from 'ws'`, which throws in
     // workerd. Point it at a shim over workerd's native outbound WebSocket.
     "ws": "./src/ws-shim.ts"
   },
-  // The spike worker was deployed to a *.workers.dev URL to prove the live
-  // WhatsApp handshake, then deleted. The real bridge gets a custom domain
-  // like the gateway; keep workers_dev off.
-  "workers_dev": false
+  // No HTTP surface of its own: the gateway holds the only door, over the
+  // cross-script Durable Object binding, so this worker inherits the
+  // gateway's Google sign-in and allowlist instead of growing its own.
+  "workers_dev": false,
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["WhatsAppBridge"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "BRIDGE", "class_name": "WhatsAppBridge" }]
+  },
+  "observability": { "enabled": true }
 }

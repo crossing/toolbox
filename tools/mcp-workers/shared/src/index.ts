@@ -13,3 +13,5 @@ export {
   escapeHtml,
   type ApprovalPageOptions,
 } from "./approval";
+// Types only — the gateway ↔ WhatsApp bridge Durable Object contract (G4).
+export type * from "./whatsapp-api";

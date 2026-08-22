@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@toolbox/mcp-shared": "*",
     "baileys": "7.0.0-rc14",
     "pino": "^9.6.0"
   }
