@@ -2,7 +2,10 @@
 
 State of the hosted-MCP migration as of 2026-08-21, written for whoever picks
 this up next (human or agent). The design rationale lives in
-[mcp-workers.md](mcp-workers.md); this is the operational state.
+[mcp-workers.md](mcp-workers.md); this is the operational state. The full
+inventory of what exists outside this repo — Workers, KV, Durable Objects,
+custom domains, upstream OAuth apps, 1Password fields — and the order to
+delete it in lives in [../mcp-workers-infra.md](../mcp-workers-infra.md).
 
 ## What is live
 
