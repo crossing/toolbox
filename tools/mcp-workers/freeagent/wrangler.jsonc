@@ -18,13 +18,17 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["FreeagentReadMCP", "FreeagentRwMCP"]
+    },
+    // v2: single endpoint — write access is scope-gated at consent, not a
+    // separate connector, so the duplicate rw DO class goes away.
+    {
+      "tag": "v2",
+      "renamed_classes": [{ "from": "FreeagentReadMCP", "to": "FreeagentMCP" }],
+      "deleted_classes": ["FreeagentRwMCP"]
     }
   ],
   "durable_objects": {
-    "bindings": [
-      { "name": "FREEAGENT_READ_MCP", "class_name": "FreeagentReadMCP" },
-      { "name": "FREEAGENT_RW_MCP", "class_name": "FreeagentRwMCP" }
-    ]
+    "bindings": [{ "name": "FREEAGENT_MCP", "class_name": "FreeagentMCP" }]
   },
   "kv_namespaces": [
     // "freeagent-mcp-oauth" namespace; recreate with
