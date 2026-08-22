@@ -1,0 +1,5 @@
+# Anchored per repo rule: never bare, unanchored patterns.
+/node_modules/
+/shared/node_modules/
+/freeagent/node_modules/
+/freeagent/.wrangler/
