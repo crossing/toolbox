@@ -152,8 +152,20 @@ export interface SendResult {
   detail?: string;
 }
 
+export interface PreflightResult {
+  ok: boolean;
+  steps: { name: string; ms: number; detail: string }[];
+  detail: string | null;
+}
+
 export interface WhatsAppBridgeApi {
   status(): Promise<BridgeStatus>;
+  /**
+   * Exercise the expensive parts of a pairing — the 812-key pre-key burst and
+   * the chunked key-store round trip — without touching WhatsApp. Refuses to
+   * run against a paired session.
+   */
+  preflight(): Promise<PreflightResult>;
   requestPairingCode(phoneNumber: string): Promise<PairingResult>;
   unpair(): Promise<{ ok: boolean }>;
   syncNow(): Promise<SyncResult>;

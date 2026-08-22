@@ -101,6 +101,7 @@ export default class WorkerdWebSocket extends EventEmitter {
       });
     });
     socket.addEventListener("close", (event: CloseEvent) => {
+      if (this.readyState === CLOSED) return;
       this.readyState = CLOSED;
       dbg(`close code=${event.code} reason=${JSON.stringify(event.reason)}`);
       this.emit("close", event.code, Buffer.from(event.reason ?? ""));
@@ -137,14 +138,32 @@ export default class WorkerdWebSocket extends EventEmitter {
     }
   }
 
+  // Baileys' WebSocketClient.close() awaits `once('close')` before it lets
+  // sock.end() finish (Socket/Client/websocket.js:38-48). workerd only fires
+  // `close` on a socket it actually accepted, so a socket that never opened —
+  // or one whose close event is swallowed — would hang the shutdown inside a
+  // Durable Object alarm. Guarantee the event either way.
   close(code?: number, reason?: string): void {
     if (this.readyState === CLOSED || this.readyState === CLOSING) return;
+    const wasOpen = this.readyState === OPEN && this.socket !== null;
     this.readyState = CLOSING;
     try {
       this.socket?.close(code, reason);
     } catch {
       /* already gone */
     }
+    if (!wasOpen) {
+      this.finishClose(code ?? 1000, reason ?? "closed before open");
+      return;
+    }
+    setTimeout(() => this.finishClose(code ?? 1006, "close event never arrived"), 5000);
+  }
+
+  private finishClose(code: number, reason: string): void {
+    if (this.readyState === CLOSED) return;
+    this.readyState = CLOSED;
+    dbg(`close (synthetic) code=${code}`);
+    this.emit("close", code, Buffer.from(reason));
   }
 
   // Baileys calls these ws-only helpers; make them harmless no-ops.

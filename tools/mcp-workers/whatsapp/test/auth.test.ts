@@ -75,6 +75,22 @@ describe("makeSqlAuthState", () => {
     sql.close();
   });
 
+  it("chunks large id lists under the 100 bound-parameter cap", async () => {
+    const sql = makeFakeSql();
+    const auth = makeSqlAuthState(sql);
+    // Baileys asks for all 812 pre-keys in one call after pairing.
+    const entries: Record<string, { public: Buffer; private: Buffer }> = {};
+    for (let id = 1; id <= 812; id++) {
+      entries[String(id)] = { public: Buffer.from([id % 256]), private: Buffer.from([(id * 3) % 256]) };
+    }
+    await auth.state.keys.set({ "pre-key": entries });
+    const ids = Object.keys(entries);
+    const got = await auth.state.keys.get("pre-key", ids);
+    expect(Object.keys(got)).toHaveLength(812);
+    expect(Buffer.from(got["812"]!.private)).toEqual(Buffer.from([(812 * 3) % 256]));
+    sql.close();
+  });
+
   it("empty id lists never hit the database", async () => {
     const sql = makeFakeSql();
     const auth = makeSqlAuthState(sql);

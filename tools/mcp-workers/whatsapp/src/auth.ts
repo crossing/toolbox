@@ -44,6 +44,12 @@ export interface SqlLike {
   exec(query: string, ...bindings: unknown[]): { toArray(): Record<string, unknown>[] };
 }
 
+// Durable Object SQLite allows at most 100 bound parameters per statement, and
+// Baileys asks for its whole pre-key range in a single `get`: the first login
+// after pairing uploads INITIAL_PREKEY_COUNT = 812 of them, so an unchunked
+// `IN (?, ?, …)` throws on the one connection that matters most.
+const MAX_IDS_PER_QUERY = 90;
+
 function encode(value: unknown): string {
   return JSON.stringify(value, BufferJSON.replacer);
 }
@@ -62,7 +68,15 @@ export interface SqlAuthState {
   reset(): void;
 }
 
-export function makeSqlAuthState(sql: SqlLike): SqlAuthState {
+/**
+ * @param runInTransaction wraps a batch of writes atomically. Durable Object
+ * SQLite rejects BEGIN/SAVEPOINT statements, so the caller passes
+ * `ctx.storage.transactionSync`; tests and other callers can omit it.
+ */
+export function makeSqlAuthState(
+  sql: SqlLike,
+  runInTransaction: <T>(fn: () => T) => T = (fn) => fn(),
+): SqlAuthState {
   sql.exec(AUTH_SCHEMA);
 
   const stored = sql.exec("SELECT value FROM auth_creds WHERE id = 1").toArray();
@@ -85,41 +99,28 @@ export function makeSqlAuthState(sql: SqlLike): SqlAuthState {
     keys: {
       get: <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
         const out: { [id: string]: SignalDataTypeMap[T] } = {};
-        if (ids.length === 0) return out;
-        const placeholders = ids.map(() => "?").join(",");
-        const rows = sql
-          .exec(`SELECT id, value FROM auth_keys WHERE type = ? AND id IN (${placeholders})`, type, ...ids)
-          .toArray();
-        for (const row of rows) {
-          let value = decode<SignalDataTypeMap[T]>(row.value as string);
-          if (type === "app-state-sync-key" && value) {
-            value = proto.Message.AppStateSyncKeyData.fromObject(
-              value as object,
-            ) as unknown as SignalDataTypeMap[T];
+        for (let offset = 0; offset < ids.length; offset += MAX_IDS_PER_QUERY) {
+          const batch = ids.slice(offset, offset + MAX_IDS_PER_QUERY);
+          const placeholders = batch.map(() => "?").join(",");
+          const rows = sql
+            .exec(`SELECT id, value FROM auth_keys WHERE type = ? AND id IN (${placeholders})`, type, ...batch)
+            .toArray();
+          for (const row of rows) {
+            let value = decode<SignalDataTypeMap[T]>(row.value as string);
+            if (type === "app-state-sync-key" && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(
+                value as object,
+              ) as unknown as SignalDataTypeMap[T];
+            }
+            out[row.id as string] = value;
           }
-          out[row.id as string] = value;
         }
         return out;
       },
       set: (data: SignalDataSet) => {
-        for (const type of Object.keys(data) as (keyof SignalDataSet)[]) {
-          const entries = data[type];
-          if (!entries) continue;
-          for (const id of Object.keys(entries)) {
-            const value = entries[id];
-            if (value === null || value === undefined) {
-              sql.exec("DELETE FROM auth_keys WHERE type = ? AND id = ?", type, id);
-            } else {
-              sql.exec(
-                `INSERT INTO auth_keys (type, id, value) VALUES (?, ?, ?)
-                 ON CONFLICT(type, id) DO UPDATE SET value = excluded.value`,
-                type,
-                id,
-                encode(value),
-              );
-            }
-          }
-        }
+        // One post-pairing call writes 812 pre-keys; a half-written batch would
+        // leave the server holding keys we cannot answer with.
+        runInTransaction(() => writeKeys(sql, data));
       },
       clear: () => {
         sql.exec("DELETE FROM auth_keys");
@@ -141,4 +142,34 @@ export function makeSqlAuthState(sql: SqlLike): SqlAuthState {
       sql.exec("INSERT INTO auth_creds (id, value) VALUES (1, ?)", encode(creds));
     },
   };
+}
+
+// Durable Object SQLite caps a single value at 2 MB. The one store entry that
+// grows without bound is `app-state-sync-version`, whose indexValueMap gains an
+// entry per app-state mutation — fail loudly rather than at the SQLite layer.
+const MAX_VALUE_BYTES = 1_500_000;
+
+function writeKeys(sql: SqlLike, data: SignalDataSet): void {
+  for (const type of Object.keys(data) as (keyof SignalDataSet)[]) {
+    const entries = data[type];
+    if (!entries) continue;
+    for (const id of Object.keys(entries)) {
+      const value = entries[id];
+      if (value === null || value === undefined) {
+        sql.exec("DELETE FROM auth_keys WHERE type = ? AND id = ?", type, id);
+        continue;
+      }
+      const encoded = encode(value);
+      if (encoded.length > MAX_VALUE_BYTES) {
+        throw new Error(`signal key ${type}/${id} is ${encoded.length} bytes, over the SQLite value limit`);
+      }
+      sql.exec(
+        `INSERT INTO auth_keys (type, id, value) VALUES (?, ?, ?)
+         ON CONFLICT(type, id) DO UPDATE SET value = excluded.value`,
+        type,
+        id,
+        encoded,
+      );
+    }
+  }
 }

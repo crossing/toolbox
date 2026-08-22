@@ -134,6 +134,15 @@ ${preview}
 <table><tr><th>Started</th><th>Outcome</th><th>Drained</th><th>Detail</th></tr>
 ${renderCycles(status)}
 </table>
+<h2>Preflight</h2>
+<div class="linkbox">
+  <form method="post" action="/manage/whatsapp/preflight"><button type="submit">Run preflight</button></form>
+  <div class="muted">Generates the 812 pre-keys a pairing would, writes and re-reads them through the
+  key store, then throws them away — the cheapest way to find out that the expensive half of pairing
+  works before someone is standing there holding a phone. Refuses to run once a device is paired.
+  The timings read 0ms for synchronous steps — workerd stops the clock — so what matters is that
+  every step completes and the key store returns all 812.</div>
+</div>
 <h2>History import</h2>
 <div class="linkbox">
   <form method="post" action="/manage/whatsapp/import-code"><button type="submit">Issue import code</button></form>
@@ -257,6 +266,18 @@ export async function handleWhatsappManage(
       return redirectBack(`unpair failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return redirectBack("device forgotten");
+  }
+
+  if (url.pathname === "/manage/whatsapp/preflight" && request.method === "POST") {
+    try {
+      const result = await bridgeFor(env).preflight();
+      const timings = result.steps.map((step) => `${step.name}: ${step.ms}ms ${step.detail}`.trim()).join("; ");
+      return redirectBack(
+        result.ok ? `preflight passed — ${timings}` : `preflight failed — ${result.detail ?? ""} ${timings}`,
+      );
+    } catch (err) {
+      return redirectBack(`preflight failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   if (url.pathname === "/manage/whatsapp/import-code" && request.method === "POST") {

@@ -27,16 +27,21 @@ import type {
   MessageContext,
   MessageRow,
   PairingResult,
+  PreflightResult,
   SendResult,
   SyncResult,
   WhatsAppBridgeApi,
 } from "@toolbox/mcp-shared";
+import { Curve, fetchLatestWaWebVersion } from "baileys";
+import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
+import { fetchAndDecrypt, MediaError } from "./media";
+import { chatNameFor, toJid, toStoredMessage } from "./normalize";
+import { DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
 import { Store } from "./store";
 
 export interface BridgeEnv {
   BRIDGE: DurableObjectNamespace;
-  MEDIA?: R2Bucket;
 }
 
 /** How often the bridge wakes to drain WhatsApp's offline queue. */
@@ -54,17 +59,34 @@ const MAX_CYCLES = 10;
 /** How long a history-import code stays valid. */
 const IMPORT_CODE_TTL_MS = 30 * 60 * 1000;
 
+/** How long a pairing attempt is given before it is written off. */
+const PAIRING_WINDOW_MS = 3 * 60 * 1000;
+
+/** Baileys re-buffers events right after the drain marker; wait it out. */
+const POST_DRAIN_SETTLE_MS = 3000;
+
+// Inline caps. Images come back to the model as image blocks, which cost
+// image tokens rather than ~1.37 characters per byte, so they can be larger.
+const IMAGE_INLINE_CAP = 2 * 1024 * 1024;
+const FILE_INLINE_CAP = 1024 * 1024;
+
 export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsAppBridgeApi {
   private sql: SqlStorage;
   private store: Store;
   private auth: SqlAuthState;
+  /** One WhatsApp connection at a time: two would fight over the session. */
+  private busy = false;
+  /** The detached tail of a pairing attempt, kept referenced while it runs. */
+  private pairing: Promise<void> | null = null;
 
   constructor(ctx: DurableObjectState, env: BridgeEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(META_SCHEMA);
     this.store = new Store(this.sql);
-    this.auth = makeSqlAuthState(this.sql);
+    // Durable Object SQLite rejects BEGIN/SAVEPOINT, so batched key writes go
+    // through the platform's own synchronous transaction.
+    this.auth = makeSqlAuthState(this.sql, (fn) => ctx.storage.transactionSync(fn));
   }
 
   // --- meta helpers ---------------------------------------------------------
@@ -114,6 +136,56 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     };
   }
 
+  // The pairing path does two things nothing else does: it generates
+  // INITIAL_PREKEY_COUNT (812) Curve25519 keypairs in one invocation, and it
+  // asks the key store for all 812 back in a single `get`. Both are worth
+  // proving on the deployed object before a human is standing there with a
+  // phone: the first is the largest CPU spike in the bridge's life, and the
+  // second is the query that would exceed SQLite's 100-parameter cap if the
+  // chunking regressed.
+  async preflight(): Promise<PreflightResult> {
+    if (this.auth.isPaired()) {
+      return { ok: false, steps: [], detail: "refusing to run against a paired session" };
+    }
+    // workerd freezes the clock during synchronous work, so these timings read
+    // 0 for anything that never awaits. The signal is that the steps complete
+    // at all — a CPU-budget failure surfaces as error 1102, not a slow number.
+    const steps: PreflightResult["steps"] = [];
+    const time = <T>(name: string, fn: () => T): T => {
+      const start = Date.now();
+      const value = fn();
+      steps.push({ name, ms: Date.now() - start, detail: "" });
+      return value;
+    };
+    try {
+      const COUNT = 812;
+      const keys = time("generate 812 keypairs", () =>
+        Object.fromEntries(
+          Array.from({ length: COUNT }, (_, index) => [String(index + 1), Curve.generateKeyPair()]),
+        ),
+      );
+      time("write them through the key store", () => {
+        void this.auth.state.keys.set({ "pre-key": keys });
+      });
+      const ids = Object.keys(keys);
+      const read = time("read all 812 back in one get", () => this.auth.state.keys.get("pre-key", ids));
+      const found = Object.keys(read as Record<string, unknown>).length;
+      steps[steps.length - 1]!.detail = `${found} of ${COUNT} returned`;
+      time("clean up", () => {
+        void this.auth.state.keys.set({
+          "pre-key": Object.fromEntries(ids.map((id) => [id, null])),
+        });
+      });
+      const ok = found === COUNT;
+      this.log("info", `preflight ${ok ? "passed" : "failed"}: ${steps.map((s) => `${s.name} ${s.ms}ms`).join(", ")}`);
+      return { ok, steps, detail: ok ? null : `key store returned ${found} of ${COUNT}` };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.log("error", `preflight failed: ${detail}`);
+      return { ok: false, steps, detail };
+    }
+  }
+
   async setAutoSync(enabled: boolean): Promise<{ enabled: boolean; nextAlarmAt: number | null }> {
     this.setMeta("autoSync", enabled);
     if (enabled) {
@@ -124,26 +196,247 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     return { enabled, nextAlarmAt: (await this.ctx.storage.getAlarm()) ?? null };
   }
 
-  async requestPairingCode(_phoneNumber: string): Promise<PairingResult> {
-    throw new Error("pairing is not wired up yet");
+  // --- the WhatsApp connection ---------------------------------------------
+
+  // Every cycle writes through these, so a drain, a history sync and a send
+  // all land in the store the same way.
+  private makeHandlers(counters: { messages: number; chats: number }): SessionHandlers {
+    return {
+      auth: this.auth,
+      // Pairing mutates creds seconds before WhatsApp tears the stream down;
+      // an unpersisted `advSecretKey` or `account` loses the pairing outright.
+      onCreds: () => this.auth.saveCreds(),
+      onMessages: (messages, type) => {
+        const meId = this.auth.state.creds.me?.id ?? null;
+        for (const message of messages) {
+          const row = toStoredMessage(message, meId);
+          if (!row) continue;
+          this.store.upsertMessage(row);
+          this.store.upsertChat({
+            jid: row.chatJid,
+            name: chatNameFor(message),
+            lastMessageTime: row.timestamp,
+          });
+          counters.messages++;
+        }
+        if (messages.length > 0) this.log("info", `stored ${messages.length} ${type} messages`);
+      },
+      onChats: (chats) => {
+        for (const chat of chats) {
+          this.store.upsertChat(chat);
+          counters.chats++;
+        }
+      },
+      log: (level, message) => this.log(level, message),
+    };
+  }
+
+  private log(level: "info" | "warn" | "error", message: string): void {
+    // wrangler tail withholds logs from WebSocket-upgraded invocations until
+    // the socket closes, so the bridge keeps its own short log instead.
+    const entry = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
+    const lines = [entry, ...this.getMeta<string[]>("log", [])].slice(0, 40);
+    this.setMeta("log", lines);
+  }
+
+  private async openSession(counters: { messages: number; chats: number }): Promise<Session> {
+    return new Session({ ...this.makeHandlers(counters), version: await this.waVersion() });
+  }
+
+  // The web version is md5'd into the registration payload, so a stale one can
+  // get the connection rejected. Cheap to cache for a day.
+  private async waVersion(): Promise<WAVersion | undefined> {
+    const cached = this.getMeta<{ version: WAVersion; at: number } | null>("waVersion", null);
+    if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.version;
+    try {
+      const { version } = await fetchLatestWaWebVersion({});
+      this.setMeta("waVersion", { version, at: Date.now() });
+      return version;
+    } catch (err) {
+      this.log("warn", `could not fetch the WhatsApp web version: ${String(err)}`);
+      return cached?.version;
+    }
+  }
+
+  async requestPairingCode(phoneNumber: string): Promise<PairingResult> {
+    if (this.busy) throw new Error("the bridge is busy — try again in a minute");
+    if (this.auth.isPaired()) throw new Error("a device is already paired; unpair it first");
+    const digits = phoneNumber.replace(/[^0-9]/g, "");
+    if (digits.length < 8) throw new Error("phone number must be international digits, no +");
+
+    // requestPairingCode writes creds.me before the pairing is confirmed, so a
+    // previously abandoned attempt would send the next connect down the login
+    // path with an unregistered identity. Always start from a clean identity.
+    this.auth.reset();
+    this.busy = true;
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setMeta("connection", "connecting");
+      session = await this.openSession(counters);
+      // The code can only be requested once the handshake has produced a QR.
+      await session.waitForPairingWindow(60_000);
+      const code = await session.sock.requestPairingCode(digits);
+      const expiresAt = Date.now() + PAIRING_WINDOW_MS;
+      this.setMeta("pendingPairing", { phoneNumber: digits, code, expiresAt });
+      this.log("info", `pairing code issued for ${digits}`);
+      // The rest happens on WhatsApp's schedule — minutes, maybe. Hand the
+      // code back now and let the socket run on; an open outbound socket keeps
+      // this object resident.
+      this.pairing = this.finishPairing(session, counters).finally(() => {
+        this.busy = false;
+        this.pairing = null;
+      });
+      return { code, phoneNumber: digits, expiresAt };
+    } catch (err) {
+      this.busy = false;
+      this.setMeta("connection", "idle");
+      this.setMeta("lastError", err instanceof Error ? err.message : String(err));
+      await session?.close();
+      throw err;
+    }
+  }
+
+  // Second half of pairing: WhatsApp confirms, then immediately closes the
+  // stream with 515 "restart required" — that close is success, not failure,
+  // and the session only becomes usable on the reconnect that follows.
+  private async finishPairing(
+    session: Session,
+    counters: { messages: number; chats: number },
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await session.waitForUpdate((update) => update.connection === "close", PAIRING_WINDOW_MS, {
+        rejectOnClose: false,
+      });
+      const code = session.lastDisconnectCode;
+      await session.close();
+      if (code !== DisconnectReason.restartRequired) {
+        const detail = `pairing did not complete (${code ?? "no code"}: ${session.lastDisconnectMessage ?? "closed"})`;
+        this.setMeta("lastError", detail);
+        this.setMeta("pendingPairing", null);
+        if (!this.auth.isPaired()) this.auth.reset();
+        this.recordCycle({ startedAt, endedAt: Date.now(), outcome: "error", messages: 0, chats: 0, detail });
+        return;
+      }
+
+      const second = await this.openSession(counters);
+      try {
+        await second.waitForOpen(90_000);
+        this.setMeta("pendingPairing", null);
+        this.setMeta("lastConnectedAt", Date.now());
+        this.setMeta("lastError", null);
+        this.setMeta("connection", "open");
+        this.log("info", `paired as ${this.auth.state.creds.me?.id ?? "unknown"}`);
+        // Best-effort: a fresh device usually has a backlog waiting.
+        await second.waitForDrain(90_000).catch((err) => this.log("warn", `first drain: ${String(err)}`));
+        await scheduler.wait(POST_DRAIN_SETTLE_MS);
+        this.setMeta("lastDrainAt", Date.now());
+      } finally {
+        await second.close();
+      }
+
+      this.setMeta("autoSync", true);
+      await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
+      this.recordCycle({
+        startedAt,
+        endedAt: Date.now(),
+        outcome: "ok",
+        messages: counters.messages,
+        chats: counters.chats,
+        detail: "paired",
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      this.recordCycle({ startedAt, endedAt: Date.now(), outcome: "error", messages: 0, chats: 0, detail });
+    } finally {
+      this.setMeta("connection", "idle");
+    }
   }
 
   async unpair(): Promise<{ ok: boolean }> {
     this.auth.reset();
     this.setMeta("pendingPairing", null);
     this.setMeta("lastError", null);
+    this.setMeta("autoSync", false);
     await this.ctx.storage.deleteAlarm();
+    this.log("info", "device forgotten");
     return { ok: true };
   }
 
   async syncNow(): Promise<SyncResult> {
-    throw new Error("sync is not wired up yet");
+    if (!this.auth.isPaired()) {
+      return { ok: false, messages: 0, chats: 0, detail: "no device is paired" };
+    }
+    return this.runCycle();
+  }
+
+  // Connect, let WhatsApp hand over whatever it queued, disconnect. Never
+  // throws: the alarm path depends on that, because a thrown alarm is retried
+  // with backoff and then dropped for good.
+  private async runCycle(): Promise<SyncResult> {
+    if (this.busy) {
+      return { ok: false, messages: 0, chats: 0, detail: "a sync is already running" };
+    }
+    this.busy = true;
+    const startedAt = Date.now();
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    let ok = false;
+    let detail: string | null = null;
+    try {
+      this.setMeta("connection", "connecting");
+      session = await this.openSession(counters);
+      await session.waitForOpen(60_000);
+      this.setMeta("connection", "open");
+      this.setMeta("lastConnectedAt", Date.now());
+      await session.waitForDrain(90_000);
+      // The drain marker is not the end of the story: Baileys re-buffers
+      // straight afterwards and flushes on a later task.
+      await scheduler.wait(POST_DRAIN_SETTLE_MS);
+      this.setMeta("lastDrainAt", Date.now());
+      detail = session.offlineCount === null ? null : `offline queue: ${session.offlineCount}`;
+      ok = true;
+      this.setMeta("lastError", null);
+    } catch (err) {
+      detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      // A device unlinked on the phone can never come back on these creds;
+      // stop retrying and show it as unpaired rather than failing forever.
+      if (session && isFatalDisconnect(session.lastDisconnectCode)) {
+        if (session.lastDisconnectCode !== DisconnectReason.connectionReplaced) {
+          this.auth.reset();
+          detail = `${detail} — session is dead, pair again`;
+        }
+        this.setMeta("autoSync", false);
+        await this.ctx.storage.deleteAlarm();
+      }
+    } finally {
+      this.setMeta("connection", "closing");
+      await session?.close();
+      this.setMeta("connection", "idle");
+      this.busy = false;
+    }
+    this.recordCycle({
+      startedAt,
+      endedAt: Date.now(),
+      outcome: ok ? "ok" : "error",
+      messages: counters.messages,
+      chats: counters.chats,
+      detail,
+    });
+    return { ok, messages: counters.messages, chats: counters.chats, detail };
   }
 
   async alarm(): Promise<void> {
-    if (this.getMeta<boolean>("autoSync", false)) {
-      await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
-    }
+    const auto = this.getMeta<boolean>("autoSync", false);
+    // Re-arm before doing any work: an alarm that throws is retried with
+    // backoff and dropped after six failures, and a dropped alarm means the
+    // bridge silently stops syncing.
+    if (auto) await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
+    if (!auto || !this.auth.isPaired() || this.busy) return;
+    await this.runCycle();
   }
 
   // --- reads ----------------------------------------------------------------
@@ -180,14 +473,81 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     return this.store.getMessageContext(messageId, before, after);
   }
 
-  async downloadMedia(_messageId: string, _chatJid: string): Promise<MediaResult> {
-    return { ok: false, detail: "media download is not wired up yet" };
+  async downloadMedia(messageId: string, chatJid: string): Promise<MediaResult> {
+    const descriptor = this.store.mediaFor(messageId, chatJid);
+    if (!descriptor) return { ok: false, detail: "no such message in the store" };
+    if (!descriptor.mediaType) return { ok: false, detail: "that message has no attachment" };
+    try {
+      const media = await fetchAndDecrypt(descriptor);
+      const cap = media.mimeType.startsWith("image/") ? IMAGE_INLINE_CAP : FILE_INLINE_CAP;
+      if (media.bytes.length > cap) {
+        return {
+          ok: false,
+          size: media.bytes.length,
+          mimeType: media.mimeType,
+          filename: media.filename,
+          detail: `attachment is ${Math.round(media.bytes.length / 1024)} KB, over the ${Math.round(cap / 1024)} KB inline limit`,
+        };
+      }
+      return {
+        ok: true,
+        base64: Buffer.from(media.bytes).toString("base64"),
+        mimeType: media.mimeType,
+        filename: media.filename,
+        size: media.bytes.length,
+      };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (err instanceof MediaError && err.retryable) this.log("warn", `media expired: ${messageId}`);
+      return { ok: false, detail };
+    }
   }
 
   // --- writes ---------------------------------------------------------------
 
-  async sendMessage(_recipient: string, _message: string): Promise<SendResult> {
-    return { ok: false, detail: "sending is not wired up yet" };
+  async sendMessage(recipient: string, message: string): Promise<SendResult> {
+    if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
+    if (!message.trim()) return { ok: false, detail: "refusing to send an empty message" };
+    if (this.busy) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+
+    let jid: string;
+    try {
+      jid = toJid(recipient);
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    }
+
+    this.busy = true;
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setMeta("connection", "connecting");
+      session = await this.openSession(counters);
+      await session.waitForOpen(60_000);
+      this.setMeta("connection", "open");
+      this.setMeta("lastConnectedAt", Date.now());
+      const sent = await session.sock.sendMessage(jid, { text: message });
+      if (sent) {
+        // emitOwnEvents is off, so our own message never comes back through
+        // messages.upsert; file it directly or the store would forget it.
+        const row = toStoredMessage(sent, this.auth.state.creds.me?.id ?? null);
+        if (row) {
+          this.store.upsertMessage(row);
+          this.store.upsertChat({ jid: row.chatJid, lastMessageTime: row.timestamp });
+        }
+      }
+      this.log("info", `sent a message to ${jid}`);
+      return { ok: true, messageId: sent?.key?.id ?? undefined };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      return { ok: false, detail };
+    } finally {
+      this.setMeta("connection", "closing");
+      await session?.close();
+      this.setMeta("connection", "idle");
+      this.busy = false;
+    }
   }
 
   async sendFile(
@@ -197,7 +557,14 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     _mediaType?: string,
     _caption?: string,
   ): Promise<SendResult> {
-    return { ok: false, detail: "sending is not wired up yet" };
+    // Baileys' media send writes the encrypted file to os.tmpdir() and uploads
+    // it with node:https — neither exists in workerd. Doing this properly means
+    // encrypting in memory and calling relayMessage with a hand-built proto;
+    // until then, say so plainly rather than failing obscurely.
+    return {
+      ok: false,
+      detail: "sending files is not supported by the cloud bridge yet — use the local WhatsApp tools",
+    };
   }
 
   // --- import ---------------------------------------------------------------
