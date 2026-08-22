@@ -1,24 +1,36 @@
 // The management interface: a tiny server-rendered app on /manage where the
-// owner toggles services, sees linked accounts, and (from G1) links new ones.
+// owner toggles services, links/unlinks Google accounts, and picks defaults.
 // Authenticated by the same Google identity sign-in as the connector, with
 // its own HMAC-signed session cookie — no dependency on any MCP grant.
 //
 // CSRF posture: session cookie is SameSite=Lax + HttpOnly + Secure, so
-// cross-site form POSTs never carry it; the login flow pins a nonce cookie
-// against the signed OAuth state.
+// cross-site form POSTs never carry it; the login and link flows each pin a
+// nonce cookie against their signed OAuth state (Lax cookies do ride along
+// on Google's top-level redirect back to /callback).
 
 import { escapeHtml } from "@toolbox/mcp-shared";
-import { randomToken, signToken, verifyToken } from "./crypto";
+import { encryptJson, decryptJson, importVaultKey, randomToken, signToken, verifyToken } from "./crypto";
 import { vaultFor, type Env } from "./env";
 import {
   buildIdentityRedirect,
+  buildLinkRedirect,
   emailAllowed,
   exchangeIdentityCode,
+  exchangeLinkCode,
   fetchUserEmail,
+  GOOGLE_READ_SCOPES,
+  GOOGLE_WRITE_SCOPES,
+  revokeToken,
+  scopesAllowWrite,
   UpstreamError,
 } from "./google";
-import { defaultServiceToggles, SERVICES } from "./registry";
+import { defaultServiceToggles, GOOGLE_ACCOUNT_SERVICE, SERVICES } from "./registry";
 import type { AccountInfo } from "./vault";
+
+// What a vault account row's ciphertext decrypts to.
+export interface VaultBlob {
+  refreshToken: string;
+}
 
 const SESSION_COOKIE = "gateway_session";
 const NONCE_COOKIE = "gateway_login_nonce";
@@ -33,6 +45,14 @@ interface SessionPayload {
 
 interface LoginState {
   kind: "manage-login";
+  nonce: string;
+  exp: number;
+}
+
+interface LinkState {
+  kind: "link";
+  owner: string; // the manage session's email — whose vault gets the account
+  write: boolean;
   nonce: string;
   exp: number;
 }
@@ -75,6 +95,7 @@ function page(title: string, body: string, status = 200, headers: Record<string,
   form { display: inline; }
   button { padding: .25rem .9rem; }
   .muted { color: #666; font-size: .9rem; }
+  .linkbox { border: 1px solid #ddd; padding: .8rem 1rem; margin: .8rem 0 1.6rem; }
 </style></head>
 <body>${body}</body></html>`;
   return new Response(html, {
@@ -100,13 +121,31 @@ function renderManagePage(email: string, services: Record<string, boolean>, acco
 
   const accountRows =
     accounts.length === 0
-      ? `<tr><td colspan="3" class="muted">No linked accounts yet — account linking arrives with the first real service module.</td></tr>`
+      ? `<tr><td colspan="4" class="muted">No linked accounts yet.</td></tr>`
       : accounts
           .map(
             (acct) => `<tr>
       <td>${escapeHtml(acct.service)}</td>
-      <td>${escapeHtml(acct.label)}${acct.isDefault ? " (default)" : ""}</td>
-      <td>${acct.enabled ? "enabled" : "disabled"}</td>
+      <td>${escapeHtml(acct.label)}${acct.isDefault ? " <strong>(default)</strong>" : ""}</td>
+      <td>${scopesAllowWrite(acct.scopes) ? "read + write" : "read-only"}</td>
+      <td>
+        ${
+          acct.isDefault
+            ? ""
+            : `<form method="post" action="/manage/accounts">
+          <input type="hidden" name="action" value="default">
+          <input type="hidden" name="service" value="${escapeHtml(acct.service)}">
+          <input type="hidden" name="label" value="${escapeHtml(acct.label)}">
+          <button type="submit">Set default</button>
+        </form>`
+        }
+        <form method="post" action="/manage/accounts">
+          <input type="hidden" name="action" value="unlink">
+          <input type="hidden" name="service" value="${escapeHtml(acct.service)}">
+          <input type="hidden" name="label" value="${escapeHtml(acct.label)}">
+          <button type="submit">Unlink</button>
+        </form>
+      </td>
     </tr>`,
           )
           .join("\n");
@@ -121,9 +160,18 @@ when they next check, new conversations immediately.</p>
 ${serviceRows}
 </table>
 <h2>Linked accounts</h2>
-<table><tr><th>Service</th><th>Account</th><th>Status</th></tr>
+<table><tr><th>Service</th><th>Account</th><th>Access</th><th></th></tr>
 ${accountRows}
-</table>`;
+</table>
+<div class="linkbox">
+  <form method="post" action="/manage/link">
+    <label><input type="checkbox" name="write" value="1"> include write scopes (drafts, labels, filters, Drive edits)</label>
+    <button type="submit">Link a Google account</button>
+  </form>
+  <div class="muted">Opens Google's consent screen; the account you approve there becomes the
+  linked account (it must be on the gateway's allowlist). Relinking an account replaces its
+  stored grant — use it to change access level.</div>
+</div>`;
 }
 
 async function handleLogin(env: Env, url: URL): Promise<Response> {
@@ -192,6 +240,95 @@ export async function handleManageCallback(
   return new Response(null, { status: 302, headers });
 }
 
+// Account linking: a signed-in owner kicks off a real service-scope Google
+// authorization; the approved account's refresh token lands encrypted in the
+// owner's vault, labelled by the account's email.
+async function handleLinkStart(request: Request, env: Env, url: URL, owner: string): Promise<Response> {
+  const form = await request.formData();
+  const write = form.get("write") === "1";
+  const nonce = randomToken();
+  const state = await signToken(env.COOKIE_SECRET, {
+    kind: "link",
+    owner,
+    write,
+    nonce,
+    exp: Date.now() + LOGIN_TTL_MS,
+  } satisfies LinkState);
+  const redirect = buildLinkRedirect({
+    clientId: env.GWS_CLIENT_ID,
+    redirectUri: `${url.origin}/callback`,
+    state: `l.${state}`,
+    scopes: write ? GOOGLE_WRITE_SCOPES : GOOGLE_READ_SCOPES,
+  });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: redirect,
+      "set-cookie": setCookie(NONCE_COOKIE, nonce, LOGIN_TTL_MS / 1000),
+    },
+  });
+}
+
+// Invoked from the worker's shared /callback route for "l."-prefixed states.
+export async function handleLinkCallback(
+  request: Request,
+  env: Env,
+  url: URL,
+  stateToken: string,
+): Promise<Response> {
+  const state = await verifyToken<LinkState>(env.COOKIE_SECRET, stateToken);
+  if (!state || state.kind !== "link" || state.exp < Date.now()) {
+    return page("gateway", "<p>Link flow expired — <a href=\"/manage\">try again</a>.</p>", 400);
+  }
+  if (getCookie(request, NONCE_COOKIE) !== state.nonce) {
+    return page("gateway", "<p>Link did not originate here — <a href=\"/manage\">try again</a>.</p>", 400);
+  }
+  // The vault being written must belong to the live manage session.
+  const owner = await sessionEmail(request, env);
+  if (!owner || owner !== state.owner) {
+    return page("gateway", "<p>Manage session expired — <a href=\"/manage\">sign in and retry</a>.</p>", 403);
+  }
+  const upstreamError = url.searchParams.get("error");
+  if (upstreamError) {
+    return page("gateway", `<p>Google authorization failed: ${escapeHtml(upstreamError)}</p>`, 403);
+  }
+  const code = url.searchParams.get("code");
+  if (!code) return page("gateway", "<p>Google returned no code.</p>", 400);
+
+  const requested = state.write ? GOOGLE_WRITE_SCOPES : GOOGLE_READ_SCOPES;
+  let label: string;
+  let refreshToken: string;
+  let scopes: string[];
+  try {
+    const result = await exchangeLinkCode({
+      clientId: env.GWS_CLIENT_ID,
+      clientSecret: env.GWS_CLIENT_SECRET,
+      code,
+      redirectUri: `${url.origin}/callback`,
+      requestedScopes: requested,
+    });
+    refreshToken = result.tokens.refreshToken;
+    scopes = result.scopes;
+    label = (await fetchUserEmail(result.tokens.accessToken)).trim().toLowerCase();
+  } catch (err) {
+    const message = err instanceof UpstreamError ? err.message : "link failed";
+    return page("gateway", `<p>${escapeHtml(message)}</p>`, 502);
+  }
+  // The linked account itself must be allowlisted, not just the owner.
+  if (!emailAllowed(label, env.ALLOWED_EMAILS)) {
+    await revokeToken(refreshToken);
+    return page("gateway", "<p>That Google account is not on this gateway's allowlist.</p>", 403);
+  }
+
+  const key = await importVaultKey(env.VAULT_KEY);
+  const ciphertext = await encryptJson(key, { refreshToken } satisfies VaultBlob);
+  await vaultFor(env, owner).putAccount(GOOGLE_ACCOUNT_SERVICE, label, ciphertext, scopes);
+  return new Response(null, {
+    status: 302,
+    headers: { location: "/manage", "set-cookie": clearCookie(NONCE_COOKIE) },
+  });
+}
+
 export async function handleManage(request: Request, env: Env, url: URL): Promise<Response> {
   if (url.pathname === "/manage/login" && request.method === "GET") {
     return handleLogin(env, url);
@@ -219,6 +356,43 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
       return new Response("unknown service", { status: 400 });
     }
     await vaultFor(env, email).setServiceEnabled(service, enabled === "1");
+    return new Response(null, { status: 303, headers: { location: "/manage" } });
+  }
+
+  if (url.pathname === "/manage/link" && request.method === "POST") {
+    if (!email) return new Response("not signed in", { status: 401 });
+    return handleLinkStart(request, env, url, email);
+  }
+
+  if (url.pathname === "/manage/accounts" && request.method === "POST") {
+    if (!email) return new Response("not signed in", { status: 401 });
+    const form = await request.formData();
+    const action = form.get("action");
+    const service = form.get("service");
+    const label = form.get("label");
+    if (typeof service !== "string" || typeof label !== "string" || service === "" || label === "") {
+      return new Response("missing service or label", { status: 400 });
+    }
+    const vault = vaultFor(env, email);
+    if (action === "default") {
+      await vault.setDefaultAccount(service, label);
+    } else if (action === "unlink") {
+      // Revoke upstream first (best-effort) so no live refresh token
+      // dangles after the vault row is gone.
+      const acct = await vault.getAccount(service, label);
+      if (acct) {
+        try {
+          const key = await importVaultKey(env.VAULT_KEY);
+          const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
+          await revokeToken(blob.refreshToken);
+        } catch {
+          // an undecryptable row still gets deleted below
+        }
+      }
+      await vault.deleteAccount(service, label);
+    } else {
+      return new Response("unknown action", { status: 400 });
+    }
     return new Response(null, { status: 303, headers: { location: "/manage" } });
   }
 
