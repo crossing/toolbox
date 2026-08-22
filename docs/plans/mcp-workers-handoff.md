@@ -13,7 +13,7 @@ connectors (OAuth handshake, real tool calls against live data):
 |---|---|---|---|
 | freeagent-mcp | `https://freeagent-mcp.xing.works/mcp` | 10 read + `ping_write` spike | Phase 1 done |
 | gws-mcp | `https://gws-mcp.xing.works/mcp` | Gmail 9r+8w, Drive 3r+3w | Phase 2 done |
-| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (all with `account` param) | G1 done (see mcp-gateway.md) |
+| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (with `account` param), FreeAgent 10r | G2 done (see mcp-gateway.md) |
 
 Work happens on branch `feature/mcp-workers` in a dedicated worktree
 (`git worktree list`); the branch is pushed with a PR open to master.
@@ -24,7 +24,11 @@ approved account's refresh token AES-GCM-encrypted in the owner's vault DO
 (read-only or read+write scopes per a checkbox at link time), unlink revokes
 the upstream grant best-effort, and the per-service default account serves
 tools called without an `account` argument. Linked accounts must themselves
-be on `ALLOWED_EMAILS`.
+be on `ALLOWED_EMAILS`. FreeAgent links are company-gated instead
+(`ALLOWED_COMPANY` vs the subdomain fetched with the new grant); their vault
+blobs persist the full token set because FreeAgent access tokens live ~7
+days and the refresh token may rotate on use — every in-DO refresh writes
+the rotated set back.
 
 ## Architecture recap (what you must not regress)
 

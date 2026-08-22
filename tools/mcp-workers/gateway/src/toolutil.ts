@@ -4,6 +4,7 @@
 // no linked account. Both surface as clean tool errors pointing at /manage.
 
 import { z } from "zod";
+import { FreeAgentApiError, FreeAgentUpstreamError } from "./freeagentapi";
 import { GoogleApiError } from "./googleapi";
 import { UpstreamError } from "./google";
 
@@ -41,9 +42,13 @@ export function asError(err: unknown) {
   let text: string;
   if (err instanceof GoogleApiError && err.status === 401) {
     text = "Google rejected the access token (401). Re-link this account on the management page.";
+  } else if (err instanceof FreeAgentApiError && err.status === 401) {
+    text = "FreeAgent rejected the access token (401). Re-link this account on the management page.";
   } else if (
     err instanceof GoogleApiError ||
+    err instanceof FreeAgentApiError ||
     err instanceof UpstreamError ||
+    err instanceof FreeAgentUpstreamError ||
     err instanceof ServiceDisabledError ||
     err instanceof NoLinkedAccountError
   ) {
