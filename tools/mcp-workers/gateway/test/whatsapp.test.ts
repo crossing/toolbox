@@ -30,6 +30,7 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
       chatCount: 2,
       messageCount: 3,
       recentCycles: [],
+      log: [],
     }),
     preflight: notImplemented as never,
     requestPairingCode: notImplemented as never,

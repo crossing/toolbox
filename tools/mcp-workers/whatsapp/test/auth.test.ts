@@ -112,11 +112,36 @@ describe("makeSqlAuthState", () => {
     const beforeReset = Buffer.from(auth.state.creds.noiseKey.private);
     auth.reset();
     expect(auth.isPaired()).toBe(false);
+    // Not just "not paired": every trace of the old identity has to go, or
+    // Baileys takes the login path on the next connect and pairing never
+    // starts.
+    expect(auth.state.creds.me).toBeUndefined();
+    expect(auth.state.creds.registered).toBe(false);
+    expect(auth.state.creds.account).toBeUndefined();
+    expect(auth.state.creds.signalIdentities).toBeUndefined();
+    expect(auth.state.creds.pairingCode).toBeUndefined();
+    expect(makeSqlAuthState(sql).state.creds.me).toBeUndefined();
     expect(Buffer.from(auth.state.creds.noiseKey.private)).not.toEqual(beforeReset);
     // The same creds object stays live for an already-running socket.
     expect(makeSqlAuthState(sql).state.creds.noiseKey.private).toEqual(
       auth.state.creds.noiseKey.private,
     );
+    sql.close();
+  });
+
+  it("reset() clears a half-finished pairing left by requestPairingCode", () => {
+    const sql = makeFakeSql();
+    const auth = makeSqlAuthState(sql);
+    // What Baileys writes when a pairing code is requested and then abandoned:
+    // `me` is set, `registered` is still false.
+    auth.state.creds.me = { id: "447700900000:1@s.whatsapp.net", name: "~" };
+    auth.state.creds.pairingCode = "ABCD1234";
+    auth.saveCreds();
+    expect(makeSqlAuthState(sql).state.creds.me).toBeDefined();
+
+    auth.reset();
+    expect(auth.state.creds.me).toBeUndefined();
+    expect(auth.state.creds.pairingCode).toBeUndefined();
     sql.close();
   });
 

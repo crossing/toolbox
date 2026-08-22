@@ -22,6 +22,7 @@ import type { CacheStore, ConnectionState, WAMessage, WAVersion } from "baileys"
 // ILogger is declared in Utils/logger.d.ts and not re-exported from the root.
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import type { SqlAuthState } from "./auth";
+import { wsDebug } from "./ws-shim";
 
 export const DEFAULT_BROWSER: [string, string, string] = ["Cloudflare", "Chrome", "1.0"];
 
@@ -92,6 +93,7 @@ export class Session {
   offlineCount: number | null = null;
 
   constructor(private handlers: SessionHandlers) {
+    handlers.log("info", `opening socket with version ${handlers.version ? handlers.version.join(".") : "baileys default"}`);
     this.sock = makeWASocket({
       auth: handlers.auth.state,
       logger: makeLogger(handlers.log),
@@ -113,6 +115,23 @@ export class Session {
     });
 
     this.sock.ev.on("creds.update", () => handlers.onCreds());
+
+    // Every state change, in the bridge's own log: a stalled handshake is
+    // otherwise invisible, since wrangler tail withholds logs from
+    // WebSocket-upgraded invocations until the socket closes.
+    this.sock.ev.on("connection.update", (update) => {
+      const err = update.lastDisconnect?.error as
+        | { output?: { statusCode?: number; payload?: unknown }; message?: string }
+        | undefined;
+      const shape = [
+        update.connection ? `connection=${update.connection}` : "",
+        update.qr ? "qr" : "",
+        update.isNewLogin ? "isNewLogin" : "",
+        update.receivedPendingNotifications ? "drained" : "",
+        err ? `closed code=${err.output?.statusCode ?? "?"} reason=${(err.message ?? "").slice(0, 120)}` : "",
+      ].filter(Boolean).join(" ");
+      if (shape) handlers.log("info", `connection.update: ${shape}`);
+    });
 
     this.sock.ev.on("connection.update", (update) => {
       if (update.connection === "close") {
@@ -223,16 +242,26 @@ export class Session {
     return this.waitForUpdate((update) => Boolean(update.qr), timeoutMs);
   }
 
+  /** The socket-level trace of this connection, newest last. */
+  wsTrace(): string[] {
+    return [...wsDebug];
+  }
+
   /** Clean shutdown that preserves the session; never `logout()`. */
   async close(): Promise<void> {
     if (this.ended) return;
     this.ended = true;
+    this.handlers.log("info", `socket trace: ${wsDebug.slice(-12).join(" | ")}`);
     for (const waiter of this.waiters) clearTimeout(waiter.timer);
     this.waiters = [];
     try {
-      // Baileys awaits the WebSocket's `close` event with no timeout of its
-      // own; the shim guarantees one, but a wedged shutdown must never eat the
-      // alarm's wall clock either.
+      // sock.end() finishes with ev.destroy(), which DISCARDS whatever is in
+      // Baileys' event buffer rather than flushing it — and the buffer is
+      // re-armed the moment the drain marker fires (Socket/chats.js), holding
+      // the tail of the offline queue. Those messages were already acked on
+      // the wire, so WhatsApp will never send them again: flush before ending
+      // or they are lost for good.
+      this.sock.ev.flush();
       await Promise.race([this.sock.end(undefined), scheduler.wait(8000)]);
     } catch (err) {
       this.handlers.log("warn", `closing the socket threw: ${String(err)}`);

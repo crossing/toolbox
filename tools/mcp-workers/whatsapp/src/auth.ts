@@ -138,6 +138,16 @@ export function makeSqlAuthState(
       sql.exec("DELETE FROM auth_keys");
       sql.exec("DELETE FROM auth_creds");
       const fresh = initAuthCreds();
+      // The live socket holds this exact object, so it is mutated in place —
+      // but a plain Object.assign would leave behind every key the fresh creds
+      // do not have. `me` is the one that matters: Baileys chooses the login
+      // path over the registration path purely on `creds.me` being set
+      // (Utils/validate-connection.js), so a stale one from an abandoned
+      // pairing makes the next connect ask to log in as a device that was
+      // never registered, and no pairing stanza ever arrives.
+      for (const key of Object.keys(creds)) {
+        delete (creds as unknown as Record<string, unknown>)[key];
+      }
       Object.assign(creds, fresh);
       sql.exec("INSERT INTO auth_creds (id, value) VALUES (1, ?)", encode(creds));
     },

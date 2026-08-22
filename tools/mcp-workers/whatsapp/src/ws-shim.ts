@@ -14,8 +14,9 @@
 
 import { EventEmitter } from "events";
 
-// Spike-only diagnostic ring buffer; the /connect probe reads it. Removed
-// with the shim's productionization.
+// A short diagnostic ring, drained into the bridge's log when a cycle ends.
+// wrangler tail withholds logs from WebSocket-upgraded invocations, so this is
+// often the only way to see what a handshake actually did.
 export const wsDebug: string[] = [];
 function dbg(msg: string): void {
   wsDebug.push(`${wsDebug.length}:${msg}`);
@@ -45,6 +46,10 @@ export default class WorkerdWebSocket extends EventEmitter {
 
   readyState: number = CONNECTING;
   private socket: WebSocket | null = null;
+  // close() can land while the upgrade fetch is still in flight; without this
+  // the socket would be accepted afterwards and left open forever, and the
+  // next cycle's connection would be answered with connectionReplaced.
+  private closeRequested = false;
 
   constructor(url: string | URL, options: WsOptions = {}) {
     super();
@@ -67,6 +72,16 @@ export default class WorkerdWebSocket extends EventEmitter {
     }
     const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket;
     dbg(`fetch status=${resp.status} hasWS=${!!socket}`);
+    if (this.closeRequested) {
+      dbg("upgrade completed after close was requested; dropping it");
+      try {
+        socket?.accept();
+        socket?.close(1000, "closed before use");
+      } catch {
+        /* nothing to close */
+      }
+      return;
+    }
     if (resp.status !== 101 || !socket) {
       this.readyState = CLOSED;
       this.emit("unexpected-response");
@@ -146,6 +161,7 @@ export default class WorkerdWebSocket extends EventEmitter {
   close(code?: number, reason?: string): void {
     if (this.readyState === CLOSED || this.readyState === CLOSING) return;
     const wasOpen = this.readyState === OPEN && this.socket !== null;
+    this.closeRequested = true;
     this.readyState = CLOSING;
     try {
       this.socket?.close(code, reason);

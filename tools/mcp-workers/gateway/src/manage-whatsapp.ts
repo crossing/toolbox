@@ -134,6 +134,8 @@ ${preview}
 <table><tr><th>Started</th><th>Outcome</th><th>Drained</th><th>Detail</th></tr>
 ${renderCycles(status)}
 </table>
+<h2>Log</h2>
+<pre class="muted" style="white-space:pre-wrap">${escapeHtml(status.log.slice(0, 25).join("\n")) || "nothing logged yet"}</pre>
 <h2>Preflight</h2>
 <div class="linkbox">
   <form method="post" action="/manage/whatsapp/preflight"><button type="submit">Run preflight</button></form>

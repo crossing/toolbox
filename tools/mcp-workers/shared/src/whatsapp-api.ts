@@ -43,6 +43,8 @@ export interface BridgeStatus {
   messageCount: number;
   /** Rolling log of the last few sync cycles, newest first. */
   recentCycles: BridgeCycle[];
+  /** The bridge's own recent log lines, newest first. */
+  log: string[];
 }
 
 export interface BridgeCycle {

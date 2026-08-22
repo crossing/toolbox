@@ -138,6 +138,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       chatCount: counts.chats,
       messageCount: counts.messages,
       recentCycles: this.getMeta<BridgeCycle[]>("cycles", []),
+      log: this.getMeta<string[]>("log", []),
     };
   }
 
@@ -162,7 +163,31 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       steps.push({ name, ms: Date.now() - start, detail: "" });
       return value;
     };
+    const timeAsync = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+      const start = Date.now();
+      const value = await fn();
+      steps.push({ name, ms: Date.now() - start, detail: "" });
+      return value;
+    };
     try {
+      // The derivation workerd refuses without the shim in whatsapp/src/pbkdf2.ts.
+      // If this step throws, pairing cannot work and nothing else matters.
+      const derived = await timeAsync("PBKDF2 at WhatsApp's 131,072 iterations", async () => {
+        const material = await crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode("PREFLIGHT"),
+          { name: "PBKDF2" },
+          false,
+          ["deriveBits"],
+        );
+        return crypto.subtle.deriveBits(
+          { name: "PBKDF2", salt: new Uint8Array(16), iterations: 2 << 16, hash: "SHA-256" },
+          material,
+          256,
+        );
+      });
+      steps[steps.length - 1]!.detail = `${derived.byteLength} bytes derived`;
+
       const COUNT = 812;
       const keys = time("generate 812 keypairs", () =>
         Object.fromEntries(
@@ -242,6 +267,8 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     const entry = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
     const lines = [entry, ...this.getMeta<string[]>("log", [])].slice(0, 40);
     this.setMeta("log", lines);
+    // Also to the console, so `wrangler tail` can watch a live cycle.
+    console.log(`[bridge] ${entry}`);
   }
 
   private async openSession(counters: { messages: number; chats: number }): Promise<Session> {
@@ -256,6 +283,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     try {
       const { version } = await fetchLatestWaWebVersion({});
       this.setMeta("waVersion", { version, at: Date.now() });
+      this.log("info", `WhatsApp web version ${version.join(".")}`);
       return version;
     } catch (err) {
       this.log("warn", `could not fetch the WhatsApp web version: ${String(err)}`);
@@ -278,9 +306,12 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     let session: Session | null = null;
     try {
       this.setMeta("connection", "connecting");
+      this.log("info", "pairing: opening a socket");
       session = await this.openSession(counters);
+      this.log("info", "pairing: socket constructed, waiting for the pair-device stanza");
       // The code can only be requested once the handshake has produced a QR.
-      await session.waitForPairingWindow(60_000);
+      await session.waitForPairingWindow(90_000);
+      this.log("info", "pairing: reached the pairing window");
       const code = await session.sock.requestPairingCode(digits);
       const expiresAt = Date.now() + PAIRING_WINDOW_MS;
       this.setMeta("pendingPairing", { phoneNumber: digits, code, expiresAt });
