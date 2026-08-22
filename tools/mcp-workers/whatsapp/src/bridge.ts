@@ -65,6 +65,12 @@ const PAIRING_WINDOW_MS = 3 * 60 * 1000;
 /** Baileys re-buffers events right after the drain marker; wait it out. */
 const POST_DRAIN_SETTLE_MS = 3000;
 
+// No legitimate connection lives longer than this: a cycle's waits add up to
+// about three minutes, and a pairing window is three. Past it, an in-progress
+// flag is residue from an instance that went away mid-operation, and honouring
+// it would lock the bridge until someone noticed.
+const STALE_OPERATION_MS = 6 * 60 * 1000;
+
 // Inline caps. An image comes back to the model as an image block, costing
 // image tokens; anything else can only be base64 in a text block, where a
 // megabyte is ~1.37 million characters — hundreds of thousands of tokens for
@@ -81,6 +87,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   private auth: SqlAuthState;
   /** One WhatsApp connection at a time: two would fight over the session. */
   private busy = false;
+  private busySince = 0;
   /** The detached tail of a pairing attempt, kept referenced while it runs. */
   private pairing: Promise<void> | null = null;
 
@@ -114,6 +121,30 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     );
   }
 
+  // In-memory, so eviction clears it; the timestamp covers the case where the
+  // object survives but an operation did not.
+  private get inProgress(): boolean {
+    return this.busy && Date.now() - this.busySince < STALE_OPERATION_MS;
+  }
+
+  private beginOperation(): void {
+    this.busy = true;
+    this.busySince = Date.now();
+  }
+
+  private setConnection(state: BridgeStatus["connection"]): void {
+    this.setMeta("connection", state);
+    this.setMeta("connectionSince", Date.now());
+  }
+
+  /** The stored state, unless it is old enough to be residue. */
+  private connectionState(): BridgeStatus["connection"] {
+    const state = this.getMeta<BridgeStatus["connection"]>("connection", "idle");
+    if (state === "idle") return state;
+    const since = this.getMeta<number>("connectionSince", 0);
+    return Date.now() - since > STALE_OPERATION_MS ? "idle" : state;
+  }
+
   private recordCycle(cycle: BridgeCycle): void {
     const cycles = [cycle, ...this.getMeta<BridgeCycle[]>("cycles", [])].slice(0, MAX_CYCLES);
     this.setMeta("cycles", cycles);
@@ -130,7 +161,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         ? { id: this.auth.state.creds.me.id, name: this.auth.state.creds.me.name ?? null }
         : null,
       pendingPairing: pending && pending.expiresAt > Date.now() ? pending : null,
-      connection: this.getMeta<BridgeStatus["connection"]>("connection", "idle"),
+      connection: this.connectionState(),
       lastConnectedAt: this.getMeta<number | null>("lastConnectedAt", null),
       lastDrainAt: this.getMeta<number | null>("lastDrainAt", null),
       lastError: this.getMeta<string | null>("lastError", null),
@@ -299,7 +330,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   }
 
   async requestPairingCode(phoneNumber: string): Promise<PairingResult> {
-    if (this.busy) throw new Error("the bridge is busy — try again in a minute");
+    if (this.inProgress) throw new Error("the bridge is busy — try again in a minute");
     if (this.auth.isPaired()) throw new Error("a device is already paired; unpair it first");
     const digits = phoneNumber.replace(/[^0-9]/g, "");
     if (digits.length < 8) throw new Error("phone number must be international digits, no +");
@@ -308,11 +339,11 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     // previously abandoned attempt would send the next connect down the login
     // path with an unregistered identity. Always start from a clean identity.
     this.auth.reset();
-    this.busy = true;
+    this.beginOperation();
     const counters = { messages: 0, chats: 0 };
     let session: Session | null = null;
     try {
-      this.setMeta("connection", "connecting");
+      this.setConnection("connecting");
       this.log("info", "pairing: opening a socket");
       session = await this.openSession(counters);
       this.log("info", "pairing: socket constructed, waiting for the pair-device stanza");
@@ -333,7 +364,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       return { code, phoneNumber: digits, expiresAt };
     } catch (err) {
       this.busy = false;
-      this.setMeta("connection", "idle");
+      this.setConnection("idle");
       this.setMeta("lastError", err instanceof Error ? err.message : String(err));
       await session?.close();
       throw err;
@@ -381,7 +412,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         this.setMeta("pendingPairing", null);
         this.setMeta("lastConnectedAt", Date.now());
         this.setMeta("lastError", null);
-        this.setMeta("connection", "open");
+        this.setConnection("open");
         this.log("info", `paired as ${this.auth.state.creds.me?.id ?? "unknown"}`);
         // Best-effort: a fresh device usually has a backlog waiting.
         await second.waitForDrain(90_000).catch((err) => this.log("warn", `first drain: ${String(err)}`));
@@ -404,13 +435,13 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       this.setMeta("lastError", detail);
       this.recordCycle({ startedAt, endedAt: Date.now(), outcome: "error", messages: 0, chats: 0, detail });
     } finally {
-      this.setMeta("connection", "idle");
+      this.setConnection("idle");
     }
   }
 
   async unpair(): Promise<{ ok: boolean }> {
     // auth.reset() mutates the very creds object a running socket holds.
-    if (this.busy) {
+    if (this.inProgress) {
       throw new Error("the bridge is mid-connection; try again in a minute");
     }
     this.auth.reset();
@@ -433,20 +464,20 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   // throws: the alarm path depends on that, because a thrown alarm is retried
   // with backoff and then dropped for good.
   private async runCycle(): Promise<SyncResult> {
-    if (this.busy) {
+    if (this.inProgress) {
       return { ok: false, messages: 0, chats: 0, detail: "a sync is already running" };
     }
-    this.busy = true;
+    this.beginOperation();
     const startedAt = Date.now();
     const counters = { messages: 0, chats: 0 };
     let session: Session | null = null;
     let ok = false;
     let detail: string | null = null;
     try {
-      this.setMeta("connection", "connecting");
+      this.setConnection("connecting");
       session = await this.openSession(counters);
       await session.waitForOpen(60_000);
-      this.setMeta("connection", "open");
+      this.setConnection("open");
       this.setMeta("lastConnectedAt", Date.now());
       await session.waitForDrain(90_000);
       // The drain marker is not the end of the story: Baileys re-buffers
@@ -468,9 +499,9 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         await this.ctx.storage.deleteAlarm();
       }
     } finally {
-      this.setMeta("connection", "closing");
+      this.setConnection("closing");
       await session?.close();
-      this.setMeta("connection", "idle");
+      this.setConnection("idle");
       this.busy = false;
     }
     this.recordCycle({
@@ -490,7 +521,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     // backoff and dropped after six failures, and a dropped alarm means the
     // bridge silently stops syncing.
     if (auto) await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
-    if (!auto || !this.auth.isPaired() || this.busy) return;
+    if (!auto || !this.auth.isPaired() || this.inProgress) return;
     await this.runCycle();
   }
 
@@ -575,7 +606,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   async sendMessage(recipient: string, message: string): Promise<SendResult> {
     if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
     if (!message.trim()) return { ok: false, detail: "refusing to send an empty message" };
-    if (this.busy) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+    if (this.inProgress) return { ok: false, detail: "the bridge is busy — try again in a moment" };
 
     let jid: string;
     try {
@@ -584,14 +615,14 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
     }
 
-    this.busy = true;
+    this.beginOperation();
     const counters = { messages: 0, chats: 0 };
     let session: Session | null = null;
     try {
-      this.setMeta("connection", "connecting");
+      this.setConnection("connecting");
       session = await this.openSession(counters);
       await session.waitForOpen(60_000);
-      this.setMeta("connection", "open");
+      this.setConnection("open");
       this.setMeta("lastConnectedAt", Date.now());
       const sent = await session.sock.sendMessage(jid, { text: message });
       if (sent) {
@@ -610,9 +641,9 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       this.setMeta("lastError", detail);
       return { ok: false, detail };
     } finally {
-      this.setMeta("connection", "closing");
+      this.setConnection("closing");
       await session?.close();
-      this.setMeta("connection", "idle");
+      this.setConnection("idle");
       this.busy = false;
     }
   }
@@ -629,7 +660,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     caption?: string,
   ): Promise<SendResult> {
     if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
-    if (this.busy) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+    if (this.inProgress) return { ok: false, detail: "the bridge is busy — try again in a moment" };
 
     let jid: string;
     let bytes: Uint8Array;
@@ -646,14 +677,14 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     const kind = mediaType ?? kindFromFilename(filename);
     const mimeType = mimeFromFilename(filename, kind);
 
-    this.busy = true;
+    this.beginOperation();
     const counters = { messages: 0, chats: 0 };
     let session: Session | null = null;
     try {
-      this.setMeta("connection", "connecting");
+      this.setConnection("connecting");
       session = await this.openSession(counters);
       await session.waitForOpen(60_000);
-      this.setMeta("connection", "open");
+      this.setConnection("open");
       this.setMeta("lastConnectedAt", Date.now());
 
       const upload = await encryptForUpload(bytes, kind);
@@ -704,9 +735,9 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       this.setMeta("lastError", detail);
       return { ok: false, detail };
     } finally {
-      this.setMeta("connection", "closing");
+      this.setConnection("closing");
       await session?.close();
-      this.setMeta("connection", "idle");
+      this.setConnection("idle");
       this.busy = false;
     }
   }
