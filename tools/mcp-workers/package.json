@@ -6,13 +6,15 @@
   "workspaces": [
     "shared",
     "freeagent",
-    "gws"
+    "gws",
+    "gateway"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json && tsc --noEmit -p gws/tsconfig.json",
+    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json && tsc --noEmit -p gws/tsconfig.json && tsc --noEmit -p gateway/tsconfig.json",
     "test": "vitest run",
     "deploy:freeagent": "wrangler deploy -c freeagent/wrangler.jsonc",
-    "deploy:gws": "wrangler deploy -c gws/wrangler.jsonc"
+    "deploy:gws": "wrangler deploy -c gws/wrangler.jsonc",
+    "deploy:gateway": "wrangler deploy -c gateway/wrangler.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",
