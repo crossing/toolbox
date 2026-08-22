@@ -5,12 +5,14 @@
   "license": "MIT",
   "workspaces": [
     "shared",
-    "freeagent"
+    "freeagent",
+    "gws"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json",
+    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json && tsc --noEmit -p gws/tsconfig.json",
     "test": "vitest run",
-    "deploy:freeagent": "wrangler deploy -c freeagent/wrangler.jsonc"
+    "deploy:freeagent": "wrangler deploy -c freeagent/wrangler.jsonc",
+    "deploy:gws": "wrangler deploy -c gws/wrangler.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",
