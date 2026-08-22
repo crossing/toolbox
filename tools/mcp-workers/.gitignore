@@ -1,15 +1,12 @@
 # Anchored per repo rule: never bare, unanchored patterns.
+#
+# One entry per worker was how this started, and it is how an 8.9 MB
+# `.wrangler/tmp` dev bundle reached a public repo on 2026-08-22: the spike
+# added a new worker directory before anyone added its ignore rule, and
+# `git checkout <ref> -- <path>` does not consult ignores anyway. These
+# single-level wildcards are still anchored, and they cover the worker
+# directory nobody has created yet.
 /node_modules/
-/shared/node_modules/
-/freeagent/node_modules/
-/freeagent/.wrangler/
-/freeagent/.dev.vars
-/gws/node_modules/
-/gws/.wrangler/
-/gws/.dev.vars
-/gateway/node_modules/
-/gateway/.wrangler/
-/gateway/.dev.vars
-/whatsapp/node_modules/
-/whatsapp/.wrangler/
-/whatsapp/.dev.vars
+/*/node_modules/
+/*/.wrangler/
+/*/.dev.vars
