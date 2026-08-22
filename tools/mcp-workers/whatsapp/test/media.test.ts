@@ -120,7 +120,7 @@ describe("fetchAndDecrypt", () => {
       return new Response(file);
     }) as typeof fetch;
 
-    const result = await fetchAndDecrypt({ ...base, ...descriptor }, fetcher);
+    const result = await fetchAndDecrypt({ ...base, ...descriptor }, { fetcher });
     expect(new Uint8Array(result.bytes)).toEqual(plaintext);
     expect(result.mimeType).toBe("image/jpeg");
     expect(seen[0]).toEqual({
@@ -132,7 +132,7 @@ describe("fetchAndDecrypt", () => {
   it("marks expired media as retryable", async () => {
     const { descriptor } = await encryptLikeWhatsApp(new Uint8Array([1]), KEY, "image");
     const fetcher = (async () => new Response("gone", { status: 410 })) as typeof fetch;
-    await expect(fetchAndDecrypt({ ...base, ...descriptor }, fetcher)).rejects.toMatchObject({
+    await expect(fetchAndDecrypt({ ...base, ...descriptor }, { fetcher })).rejects.toMatchObject({
       retryable: true,
     });
   });
@@ -140,7 +140,7 @@ describe("fetchAndDecrypt", () => {
   it("reports other HTTP failures", async () => {
     const { descriptor } = await encryptLikeWhatsApp(new Uint8Array([1]), KEY, "image");
     const fetcher = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-    await expect(fetchAndDecrypt({ ...base, ...descriptor }, fetcher)).rejects.toThrow(/HTTP 500/);
+    await expect(fetchAndDecrypt({ ...base, ...descriptor }, { fetcher })).rejects.toThrow(/HTTP 500/);
   });
 });
 

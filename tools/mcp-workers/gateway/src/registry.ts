@@ -135,7 +135,7 @@ const whatsappService: ServiceDef = {
   id: "whatsapp",
   title: "WhatsApp",
   description:
-    "Chats, messages, contacts and media from the cloud bridge (a second linked device); sending is confirm-gated.",
+    "Chats, messages, contacts and media from the cloud bridge (a second linked device); file sends are confirm-gated.",
   defaultEnabled: false,
   registerRead(server, ctx) {
     registerWhatsappReadTools(server, () => ctx.whatsappBridge());

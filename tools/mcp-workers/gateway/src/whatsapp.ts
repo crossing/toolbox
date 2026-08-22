@@ -10,16 +10,43 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 import type { Env } from "./env";
-import { asError, asMedia, asResult, DESTRUCTIVE, READ_ONLY, WRITE, needsConfirm, run } from "./toolutil";
+import {
+  asError,
+  asMedia,
+  asResult,
+  BridgeError,
+  DESTRUCTIVE,
+  READ_ONLY,
+  WRITE,
+  needsConfirm,
+  run,
+  runChecked,
+} from "./toolutil";
 
 // One bridge per gateway: a single WhatsApp account, one paired device.
 export const BRIDGE_INSTANCE = "default";
+
+/** Errors crossing the DO boundary are plain Errors; keep their message. */
+function withBridgeErrors(bridge: WhatsAppBridgeApi): WhatsAppBridgeApi {
+  return new Proxy(bridge, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) =>
+        (value as (...a: unknown[]) => Promise<unknown>).apply(target, args).catch((err: unknown) => {
+          throw new BridgeError(
+            `the WhatsApp bridge failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    },
+  });
+}
 
 export function bridgeFor(env: Env): WhatsAppBridgeApi {
   const ns = env.WHATSAPP_BRIDGE;
   // Cross-script stubs are untyped by wrangler; the class implements this
   // interface on the other side (shared/src/whatsapp-api.ts is the contract).
-  return ns.get(ns.idFromName(BRIDGE_INSTANCE)) as unknown as WhatsAppBridgeApi;
+  return withBridgeErrors(ns.get(ns.idFromName(BRIDGE_INSTANCE)) as unknown as WhatsAppBridgeApi);
 }
 
 const JID_OR_PHONE = z
@@ -32,10 +59,15 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     {
       description:
         "Search WhatsApp contacts by name or phone number. Returns JIDs to use with the other WhatsApp tools.",
-      inputSchema: { query: z.string().describe("Name or phone-number fragment to search for") },
+      inputSchema: {
+        query: z.string().describe("Name or phone-number fragment to search for"),
+        limit: z.number().int().min(1).max(200).optional().describe("Contacts to return (default 50)"),
+        page: z.number().int().min(0).optional().describe("Zero-based page of results"),
+      },
       annotations: READ_ONLY,
     },
-    async ({ query }) => run(async () => ({ contacts: await (await bridge()).searchContacts(query) })),
+    async ({ query, limit, page }) =>
+      run(async () => ({ contacts: await (await bridge()).searchContacts(query, limit, page) })),
   );
 
   server.registerTool(
@@ -63,10 +95,19 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
         "List or search WhatsApp messages, newest first. Filter by chat, sender, text, or date range.",
       inputSchema: {
         chat_jid: z.string().optional().describe("Restrict to one chat (JID from whatsapp_list_chats)"),
-        sender_phone_number: z.string().optional().describe("Restrict to one sender's phone number"),
+        sender_phone_number: z
+          .string()
+          .optional()
+          .describe("Restrict to one sender, by phone number or JID"),
         query: z.string().optional().describe("Substring to search for in message text"),
-        after: z.string().optional().describe("Only messages after this ISO-8601 timestamp"),
-        before: z.string().optional().describe("Only messages before this ISO-8601 timestamp"),
+        after: z
+          .string()
+          .optional()
+          .describe("Only messages after this ISO-8601 timestamp (any offset; converted to UTC)"),
+        before: z
+          .string()
+          .optional()
+          .describe("Only messages before this ISO-8601 timestamp (any offset; converted to UTC)"),
         limit: z.number().int().min(1).max(200).optional().describe("Messages to return (default 20)"),
         page: z.number().int().min(0).optional().describe("Zero-based page of results"),
       },
@@ -101,7 +142,9 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     {
       description: "Find the one-to-one WhatsApp chat with a phone number.",
       inputSchema: {
-        sender_phone_number: z.string().describe("Phone number in international format, digits only"),
+        sender_phone_number: z
+          .string()
+          .describe("Phone number in international format, or the contact's JID"),
       },
       annotations: READ_ONLY,
     },
@@ -153,7 +196,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     "whatsapp_download_media",
     {
       description:
-        "Download and decrypt the media attached to a WhatsApp message. Images come back as images; other files return their type and size (large attachments are not delivered inline).",
+        "Download and decrypt the media attached to a WhatsApp message. Images come back as images; other files come back described, with their bytes only when small (32 KB).",
       inputSchema: {
         message_id: z.string().describe("Message id from whatsapp_list_messages"),
         chat_jid: z.string().describe("The message's chat JID"),
@@ -199,7 +242,8 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
       },
       annotations: WRITE,
     },
-    async ({ recipient, message }) => run(async () => (await bridge()).sendMessage(recipient, message)),
+    async ({ recipient, message }) =>
+      runChecked(async () => (await bridge()).sendMessage(recipient, message)),
   );
 
   server.registerTool(
@@ -224,7 +268,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
     },
     async ({ recipient, filename, base64, media_type, caption, confirm }) => {
       if (confirm !== true) return needsConfirm();
-      return run(async () => (await bridge()).sendFile(recipient, filename, base64, media_type, caption));
+      return runChecked(async () => (await bridge()).sendFile(recipient, filename, base64, media_type, caption));
     },
   );
 
@@ -236,7 +280,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
       inputSchema: {},
       annotations: WRITE,
     },
-    async () => run(async () => (await bridge()).syncNow()),
+    async () => runChecked(async () => (await bridge()).syncNow()),
   );
 }
 

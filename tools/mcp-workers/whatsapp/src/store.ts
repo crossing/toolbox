@@ -110,6 +110,32 @@ export function phoneOf(jid: string): string {
   return (jid.split("@")[0] ?? "").split(":")[0] ?? "";
 }
 
+// Callers pass search text and phone numbers straight through to LIKE, where
+// % and _ are wildcards. Bound parameters stop injection but not that, so the
+// patterns are escaped and every LIKE declares the escape character.
+const LIKE_ESCAPE = "\\";
+
+function likePattern(value: string, shape: (escaped: string) => string): string {
+  return shape(value.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE}${char}`));
+}
+
+/**
+ * Tools advertise JIDs, and a model will hand one back where a phone number is
+ * asked for. Accept both.
+ */
+export function phoneOrJidToPhone(value: string): string {
+  return phoneOf(value.trim()).replace(/[^0-9]/g, "");
+}
+
+/** ISO-8601 in, ISO-8601 UTC out — the only form the store's ordering works on. */
+export function toStoredTimestamp(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`"${value}" is not a timestamp; use ISO-8601, e.g. 2026-08-20T22:32:04Z`);
+  }
+  return parsed.toISOString();
+}
+
 export class Store {
   constructor(private sql: SqlLike) {
     this.sql.exec(STORE_SCHEMA);
@@ -154,7 +180,7 @@ export class Store {
          mime_type = COALESCE(excluded.mime_type, messages.mime_type)`,
       msg.id,
       normalizeJid(msg.chatJid),
-      msg.sender,
+      normalizeJid(msg.sender),
       msg.senderName ?? null,
       msg.content ?? null,
       msg.timestamp,
@@ -179,21 +205,28 @@ export class Store {
 
   // --- reads, mirroring tools/whatsapp-mcp-server ---------------------------
 
-  searchContacts(query: string): ContactRow[] {
-    const like = `%${query}%`;
+  searchContacts(query: string, limit = 50, page = 0): ContactRow[] {
+    const like = likePattern(query, (escaped) => `%${escaped}%`);
+    const capped = Math.min(Math.max(limit, 1), 200);
     return this.sql
       .exec(
-        `SELECT DISTINCT jid, name FROM (
+        // One row per contact: pushName varies per message, so a plain
+        // DISTINCT over (jid, name) would return the same person repeatedly.
+        `SELECT jid, MAX(name) AS name FROM (
            SELECT c.jid AS jid, c.name AS name FROM chats c
-             WHERE (c.name LIKE ? OR c.jid LIKE ?) AND c.jid NOT LIKE '%@g.us'
-           UNION
+             WHERE (c.name LIKE ? ESCAPE '${LIKE_ESCAPE}' OR c.jid LIKE ? ESCAPE '${LIKE_ESCAPE}')
+               AND c.jid NOT LIKE '%@g.us'
+           UNION ALL
            SELECT m.sender AS jid, m.sender_name AS name FROM messages m
-             WHERE (m.sender_name LIKE ? OR m.sender LIKE ?) AND m.is_from_me = 0
-         ) ORDER BY name IS NULL, name, jid`,
+             WHERE (m.sender_name LIKE ? ESCAPE '${LIKE_ESCAPE}' OR m.sender LIKE ? ESCAPE '${LIKE_ESCAPE}')
+               AND m.is_from_me = 0
+         ) GROUP BY jid ORDER BY name IS NULL, name, jid LIMIT ? OFFSET ?`,
         like,
         like,
         like,
         like,
+        capped,
+        page * capped,
       )
       .toArray()
       .map((row) => ({
@@ -210,8 +243,9 @@ export class Store {
     const bindings: unknown[] = [];
     let where = "";
     if (q.query) {
-      where = "WHERE (c.name LIKE ? OR c.jid LIKE ?)";
-      bindings.push(`%${q.query}%`, `%${q.query}%`);
+      where = `WHERE (c.name LIKE ? ESCAPE '${LIKE_ESCAPE}' OR c.jid LIKE ? ESCAPE '${LIKE_ESCAPE}')`;
+      const like = likePattern(q.query, (escaped) => `%${escaped}%`);
+      bindings.push(like, like);
     }
     return this.sql
       .exec(
@@ -233,12 +267,14 @@ export class Store {
   }
 
   getDirectChatByContact(phoneNumber: string): ChatRow | null {
+    const digits = phoneOrJidToPhone(phoneNumber);
+    if (!digits) return null;
     const rows = this.sql
       .exec(
         `SELECT jid, name, last_message_time FROM chats
-         WHERE jid LIKE ? AND jid NOT LIKE '%@g.us'
+         WHERE jid LIKE ? ESCAPE '${LIKE_ESCAPE}' AND jid NOT LIKE '%@g.us'
          ORDER BY last_message_time IS NULL, last_message_time DESC LIMIT 1`,
-        `${phoneNumber}@%`,
+        `${digits}@%`,
       )
       .toArray();
     return rows.length > 0 ? toChatRow(rows[0]!) : null;
@@ -287,20 +323,23 @@ export class Store {
       bindings.push(normalizeJid(q.chatJid));
     }
     if (q.senderPhoneNumber) {
-      clauses.push("m.sender LIKE ?");
-      bindings.push(`${q.senderPhoneNumber}@%`);
+      const digits = phoneOrJidToPhone(q.senderPhoneNumber);
+      clauses.push(`m.sender LIKE ? ESCAPE '${LIKE_ESCAPE}'`);
+      bindings.push(`${digits}@%`);
     }
     if (q.query) {
-      clauses.push("m.content LIKE ?");
-      bindings.push(`%${q.query}%`);
+      clauses.push(`m.content LIKE ? ESCAPE '${LIKE_ESCAPE}'`);
+      bindings.push(likePattern(q.query, (escaped) => `%${escaped}%`));
     }
+    // Stored timestamps are ISO-8601 UTC and compared lexically, so an
+    // offset-bearing bound would silently include or exclude the wrong rows.
     if (q.after) {
       clauses.push("m.timestamp > ?");
-      bindings.push(q.after);
+      bindings.push(toStoredTimestamp(q.after));
     }
     if (q.before) {
       clauses.push("m.timestamp < ?");
-      bindings.push(q.before);
+      bindings.push(toStoredTimestamp(q.before));
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     return this.sql
@@ -330,10 +369,12 @@ export class Store {
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         WHERE m.chat_jid = ? AND m.timestamp < ?
-         ORDER BY m.timestamp DESC LIMIT ?`,
+         WHERE m.chat_jid = ? AND (m.timestamp < ? OR (m.timestamp = ? AND m.id < ?))
+         ORDER BY m.timestamp DESC, m.id DESC LIMIT ?`,
         message.chatJid,
         message.timestamp,
+        message.timestamp,
+        message.id,
         Math.min(Math.max(before, 0), 50),
       )
       .toArray()
@@ -343,10 +384,12 @@ export class Store {
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         WHERE m.chat_jid = ? AND m.timestamp > ?
-         ORDER BY m.timestamp ASC LIMIT ?`,
+         WHERE m.chat_jid = ? AND (m.timestamp > ? OR (m.timestamp = ? AND m.id > ?))
+         ORDER BY m.timestamp ASC, m.id ASC LIMIT ?`,
         message.chatJid,
         message.timestamp,
+        message.timestamp,
+        message.id,
         Math.min(Math.max(after, 0), 50),
       )
       .toArray()

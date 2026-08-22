@@ -77,16 +77,12 @@ export interface ListMessagesQuery {
   query?: string;
   limit?: number;
   page?: number;
-  includeContext?: boolean;
-  contextBefore?: number;
-  contextAfter?: number;
 }
 
 export interface ListChatsQuery {
   query?: string;
   limit?: number;
   page?: number;
-  includeLastMessage?: boolean;
   sortBy?: "last_active" | "name";
 }
 
@@ -173,10 +169,10 @@ export interface WhatsAppBridgeApi {
   syncNow(): Promise<SyncResult>;
   setAutoSync(enabled: boolean): Promise<{ enabled: boolean; nextAlarmAt: number | null }>;
 
-  searchContacts(query: string): Promise<ContactRow[]>;
+  searchContacts(query: string, limit?: number, page?: number): Promise<ContactRow[]>;
   listMessages(query: ListMessagesQuery): Promise<MessageRow[]>;
   listChats(query: ListChatsQuery): Promise<ChatRow[]>;
-  getChat(chatJid: string, includeLastMessage?: boolean): Promise<ChatRow | null>;
+  getChat(chatJid: string): Promise<ChatRow | null>;
   getDirectChatByContact(senderPhoneNumber: string): Promise<ChatRow | null>;
   getContactChats(jid: string, limit?: number, page?: number): Promise<ChatRow[]>;
   getLastInteraction(jid: string): Promise<LastInteraction>;

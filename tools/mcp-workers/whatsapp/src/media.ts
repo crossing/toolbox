@@ -19,6 +19,11 @@
 const MEDIA_HOST = "mmg.whatsapp.net";
 const ORIGIN = "https://web.whatsapp.com";
 
+// `url` and `directPath` come out of the sender's message proto, which nobody
+// validates and the media MAC does not cover. Without this, a crafted message
+// could point the bridge's fetch at any host it liked.
+const ALLOWED_HOST = /(^|\.)whatsapp\.net$/;
+
 // From Baileys' MEDIA_HKDF_KEY_MAPPING; the info string is
 // `WhatsApp ${mapping} Keys`.
 const HKDF_INFO: Record<string, string> = {
@@ -163,18 +168,34 @@ export async function decryptMedia(
 export function mediaUrl(descriptor: Pick<MediaDescriptor, "url" | "directPath">): string {
   if (descriptor.directPath) {
     const host = descriptor.url ? safeHost(descriptor.url) : MEDIA_HOST;
+    // directPath is a path, not a URL: refuse anything that could escape it.
+    if (!descriptor.directPath.startsWith("/") || descriptor.directPath.startsWith("//")) {
+      throw new MediaError("the message's media path is not a path");
+    }
     return `https://${host}${descriptor.directPath}`;
   }
-  if (descriptor.url) return descriptor.url;
+  if (descriptor.url) {
+    const host = safeHost(descriptor.url, { strict: true });
+    const url = new URL(descriptor.url);
+    if (url.protocol !== "https:") throw new MediaError("media URLs must be https");
+    return `https://${host}${url.pathname}${url.search}`;
+  }
   throw new MediaError("the message has no media URL");
 }
 
-function safeHost(url: string): string {
+function safeHost(url: string, { strict = false }: { strict?: boolean } = {}): string {
+  let host: string;
   try {
-    return new URL(url).host || MEDIA_HOST;
+    host = new URL(url).host;
   } catch {
+    if (strict) throw new MediaError("the message's media URL is unparseable");
     return MEDIA_HOST;
   }
+  if (!host || !ALLOWED_HOST.test(host.split(":")[0] ?? "")) {
+    if (strict) throw new MediaError(`refusing to fetch media from ${host || "an empty host"}`);
+    return MEDIA_HOST;
+  }
+  return host;
 }
 
 // --- the send side --------------------------------------------------------
@@ -276,12 +297,22 @@ export async function uploadEncrypted(
   throw new MediaError(`media upload failed on every host (${failures.join("; ")})`);
 }
 
+export interface FetchOptions {
+  /** Refuse a download bigger than this, before it is buffered. */
+  maxBytes?: number;
+  fetcher?: typeof fetch;
+}
+
 export async function fetchAndDecrypt(
   descriptor: MediaDescriptor,
-  fetcher: typeof fetch = (input, init) => fetch(input, init),
+  { maxBytes = 16 * 1024 * 1024, fetcher = (input, init) => fetch(input, init) }: FetchOptions = {},
 ): Promise<DecryptedMedia> {
   if (!descriptor.mediaType) throw new MediaError("this message has no attachment");
-  const response = await fetcher(mediaUrl(descriptor), { headers: { Origin: ORIGIN } });
+  const response = await fetcher(mediaUrl(descriptor), {
+    headers: { Origin: ORIGIN },
+    // A redirect could otherwise walk off the allowlist.
+    redirect: "manual",
+  });
   if (response.status === 404 || response.status === 410) {
     // WhatsApp expires media; only the phone can re-upload it, which needs a
     // live socket asking for it.
@@ -290,7 +321,16 @@ export async function fetchAndDecrypt(
   if (!response.ok) {
     throw new MediaError(`media download failed with HTTP ${response.status}`);
   }
+  // Decryption transiently holds about three copies of the file against a
+  // 128 MB isolate, so the size is checked before anything is buffered.
+  const declared = Number(response.headers.get("content-length") ?? "0");
+  if (declared > maxBytes) {
+    throw new MediaError(`attachment is ${Math.round(declared / 1024)} KB, over the limit for this call`);
+  }
   const file = new Uint8Array(await response.arrayBuffer());
+  if (file.length > maxBytes) {
+    throw new MediaError(`attachment is ${Math.round(file.length / 1024)} KB, over the limit for this call`);
+  }
   const bytes = await decryptMedia(file, descriptor);
   return {
     bytes,

@@ -162,6 +162,20 @@ async function statusOrError(env: Env): Promise<{ status?: BridgeStatus; error?:
   }
 }
 
+async function renderFullPage(env: Env, notice: string, importCode: string | null): Promise<Response> {
+  const { status, error } = await statusOrError(env);
+  if (!status) return errorPage(`bridge unreachable: ${error}`);
+  const bridge = bridgeFor(env);
+  const [chats, messages] = await Promise.all([
+    bridge.listChats({ limit: 8 }),
+    bridge.listMessages({ limit: 8 }),
+  ]);
+  return page(
+    "gateway — WhatsApp",
+    renderPage(status, notice, importCode, renderPreview(chats, messages)),
+  );
+}
+
 function errorPage(message: string, status = 502): Response {
   return page(
     "gateway — WhatsApp",
@@ -205,22 +219,7 @@ export async function handleWhatsappManage(
   if (!email) return new Response("not signed in", { status: 401 });
 
   if (url.pathname === "/manage/whatsapp" && request.method === "GET") {
-    const { status, error } = await statusOrError(env);
-    if (!status) return errorPage(`bridge unreachable: ${error}`);
-    const bridge = bridgeFor(env);
-    const [chats, messages] = await Promise.all([
-      bridge.listChats({ limit: 8 }),
-      bridge.listMessages({ limit: 8 }),
-    ]);
-    return page(
-      "gateway — WhatsApp",
-      renderPage(
-        status,
-        url.searchParams.get("notice") ?? "",
-        url.searchParams.get("code"),
-        renderPreview(chats, messages),
-      ),
-    );
+    return renderFullPage(env, url.searchParams.get("notice") ?? "", null);
   }
 
   if (url.pathname === "/manage/whatsapp/pair" && request.method === "POST") {
@@ -284,11 +283,11 @@ export async function handleWhatsappManage(
 
   if (url.pathname === "/manage/whatsapp/import-code" && request.method === "POST") {
     try {
+      // Rendered straight into the response rather than redirected with the
+      // code in the query string: Workers Logs record request URLs, and this
+      // is a bearer capability for writing into the message store.
       const issued = await bridgeFor(env).issueImportCode();
-      return new Response(null, {
-        status: 303,
-        headers: { location: `/manage/whatsapp?code=${encodeURIComponent(issued.code)}` },
-      });
+      return renderFullPage(env, "import code issued — it is valid for 30 minutes", issued.code);
     } catch (err) {
       return errorPage(`could not issue a code: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -271,11 +271,15 @@ export class Session {
 
 /** True when a disconnect means the stored session is dead, not just dropped. */
 export function isFatalDisconnect(code: number | null): boolean {
+  // Deliberately excludes connectionReplaced (440). That one means another
+  // client took the session — a stale socket of ours, or the phone doing
+  // something — and it says nothing about the credentials. Treating it as
+  // fatal would let one transient collision switch scheduled syncing off
+  // until a human noticed.
   return (
     code === DisconnectReason.loggedOut ||
     code === DisconnectReason.forbidden ||
-    code === DisconnectReason.multideviceMismatch ||
-    code === DisconnectReason.connectionReplaced
+    code === DisconnectReason.multideviceMismatch
   );
 }
 

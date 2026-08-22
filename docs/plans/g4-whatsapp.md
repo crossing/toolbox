@@ -44,6 +44,7 @@ on demand, which is why the first send in a while takes a few seconds.
 | `whatsapp/src/normalize.ts` | `WAMessage` → row |
 | `whatsapp/src/media.ts` | fetch/verify/decrypt and encrypt/upload, WebCrypto only |
 | `whatsapp/src/ws-shim.ts` | node-`ws` API over workerd's outbound WebSocket |
+| `whatsapp/src/pbkdf2.ts` | PBKDF2-HMAC-SHA256, for the iteration count workerd refuses |
 | `shared/src/whatsapp-api.ts` | the gateway ↔ bridge contract |
 | `gateway/src/whatsapp.ts` | the MCP tools |
 | `gateway/src/manage-whatsapp.ts` | `/manage/whatsapp` |
@@ -56,6 +57,15 @@ on demand, which is why the first send in a while takes a few seconds.
   crypto bridge compiles its WASM synchronously at module scope. The chain is
   `index.ts → bridge.ts → auth.ts → "baileys"`. A lazy `await import()` there
   would fail only in production.
+- **workerd refuses PBKDF2 above 100,000 iterations**, and WhatsApp's pairing
+  derivation asks for 131,072. `whatsapp/src/pbkdf2.ts` computes that one
+  derivation in JS and shims it into `crypto.subtle`; without it pairing fails
+  outright. `preflight()` exercises it.
+- **`auth.reset()` must clear the creds object, not merge over it.** Baileys
+  picks the login path over the registration path purely on `creds.me` being
+  set, so a leftover `me` from an abandoned pairing makes the next connect ask
+  to log in as a device that was never registered — the socket opens, no
+  pairing stanza ever arrives, and it times out looking healthy.
 - **Pre-key reads must stay chunked.** The first login after pairing uploads
   812 pre-keys and asks the key store for all of them in one `get`; DO SQLite
   caps a statement at 100 bound parameters. `preflight()` exercises exactly

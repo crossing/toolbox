@@ -281,9 +281,16 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     const cached = this.getMeta<{ version: WAVersion; at: number } | null>("waVersion", null);
     if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.version;
     try {
-      const { version } = await fetchLatestWaWebVersion({});
-      this.setMeta("waVersion", { version, at: Date.now() });
-      this.log("info", `WhatsApp web version ${version.join(".")}`);
+      // fetchLatestWaWebVersion never throws: on any failure it hands back
+      // Baileys' pinned version with isLatest false. Caching that for a day
+      // would pin a stale version well past the point WhatsApp minds.
+      const { version, isLatest } = await fetchLatestWaWebVersion({});
+      if (isLatest) {
+        this.setMeta("waVersion", { version, at: Date.now() });
+        this.log("info", `WhatsApp web version ${version.join(".")}`);
+      } else {
+        this.log("warn", "could not resolve the current WhatsApp web version; using the pinned one");
+      }
       return version;
     } catch (err) {
       this.log("warn", `could not fetch the WhatsApp web version: ${String(err)}`);
@@ -342,11 +349,17 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   ): Promise<void> {
     const startedAt = Date.now();
     try {
-      await session.waitForUpdate((update) => update.connection === "close", PAIRING_WINDOW_MS, {
-        rejectOnClose: false,
-      });
+      try {
+        await session.waitForUpdate((update) => update.connection === "close", PAIRING_WINDOW_MS, {
+          rejectOnClose: false,
+        });
+      } finally {
+        // A human who never types the code leaves this socket running until
+        // WhatsApp's own QR-ref timer kills it, holding the object resident
+        // and colliding with the next attempt.
+        await session.close();
+      }
       const code = session.lastDisconnectCode;
-      await session.close();
       if (code !== DisconnectReason.restartRequired) {
         const detail = `pairing did not complete (${code ?? "no code"}: ${session.lastDisconnectMessage ?? "closed"})`;
         this.setMeta("lastError", detail);
@@ -355,6 +368,12 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         this.recordCycle({ startedAt, endedAt: Date.now(), outcome: "error", messages: 0, chats: 0, detail });
         return;
       }
+
+      // Scheduling is armed here, before the reconnect: from this point the
+      // device is paired, and a failed first cycle should be a retry rather
+      // than a bridge that never wakes up again.
+      this.setMeta("autoSync", true);
+      await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
 
       const second = await this.openSession(counters);
       try {
@@ -372,8 +391,6 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         await second.close();
       }
 
-      this.setMeta("autoSync", true);
-      await this.ctx.storage.setAlarm(Date.now() + SYNC_INTERVAL_MS);
       this.recordCycle({
         startedAt,
         endedAt: Date.now(),
@@ -392,6 +409,10 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   }
 
   async unpair(): Promise<{ ok: boolean }> {
+    // auth.reset() mutates the very creds object a running socket holds.
+    if (this.busy) {
+      throw new Error("the bridge is mid-connection; try again in a minute");
+    }
     this.auth.reset();
     this.setMeta("pendingPairing", null);
     this.setMeta("lastError", null);
@@ -441,10 +462,8 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       // A device unlinked on the phone can never come back on these creds;
       // stop retrying and show it as unpaired rather than failing forever.
       if (session && isFatalDisconnect(session.lastDisconnectCode)) {
-        if (session.lastDisconnectCode !== DisconnectReason.connectionReplaced) {
-          this.auth.reset();
-          detail = `${detail} — session is dead, pair again`;
-        }
+        this.auth.reset();
+        detail = `${detail} — session is dead, pair again`;
         this.setMeta("autoSync", false);
         await this.ctx.storage.deleteAlarm();
       }
@@ -477,8 +496,8 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
 
   // --- reads ----------------------------------------------------------------
 
-  async searchContacts(query: string): Promise<ContactRow[]> {
-    return this.store.searchContacts(query);
+  async searchContacts(query: string, limit?: number, page?: number): Promise<ContactRow[]> {
+    return this.store.searchContacts(query, limit, page);
   }
 
   async listMessages(query: ListMessagesQuery): Promise<MessageRow[]> {
@@ -513,9 +532,21 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     const descriptor = this.store.mediaFor(messageId, chatJid);
     if (!descriptor) return { ok: false, detail: "no such message in the store" };
     if (!descriptor.mediaType) return { ok: false, detail: "that message has no attachment" };
+    // The kind is known before the bytes are: an image imported without a mime
+    // type still deserves the image cap.
+    const isImage = descriptor.mediaType === "image" || descriptor.mediaType === "sticker";
+    const cap = isImage ? IMAGE_INLINE_CAP : FILE_INLINE_CAP;
+    if (descriptor.fileLength && descriptor.fileLength > cap) {
+      return {
+        ok: false,
+        size: descriptor.fileLength,
+        mimeType: descriptor.mimeType ?? undefined,
+        filename: descriptor.filename,
+        detail: `attachment is ${Math.round(descriptor.fileLength / 1024)} KB, over the ${Math.round(cap / 1024)} KB inline limit`,
+      };
+    }
     try {
-      const media = await fetchAndDecrypt(descriptor);
-      const cap = media.mimeType.startsWith("image/") ? IMAGE_INLINE_CAP : FILE_INLINE_CAP;
+      const media = await fetchAndDecrypt(descriptor, { maxBytes: cap });
       if (media.bytes.length > cap) {
         return {
           ok: false,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { normalizeJid, phoneOf, Store } from "../src/store";
+import { normalizeJid, phoneOf, phoneOrJidToPhone, Store, toStoredTimestamp } from "../src/store";
 import { makeFakeSql, type FakeSql } from "./sqlfake";
 
 const ADA = "447700900111@s.whatsapp.net";
@@ -134,6 +134,80 @@ describe("Store", () => {
   it("caps runaway limits", () => {
     expect(store.listMessages({ limit: 9999 }).length).toBe(5);
     expect(() => store.listChats({ limit: -5 })).not.toThrow();
+  });
+});
+
+describe("inputs that arrive in more than one shape", () => {
+  let sql: FakeSql;
+  let store: Store;
+
+  beforeEach(() => {
+    sql = makeFakeSql();
+    store = new Store(sql);
+    store.upsertChat({ jid: ADA, name: "Ada", lastMessageTime: at(5) });
+    // What the importer produces from the Go bridge: a bare user part.
+    store.upsertMessage({
+      id: "I1", chatJid: "447700900111", sender: "447700900111",
+      content: "imported", timestamp: at(4), isFromMe: false,
+    });
+  });
+
+  it("canonicalises an imported bare sender so sender queries still match", () => {
+    expect(store.listMessages({ senderPhoneNumber: "447700900111" }).map((m) => m.id)).toEqual(["I1"]);
+    expect(store.listMessages({ chatJid: ADA }).map((m) => m.id)).toEqual(["I1"]);
+    expect(store.searchContacts("447700900111").map((c) => c.jid)).toEqual([ADA]);
+  });
+
+  it("accepts a JID where a phone number is asked for", () => {
+    expect(store.getDirectChatByContact(ADA)?.name).toBe("Ada");
+    expect(store.getDirectChatByContact("447700900111:3@s.whatsapp.net")?.name).toBe("Ada");
+    expect(store.listMessages({ senderPhoneNumber: ADA }).map((m) => m.id)).toEqual(["I1"]);
+    expect(phoneOrJidToPhone(" +44 7700 900111 ")).toBe("447700900111");
+  });
+
+  it("normalises timestamp bounds to UTC instead of comparing them lexically", () => {
+    // at(4) is 12:04Z. An hour-ahead local time for 13:04+01:00 is the same
+    // instant, and must not exclude the row.
+    expect(store.listMessages({ after: "2026-08-20T13:03:00+01:00" }).map((m) => m.id)).toEqual(["I1"]);
+    expect(store.listMessages({ after: "2026-08-20T13:05:00+01:00" })).toEqual([]);
+    expect(() => store.listMessages({ after: "not a date" })).toThrow(/ISO-8601/);
+    expect(toStoredTimestamp("2026-08-20")).toBe("2026-08-20T00:00:00.000Z");
+  });
+
+  it("treats LIKE metacharacters as text, not wildcards", () => {
+    store.upsertChat({ jid: "44100@s.whatsapp.net", name: "100% Cotton" });
+    store.upsertChat({ jid: "44101@s.whatsapp.net", name: "100 Cotton" });
+    expect(store.listChats({ query: "100%" }).map((c) => c.name)).toEqual(["100% Cotton"]);
+    expect(store.searchContacts("100%").map((c) => c.name)).toEqual(["100% Cotton"]);
+    store.upsertMessage({ id: "P1", chatJid: ADA, sender: ADA, content: "50% off", timestamp: at(6), isFromMe: false });
+    store.upsertMessage({ id: "P2", chatJid: ADA, sender: ADA, content: "50p off", timestamp: at(7), isFromMe: false });
+    expect(store.listMessages({ query: "50%" }).map((m) => m.id)).toEqual(["P1"]);
+  });
+
+  it("returns one row per contact even when pushNames differ", () => {
+    store.upsertMessage({ id: "N1", chatJid: ADA, sender: ADA, senderName: "Ada L", content: "x", timestamp: at(8), isFromMe: false });
+    store.upsertMessage({ id: "N2", chatJid: ADA, sender: ADA, senderName: "Ada Lovelace", content: "y", timestamp: at(9), isFromMe: false });
+    expect(store.searchContacts("Ada").map((c) => c.jid)).toEqual([ADA]);
+  });
+
+  it("caps contact search the way the ported tool did", () => {
+    for (let i = 0; i < 60; i++) {
+      store.upsertChat({ jid: `4477009${String(i).padStart(5, "0")}@s.whatsapp.net`, name: `Person ${i}` });
+    }
+    expect(store.searchContacts("Person").length).toBe(50);
+    expect(store.searchContacts("Person", 10).length).toBe(10);
+    expect(store.searchContacts("Person", 10, 1)[0]!.name).not.toBe(store.searchContacts("Person", 10)[0]!.name);
+  });
+
+  it("keeps same-second neighbours in message context", () => {
+    const t = at(20);
+    for (const id of ["C1", "C2", "C3"]) {
+      store.upsertMessage({ id, chatJid: ADA, sender: ADA, content: id, timestamp: t, isFromMe: false });
+    }
+    const context = store.getMessageContext("C2");
+    // Strict < / > on the timestamp alone would drop both neighbours.
+    expect(context.before.map((m) => m.id).at(-1)).toBe("C1");
+    expect(context.after.map((m) => m.id)).toEqual(["C3"]);
   });
 });
 

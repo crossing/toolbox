@@ -40,9 +40,9 @@ export function asResult(body: unknown) {
 
 /**
  * Media results carry bytes. Images go back as an MCP image block — the model
- * sees the picture and pays image tokens for it — while everything else stays
- * a description, because base64 in a text block costs ~1.37 characters per
- * byte for content the model usually cannot read.
+ * sees the picture and pays image tokens for it. Anything else is described,
+ * plus its bytes as base64 when the bridge judged it small enough to inline
+ * (32 KB), because base64 in a text block costs ~1.37 characters per byte.
  */
 export function asMedia(result: {
   ok: boolean;
@@ -78,6 +78,23 @@ export function asMedia(result: {
   };
 }
 
+/**
+ * A result-typed call whose `ok: false` must reach the audit log as a failure.
+ * `run()` cannot tell: it only sees a value that was returned rather than
+ * thrown, and `auditedServer` reads `isError`.
+ */
+export async function runChecked(fn: () => Promise<{ ok: boolean; detail?: string | null }>) {
+  try {
+    const result = await fn();
+    const body = { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    return result.ok ? body : { ...body, isError: true };
+  } catch (err) {
+    return asError(err);
+  }
+}
+
+export class BridgeError extends Error {}
+
 export function asError(err: unknown) {
   let text: string;
   if (err instanceof GoogleApiError && err.status === 401) {
@@ -90,7 +107,8 @@ export function asError(err: unknown) {
     err instanceof UpstreamError ||
     err instanceof FreeAgentUpstreamError ||
     err instanceof ServiceDisabledError ||
-    err instanceof NoLinkedAccountError
+    err instanceof NoLinkedAccountError ||
+    err instanceof BridgeError
   ) {
     text = err.message;
   } else {
