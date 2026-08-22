@@ -1,0 +1,21 @@
+{
+  "name": "mcp-workers",
+  "private": true,
+  "description": "Remote MCP servers on Cloudflare Workers for the toolbox connectors",
+  "license": "MIT",
+  "workspaces": [
+    "shared",
+    "freeagent"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json",
+    "test": "vitest run",
+    "deploy:freeagent": "wrangler deploy -c freeagent/wrangler.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

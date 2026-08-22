@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "freeagent-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    // Optional peer of the agents package; only its AI-chat path needs it.
+    "ai": "../shared/src/ai-stub.ts"
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FreeagentReadMCP", "FreeagentRwMCP"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "FREEAGENT_READ_MCP", "class_name": "FreeagentReadMCP" },
+      { "name": "FREEAGENT_RW_MCP", "class_name": "FreeagentRwMCP" }
+    ]
+  },
+  "kv_namespaces": [
+    // "freeagent-mcp-oauth" namespace; recreate with
+    // `wrangler kv namespace create freeagent-mcp-oauth` if it is ever lost
+    // (grants are invalidated, connectors just need reconnecting).
+    { "binding": "OAUTH_KV", "id": "99314c0bcbb84fbeb93d9c65f010cb5c" }
+  ],
+  "observability": { "enabled": true }
+}
