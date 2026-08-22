@@ -125,6 +125,14 @@ ${pairBlock}
   <tr><th>Last error</th><td class="${status.lastError ? "warn" : "muted"}">${escapeHtml(status.lastError ?? "none")}</td></tr>
 </table>
 <form method="post" action="/manage/whatsapp/sync"><button type="submit">Sync now</button></form>
+<form method="post" action="/manage/whatsapp/verbose">
+  <input type="hidden" name="enabled" value="1">
+  <button type="submit">Verbose logging on</button>
+</form>
+<form method="post" action="/manage/whatsapp/verbose">
+  <input type="hidden" name="enabled" value="0">
+  <button type="submit">off</button>
+</form>
 <form method="post" action="/manage/whatsapp/autosync">
   <input type="hidden" name="enabled" value="${autoSyncOn ? "0" : "1"}">
   <button type="submit">${autoSyncOn ? "Pause scheduled syncing" : "Resume scheduled syncing"}</button>
@@ -245,6 +253,17 @@ export async function handleWhatsappManage(
     } catch (err) {
       return redirectBack(`sync failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  if (url.pathname === "/manage/whatsapp/verbose" && request.method === "POST") {
+    const form = await request.formData();
+    const enabled = form.get("enabled") === "1";
+    try {
+      await bridgeFor(env).setVerbose(enabled);
+    } catch (err) {
+      return redirectBack(`could not change logging: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return redirectBack(enabled ? "verbose logging on — retry the pairing" : "verbose logging off");
   }
 
   if (url.pathname === "/manage/whatsapp/autosync" && request.method === "POST") {

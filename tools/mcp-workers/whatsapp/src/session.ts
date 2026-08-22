@@ -24,7 +24,36 @@ import type { ILogger } from "baileys/lib/Utils/logger.js";
 import type { SqlAuthState } from "./auth";
 import { wsDebug } from "./ws-shim";
 
-export const DEFAULT_BROWSER: [string, string, string] = ["Cloudflare", "Chrome", "1.0"];
+// WhatsApp validates the shape of a companion registration, and it is fussier
+// about the phone-code path than the QR path: an unrecognised client identity
+// gets `<error code="400" text="bad-request"/>` back. Baileys' own default is
+// the tuple every other Baileys client sends, so it is the one the server has
+// certainly seen before.
+export const DEFAULT_BROWSER: [string, string, string] = ["Mac OS", "Chrome", "14.4.1"];
+
+interface BinaryNodeish {
+  tag?: string;
+  attrs?: Record<string, unknown>;
+  content?: unknown;
+}
+
+/**
+ * A stanza as XML-ish text, two levels deep. The reason WhatsApp rejects
+ * something is never on the outer node — `<iq type="error">` carries an
+ * `<error code=… text=…/>` child, and without it the log says only that
+ * something went wrong.
+ */
+function describeNode(node: unknown, depth = 0): string {
+  const binary = node as BinaryNodeish;
+  if (!binary?.tag) return "";
+  const attrs = Object.entries(binary.attrs ?? {})
+    .map(([key, value]) => ` ${key}="${String(value).slice(0, 60)}"`)
+    .join("");
+  const children = Array.isArray(binary.content) && depth < 2
+    ? binary.content.map((child) => describeNode(child, depth + 1)).filter(Boolean).join("")
+    : "";
+  return children ? `<${binary.tag}${attrs}>${children}</${binary.tag}>` : `<${binary.tag}${attrs}/>`;
+}
 
 /** Long enough for a human to fetch their phone and type a pairing code. */
 const QR_TIMEOUT_MS = 180_000;
@@ -47,17 +76,21 @@ function memCache(): CacheStore {
 
 export type LogSink = (level: "info" | "warn" | "error", message: string) => void;
 
-function makeLogger(sink: LogSink): ILogger {
+/**
+ * Baileys gates hot paths on `logger.level` (it only serialises XML when the
+ * level is "trace"/"debug"), so the normal level is "warn" and that is a real
+ * saving. Verbose mode exists for one job: telling whether a stanza we are
+ * waiting for — a pairing confirmation, say — ever arrived at all.
+ */
+function makeLogger(sink: LogSink, verbose: boolean): ILogger {
   const format = (obj: unknown, msg?: string): string =>
-    msg ? `${msg} ${typeof obj === "object" ? JSON.stringify(obj)?.slice(0, 200) : String(obj)}` : String(obj);
+    msg ? `${msg} ${typeof obj === "object" ? JSON.stringify(obj)?.slice(0, 300) : String(obj)}` : String(obj);
   const logger: ILogger = {
-    // Baileys checks `logger.level` before serialising XML on hot paths, so
-    // keeping this at "warn" is a real saving, not cosmetic.
-    level: "warn",
+    level: verbose ? "debug" : "warn",
     child: () => logger,
     trace: () => {},
-    debug: () => {},
-    info: () => {},
+    debug: verbose ? (obj: unknown, msg?: string) => sink("info", `baileys: ${format(obj, msg)}`) : () => {},
+    info: verbose ? (obj: unknown, msg?: string) => sink("info", `baileys: ${format(obj, msg)}`) : () => {},
     warn: (obj: unknown, msg?: string) => sink("warn", format(obj, msg)),
     error: (obj: unknown, msg?: string) => sink("error", format(obj, msg)),
   };
@@ -72,6 +105,8 @@ export interface SessionHandlers {
   onChats(chats: { jid: string; name?: string | null; lastMessageTime?: string | null }[]): void;
   log: LogSink;
   version?: WAVersion;
+  /** Forward Baileys' own debug/info logs; for diagnosing a stuck handshake. */
+  verbose?: boolean;
 }
 
 interface Waiter {
@@ -96,7 +131,7 @@ export class Session {
     handlers.log("info", `opening socket with version ${handlers.version ? handlers.version.join(".") : "baileys default"}`);
     this.sock = makeWASocket({
       auth: handlers.auth.state,
-      logger: makeLogger(handlers.log),
+      logger: makeLogger(handlers.log, handlers.verbose ?? false),
       ...(handlers.version ? { version: handlers.version } : {}),
       browser: DEFAULT_BROWSER,
       // A bridge that syncs every few minutes has no use for a full history
@@ -158,6 +193,14 @@ export class Session {
       this.reportChats(chats ?? []);
       if (messages?.length) handlers.onMessages(messages, "history");
     });
+
+    if (handlers.verbose) {
+      // Every inbound stanza tag, so "did the confirmation arrive" is a fact
+      // rather than an inference.
+      this.sock.ws.on("frame", (node: unknown) => {
+        handlers.log("info", `frame ${describeNode(node)}`);
+      });
+    }
 
     // The backlog size is only ever logged by Baileys; read it off the raw node.
     this.sock.ws.on("CB:ib,,offline", (node: unknown) => {

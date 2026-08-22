@@ -37,6 +37,8 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
     unpair: notImplemented as never,
     syncNow: async () => ({ ok: true, messages: 1, chats: 0, detail: null }),
     setAutoSync: notImplemented as never,
+    setVerbose: notImplemented as never,
+    setUseLatestVersion: notImplemented as never,
     searchContacts: async (query) => [{ jid: `${query}@s.whatsapp.net`, phoneNumber: query, name: "Ada" }],
     listMessages: async () => [],
     listChats: async () => [{ jid: "a@s.whatsapp.net", name: "Ada", lastMessageTime: null }],

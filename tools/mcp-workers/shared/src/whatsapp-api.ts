@@ -168,6 +168,10 @@ export interface WhatsAppBridgeApi {
   unpair(): Promise<{ ok: boolean }>;
   syncNow(): Promise<SyncResult>;
   setAutoSync(enabled: boolean): Promise<{ enabled: boolean; nextAlarmAt: number | null }>;
+  /** Forward Baileys' own logs and every inbound stanza into the bridge log. */
+  setVerbose(enabled: boolean): Promise<{ verbose: boolean }>;
+  /** Advertise the freshly-fetched web version instead of Baileys' pinned one. */
+  setUseLatestVersion(enabled: boolean): Promise<{ useLatestVersion: boolean }>;
 
   searchContacts(query: string, limit?: number, page?: number): Promise<ContactRow[]>;
   listMessages(query: ListMessagesQuery): Promise<MessageRow[]>;

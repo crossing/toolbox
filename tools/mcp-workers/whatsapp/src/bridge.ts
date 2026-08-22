@@ -59,8 +59,11 @@ const MAX_CYCLES = 10;
 /** How long a history-import code stays valid. */
 const IMPORT_CODE_TTL_MS = 30 * 60 * 1000;
 
-/** How long a pairing attempt is given before it is written off. */
-const PAIRING_WINDOW_MS = 3 * 60 * 1000;
+// How long a pairing attempt is given before it is written off. WhatsApp's own
+// code lifetime is the real bound; this is deliberately longer so the socket
+// is never what cuts a pairing short — someone has to fetch a phone, unlock
+// it, and find Linked devices.
+const PAIRING_WINDOW_MS = 5 * 60 * 1000;
 
 /** Baileys re-buffers events right after the drain marker; wait it out. */
 const POST_DRAIN_SETTLE_MS = 3000;
@@ -296,19 +299,39 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     // wrangler tail withholds logs from WebSocket-upgraded invocations until
     // the socket closes, so the bridge keeps its own short log instead.
     const entry = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
-    const lines = [entry, ...this.getMeta<string[]>("log", [])].slice(0, 40);
+    const keep = this.getMeta<boolean>("verbose", false) ? 250 : 40;
+    const lines = [entry, ...this.getMeta<string[]>("log", [])].slice(0, keep);
     this.setMeta("log", lines);
     // Also to the console, so `wrangler tail` can watch a live cycle.
     console.log(`[bridge] ${entry}`);
   }
 
   private async openSession(counters: { messages: number; chats: number }): Promise<Session> {
-    return new Session({ ...this.makeHandlers(counters), version: await this.waVersion() });
+    return new Session({
+      ...this.makeHandlers(counters),
+      version: await this.waVersion(),
+      verbose: this.getMeta<boolean>("verbose", false),
+    });
+  }
+
+  async setUseLatestVersion(enabled: boolean): Promise<{ useLatestVersion: boolean }> {
+    this.setMeta("useLatestVersion", enabled);
+    this.log("info", `web version source: ${enabled ? "fetched from WhatsApp" : "baileys pinned"}`);
+    return { useLatestVersion: enabled };
+  }
+
+  async setVerbose(enabled: boolean): Promise<{ verbose: boolean }> {
+    this.setMeta("verbose", enabled);
+    this.log("info", `verbose logging ${enabled ? "on" : "off"}`);
+    return { verbose: enabled };
   }
 
   // The web version is md5'd into the registration payload, so a stale one can
-  // get the connection rejected. Cheap to cache for a day.
+  // get the connection rejected — but so can a *newer* one that the companion
+  // registration endpoint does not accept, which is why this is a toggle and
+  // the default is Baileys' pinned version.
   private async waVersion(): Promise<WAVersion | undefined> {
+    if (!this.getMeta<boolean>("useLatestVersion", false)) return undefined;
     const cached = this.getMeta<{ version: WAVersion; at: number } | null>("waVersion", null);
     if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.version;
     try {
