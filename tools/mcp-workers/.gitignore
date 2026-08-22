@@ -10,3 +10,6 @@
 /gateway/node_modules/
 /gateway/.wrangler/
 /gateway/.dev.vars
+/whatsapp/node_modules/
+/whatsapp/.wrangler/
+/whatsapp/.dev.vars
