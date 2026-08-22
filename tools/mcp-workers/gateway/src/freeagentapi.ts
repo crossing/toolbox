@@ -216,27 +216,49 @@ export class FreeAgentClient {
     for (const [key, value] of Object.entries(params ?? {})) {
       if (value !== undefined && value !== "") url.searchParams.set(key, value);
     }
-    return this.request(url);
+    return this.request("GET", url);
   }
 
   async getUrl(rawUrl: string): Promise<unknown> {
+    return this.request("GET", this.apiUrl(rawUrl));
+  }
+
+  async postJson(path: string, body: unknown): Promise<unknown> {
+    return this.request("POST", new URL(this.baseUrl + path), body);
+  }
+
+  // PUT/DELETE take API URLs the model supplied (FreeAgent's canonical
+  // resource identifiers), so they go through the same host guard as getUrl.
+  async putUrl(rawUrl: string, body: unknown): Promise<unknown> {
+    return this.request("PUT", this.apiUrl(rawUrl), body);
+  }
+
+  async deleteUrl(rawUrl: string): Promise<void> {
+    await this.request("DELETE", this.apiUrl(rawUrl));
+  }
+
+  private apiUrl(rawUrl: string): URL {
     if (!isApiUrl(rawUrl)) {
       throw new FreeAgentApiError(400, `url must be a FreeAgent API URL under ${FREEAGENT_BASE_URL}/`);
     }
-    return this.request(new URL(rawUrl));
+    return new URL(rawUrl);
   }
 
-  private async request(url: URL): Promise<unknown> {
+  private async request(method: string, url: URL, body?: unknown): Promise<unknown> {
     const token = await this.tokens.token();
     const response = await this.fetcher(url.toString(), {
+      method,
       headers: {
         authorization: `Bearer ${token}`,
         accept: "application/json",
         "user-agent": USER_AGENT,
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     const text = await response.text();
     if (!response.ok) throw new FreeAgentApiError(response.status, errorMessage(response.status, text));
+    if (text === "") return {};
     try {
       return JSON.parse(text);
     } catch {

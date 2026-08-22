@@ -32,7 +32,7 @@ import {
   staticClient,
 } from "./freeagentapi";
 import { defaultServiceToggles, FREEAGENT_ACCOUNT_SERVICE, GOOGLE_ACCOUNT_SERVICE, SERVICES } from "./registry";
-import type { AccountInfo } from "./vault";
+import type { AccountInfo, AuditEntry } from "./vault";
 
 // What a vault account row's ciphertext decrypts to. Google blobs carry only
 // the refresh token (access tokens live ~1h, not worth persisting; Google
@@ -123,7 +123,28 @@ function page(title: string, body: string, status = 200, headers: Record<string,
   });
 }
 
-function renderManagePage(email: string, services: Record<string, boolean>, accounts: AccountInfo[]): string {
+function renderAuditRows(audit: AuditEntry[]): string {
+  if (audit.length === 0) {
+    return `<tr><td colspan="4" class="muted">No write calls recorded yet.</td></tr>`;
+  }
+  return audit
+    .map(
+      (entry) => `<tr>
+      <td class="muted">${escapeHtml(new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19))}</td>
+      <td>${escapeHtml(entry.tool)}</td>
+      <td>${escapeHtml(entry.status)}</td>
+      <td class="muted">${escapeHtml(entry.summary)}</td>
+    </tr>`,
+    )
+    .join("\n");
+}
+
+function renderManagePage(
+  email: string,
+  services: Record<string, boolean>,
+  accounts: AccountInfo[],
+  audit: AuditEntry[],
+): string {
   const serviceRows = SERVICES.map((svc) => {
     const enabled = services[svc.id] ?? svc.defaultEnabled;
     const action = enabled ? "Disable" : "Enable";
@@ -146,7 +167,15 @@ function renderManagePage(email: string, services: Record<string, boolean>, acco
             (acct) => `<tr>
       <td>${escapeHtml(acct.service)}</td>
       <td>${escapeHtml(acct.label)}${acct.isDefault ? " <strong>(default)</strong>" : ""}</td>
-      <td>${scopesAllowWrite(acct.scopes) ? "read + write" : "read-only"}</td>
+      <td>${
+        // Google links carry granted scopes; FreeAgent grants are always
+        // full-access upstream (write tools are gated by the connector tier).
+        acct.service === GOOGLE_ACCOUNT_SERVICE
+          ? scopesAllowWrite(acct.scopes)
+            ? "read + write"
+            : "read-only"
+          : "full"
+      }</td>
       <td>
         ${
           acct.isDefault
@@ -197,7 +226,12 @@ ${accountRows}
   </form>
   <div class="muted">Opens FreeAgent's sign-in; only the allowlisted company can complete the
   link. Relinking replaces the stored grant.</div>
-</div>`;
+</div>
+<h2>Audit log</h2>
+<p class="muted">The most recent write-tool calls (including refused and failed ones).</p>
+<table><tr><th>Time (UTC)</th><th>Tool</th><th>Status</th><th>Arguments</th></tr>
+${renderAuditRows(audit)}
+</table>`;
 }
 
 async function handleLogin(env: Env, url: URL): Promise<Response> {
@@ -451,7 +485,8 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
     }
     const vault = vaultFor(env, email);
     const config = await vault.getCatalogConfig(defaultServiceToggles());
-    return page("gateway", renderManagePage(email, config.services, config.accounts));
+    const audit = await vault.listAudit(50);
+    return page("gateway", renderManagePage(email, config.services, config.accounts, audit));
   }
 
   if (url.pathname === "/manage/services" && request.method === "POST") {
