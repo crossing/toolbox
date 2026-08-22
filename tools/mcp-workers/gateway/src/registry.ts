@@ -1,25 +1,30 @@
 // The service registry: each entry contributes tools to the session catalog
 // when the management page has it enabled. Catalog assembly happens once per
 // MCP session (claude.ai re-reads the tool list per conversation); on top of
-// that, every tool call re-checks enablement through the vault so a service
-// toggled off mid-conversation fails closed on the next call.
+// that, every tool call re-resolves its client through the vault, so a
+// service toggled off mid-conversation fails closed on the next call.
 //
-// G0 ships only the `echo` demo service to prove toggle → catalog behaviour;
-// G1 folds in the gmail/drive modules, G2 freeagent.
+// Accounts: gmail and drive are separate catalog toggles but share one
+// linked-account namespace ("google") — a single Google link covers both,
+// because one upstream grant carries both services' scopes.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
+import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
+import type { GoogleClient } from "./googleapi";
+import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
 
-export const READ_ONLY = { readOnlyHint: true } as const;
+// The account namespace a Google link is stored under.
+export const GOOGLE_ACCOUNT_SERVICE = "google";
 
-export class ServiceDisabledError extends Error {}
-
-// What tool handlers get: identity, grant tier, and live vault lookups.
+// What tool handlers get: identity, grant tier, and live vault-backed
+// resolvers. googleClient asserts the service is still enabled, then
+// resolves (account label | default) → an authenticated client.
 export interface GatewayToolContext {
   email: string;
   canWrite: boolean;
-  assertServiceEnabled(service: string): Promise<void>;
+  googleClient(service: string, account?: string): Promise<GoogleClient>;
   listAccounts(): Promise<AccountInfo[]>;
 }
 
@@ -32,45 +37,33 @@ export interface ServiceDef {
   registerWrite?(server: McpServer, ctx: GatewayToolContext): void;
 }
 
-function asResult(body: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(body) }] };
-}
-
-function asError(message: string) {
-  return { content: [{ type: "text" as const, text: message }], isError: true };
-}
-
-async function guarded(ctx: GatewayToolContext, service: string, fn: () => Promise<unknown>) {
-  try {
-    await ctx.assertServiceEnabled(service);
-    return asResult(await fn());
-  } catch (err) {
-    if (err instanceof ServiceDisabledError) {
-      return asError(`the ${service} service is disabled for this gateway; enable it on the management page`);
-    }
-    return asError(err instanceof Error ? err.message : "unexpected error");
-  }
-}
-
-const echoService: ServiceDef = {
-  id: "echo",
-  title: "Echo (demo)",
-  description: "Demo service proving catalog toggling; removed once real services fold in.",
-  defaultEnabled: false,
+const gmailService: ServiceDef = {
+  id: "gmail",
+  title: "Gmail",
+  description: "Search, read, drafts, labels, filters. No send tool exists; deletes are confirm-gated.",
+  defaultEnabled: true,
   registerRead(server, ctx) {
-    server.registerTool(
-      "gateway_echo",
-      {
-        description: "Echo the input back. Demo tool for the gateway's service-toggle machinery.",
-        inputSchema: { text: z.string() },
-        annotations: READ_ONLY,
-      },
-      async ({ text }) => guarded(ctx, "echo", async () => ({ echo: text })),
-    );
+    registerGmailReadTools(server, (account) => ctx.googleClient("gmail", account));
+  },
+  registerWrite(server, ctx) {
+    registerGmailWriteTools(server, (account) => ctx.googleClient("gmail", account));
   },
 };
 
-export const SERVICES: ServiceDef[] = [echoService];
+const driveService: ServiceDef = {
+  id: "drive",
+  title: "Google Drive",
+  description: "Search, metadata, content reads; create/update files. Deletion is trash-only and confirm-gated.",
+  defaultEnabled: true,
+  registerRead(server, ctx) {
+    registerDriveReadTools(server, (account) => ctx.googleClient("drive", account));
+  },
+  registerWrite(server, ctx) {
+    registerDriveWriteTools(server, (account) => ctx.googleClient("drive", account));
+  },
+};
+
+export const SERVICES: ServiceDef[] = [gmailService, driveService];
 
 export function defaultServiceToggles(): Record<string, boolean> {
   return Object.fromEntries(SERVICES.map((svc) => [svc.id, svc.defaultEnabled]));
@@ -100,7 +93,10 @@ export function registerGatewayTools(server: McpServer, ctx: GatewayToolContext)
       try {
         return asResult({ accounts: await ctx.listAccounts() });
       } catch {
-        return asError("could not read linked accounts from the vault");
+        return {
+          content: [{ type: "text" as const, text: "could not read linked accounts from the vault" }],
+          isError: true,
+        };
       }
     },
   );

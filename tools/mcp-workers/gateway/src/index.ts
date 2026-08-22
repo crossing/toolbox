@@ -25,6 +25,7 @@ import {
   WRITE_SCOPE,
   type OwnerProps,
 } from "@toolbox/mcp-shared";
+import { decryptJson, importVaultKey } from "./crypto";
 import { vaultFor, type Env } from "./env";
 import {
   buildIdentityRedirect,
@@ -33,14 +34,17 @@ import {
   fetchUserEmail,
   UpstreamError,
 } from "./google";
-import { handleManage, handleManageCallback } from "./manage";
+import { GoogleClient, TokenSource } from "./googleapi";
+import { handleLinkCallback, handleManage, handleManageCallback } from "./manage";
 import {
   defaultServiceToggles,
+  GOOGLE_ACCOUNT_SERVICE,
   registerGatewayTools,
   SERVICES,
-  ServiceDisabledError,
   type GatewayToolContext,
 } from "./registry";
+import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
+import type { VaultBlob } from "./manage";
 
 export { UserVault } from "./vault";
 export type { Env } from "./env";
@@ -53,10 +57,13 @@ interface PendingAuth {
 }
 
 const SERVER_NAME = "gateway";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 
 export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
   server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  // One token source per resolved account label; instance memory only, so a
+  // hibernated DO simply re-derives from the vault's refresh token on wake.
+  private tokenSources = new Map<string, TokenSource>();
 
   async init() {
     const email = this.props?.userId ?? "";
@@ -64,10 +71,26 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
     const ctx: GatewayToolContext = {
       email,
       canWrite: hasScope(this.props, WRITE_SCOPE),
-      assertServiceEnabled: async (service) => {
+      googleClient: async (service, account) => {
+        // Fail closed per call: enablement and account linkage are re-read
+        // from the vault, so manage-page changes bite mid-conversation.
         const def = SERVICES.find((svc) => svc.id === service);
         const enabled = await vault.isServiceEnabled(service, def?.defaultEnabled ?? false);
         if (!enabled) throw new ServiceDisabledError(service);
+        const acct = await vault.getAccount(GOOGLE_ACCOUNT_SERVICE, account);
+        if (!acct) throw new NoLinkedAccountError(service, account);
+        let source = this.tokenSources.get(acct.label);
+        if (!source) {
+          const key = await importVaultKey(this.env.VAULT_KEY);
+          const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
+          source = new TokenSource(this.env.GWS_CLIENT_ID, this.env.GWS_CLIENT_SECRET, {
+            accessToken: "",
+            refreshToken: blob.refreshToken,
+            expiresAt: 0,
+          });
+          this.tokenSources.set(acct.label, source);
+        }
+        return new GoogleClient(source);
       },
       listAccounts: async () => vault.listAccounts(),
     };
@@ -166,7 +189,7 @@ async function handleConnectorCallback(env: Env, url: URL, state: string): Promi
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: pending.authRequest,
     userId: email,
-    metadata: { phase: "gateway-g0" },
+    metadata: { phase: "gateway-g1" },
     scope: pending.scopes,
     props: { userId: email, scopes: pending.scopes } satisfies GatewayProps,
   });
@@ -181,6 +204,7 @@ const authHandler = {
     if (url.pathname === "/callback" && request.method === "GET") {
       const state = url.searchParams.get("state") ?? "";
       if (state.startsWith("m.")) return handleManageCallback(request, env, url, state.slice(2));
+      if (state.startsWith("l.")) return handleLinkCallback(request, env, url, state.slice(2));
       if (state.startsWith("c.")) return handleConnectorCallback(env, url, state.slice(2));
       return new Response("invalid state", { status: 400 });
     }
