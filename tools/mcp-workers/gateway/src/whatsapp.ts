@@ -19,34 +19,46 @@ import {
   READ_ONLY,
   WRITE,
   needsConfirm,
-  run,
   runChecked,
 } from "./toolutil";
 
 // One bridge per gateway: a single WhatsApp account, one paired device.
 export const BRIDGE_INSTANCE = "default";
 
-/** Errors crossing the DO boundary are plain Errors; keep their message. */
-function withBridgeErrors(bridge: WhatsAppBridgeApi): WhatsAppBridgeApi {
-  return new Proxy(bridge, {
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
-      if (typeof value !== "function") return value;
-      return (...args: unknown[]) =>
-        (value as (...a: unknown[]) => Promise<unknown>).apply(target, args).catch((err: unknown) => {
-          throw new BridgeError(
-            `the WhatsApp bridge failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-    },
-  });
-}
-
 export function bridgeFor(env: Env): WhatsAppBridgeApi {
   const ns = env.WHATSAPP_BRIDGE;
   // Cross-script stubs are untyped by wrangler; the class implements this
   // interface on the other side (shared/src/whatsapp-api.ts is the contract).
-  return withBridgeErrors(ns.get(ns.idFromName(BRIDGE_INSTANCE)) as unknown as WhatsAppBridgeApi);
+  // Do NOT wrap this stub in a Proxy: every property access on a Durable
+  // Object stub is an RPC call in the making, so a get-trap turns `.apply`
+  // into a remote method and makes the stub look thenable to `await`.
+  return ns.get(ns.idFromName(BRIDGE_INSTANCE)) as unknown as WhatsAppBridgeApi;
+}
+
+// Errors thrown across the DO boundary arrive as plain Errors, which asError
+// would flatten to "unexpected error calling the upstream service". Keep what
+// the bridge actually said.
+function asBridgeError(err: unknown): unknown {
+  if (err instanceof Error) {
+    return new BridgeError(`the WhatsApp bridge failed: ${err.message}`);
+  }
+  return err;
+}
+
+async function bridgeRun(fn: () => Promise<unknown>) {
+  try {
+    return asResult(await fn());
+  } catch (err) {
+    return asError(asBridgeError(err));
+  }
+}
+
+async function bridgeRunChecked(fn: () => Promise<{ ok: boolean; detail?: string | null }>) {
+  try {
+    return await runChecked(fn);
+  } catch (err) {
+    return asError(asBridgeError(err));
+  }
 }
 
 const JID_OR_PHONE = z
@@ -67,7 +79,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async ({ query, limit, page }) =>
-      run(async () => ({ contacts: await (await bridge()).searchContacts(query, limit, page) })),
+      bridgeRun(async () => ({ contacts: await (await bridge()).searchContacts(query, limit, page) })),
   );
 
   server.registerTool(
@@ -83,7 +95,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async ({ query, limit, page, sort_by }) =>
-      run(async () => ({
+      bridgeRun(async () => ({
         chats: await (await bridge()).listChats({ query, limit, page, sortBy: sort_by }),
       })),
   );
@@ -114,7 +126,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async (args) =>
-      run(async () => ({
+      bridgeRun(async () => ({
         messages: await (await bridge()).listMessages({
           chatJid: args.chat_jid,
           senderPhoneNumber: args.sender_phone_number,
@@ -134,7 +146,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       inputSchema: { chat_jid: z.string().describe("Chat JID") },
       annotations: READ_ONLY,
     },
-    async ({ chat_jid }) => run(async () => ({ chat: await (await bridge()).getChat(chat_jid) })),
+    async ({ chat_jid }) => bridgeRun(async () => ({ chat: await (await bridge()).getChat(chat_jid) })),
   );
 
   server.registerTool(
@@ -149,7 +161,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async ({ sender_phone_number }) =>
-      run(async () => ({ chat: await (await bridge()).getDirectChatByContact(sender_phone_number) })),
+      bridgeRun(async () => ({ chat: await (await bridge()).getDirectChatByContact(sender_phone_number) })),
   );
 
   server.registerTool(
@@ -164,7 +176,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async ({ jid, limit, page }) =>
-      run(async () => ({ chats: await (await bridge()).getContactChats(jid, limit, page) })),
+      bridgeRun(async () => ({ chats: await (await bridge()).getContactChats(jid, limit, page) })),
   );
 
   server.registerTool(
@@ -174,7 +186,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       inputSchema: { jid: JID_OR_PHONE },
       annotations: READ_ONLY,
     },
-    async ({ jid }) => run(async () => (await bridge()).getLastInteraction(jid)),
+    async ({ jid }) => bridgeRun(async () => (await bridge()).getLastInteraction(jid)),
   );
 
   server.registerTool(
@@ -189,7 +201,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async ({ message_id, before, after }) =>
-      run(async () => (await bridge()).getMessageContext(message_id, before, after)),
+      bridgeRun(async () => (await bridge()).getMessageContext(message_id, before, after)),
   );
 
   server.registerTool(
@@ -221,7 +233,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
       annotations: READ_ONLY,
     },
     async () =>
-      run(async () => {
+      bridgeRun(async () => {
         const status = await (await bridge()).status();
         // The pairing code is a credential for adding a device — never worth
         // putting in a model's context.
@@ -243,7 +255,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
       annotations: WRITE,
     },
     async ({ recipient, message }) =>
-      runChecked(async () => (await bridge()).sendMessage(recipient, message)),
+      bridgeRunChecked(async () => (await bridge()).sendMessage(recipient, message)),
   );
 
   server.registerTool(
@@ -268,7 +280,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
     },
     async ({ recipient, filename, base64, media_type, caption, confirm }) => {
       if (confirm !== true) return needsConfirm();
-      return runChecked(async () => (await bridge()).sendFile(recipient, filename, base64, media_type, caption));
+      return bridgeRunChecked(async () => (await bridge()).sendFile(recipient, filename, base64, media_type, caption));
     },
   );
 
@@ -280,7 +292,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
       inputSchema: {},
       annotations: WRITE,
     },
-    async () => runChecked(async () => (await bridge()).syncNow()),
+    async () => bridgeRunChecked(async () => (await bridge()).syncNow()),
   );
 }
 
