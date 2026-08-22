@@ -136239,6 +136239,139 @@ var init_crypto = __esm({
   }
 });
 
+// src/ws-shim.ts
+import { EventEmitter as EventEmitter3 } from "events";
+function dbg(msg) {
+  wsDebug.push(`${wsDebug.length}:${msg}`);
+  if (wsDebug.length > 100) wsDebug.shift();
+}
+var wsDebug, CONNECTING, OPEN, CLOSING, CLOSED, WorkerdWebSocket;
+var init_ws_shim = __esm({
+  "src/ws-shim.ts"() {
+    "use strict";
+    init_modules_watch_stub();
+    wsDebug = [];
+    __name(dbg, "dbg");
+    CONNECTING = 0;
+    OPEN = 1;
+    CLOSING = 2;
+    CLOSED = 3;
+    WorkerdWebSocket = class extends EventEmitter3 {
+      static {
+        __name(this, "WorkerdWebSocket");
+      }
+      static CONNECTING = CONNECTING;
+      static OPEN = OPEN;
+      static CLOSING = CLOSING;
+      static CLOSED = CLOSED;
+      CONNECTING = CONNECTING;
+      OPEN = OPEN;
+      CLOSING = CLOSING;
+      CLOSED = CLOSED;
+      readyState = CONNECTING;
+      socket = null;
+      constructor(url, options = {}) {
+        super();
+        this.setMaxListeners(0);
+        void this.open(url.toString(), options);
+      }
+      async open(url, options) {
+        const httpUrl = url.replace(/^ws:/, "http:").replace(/^wss:/, "https:");
+        const headers = { Upgrade: "websocket", ...options.headers ?? {} };
+        if (options.origin) headers.Origin = options.origin;
+        let resp;
+        try {
+          resp = await fetch(httpUrl, { headers });
+        } catch (err) {
+          this.readyState = CLOSED;
+          this.emit("error", err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        const socket = resp.webSocket;
+        dbg(`fetch status=${resp.status} hasWS=${!!socket}`);
+        if (resp.status !== 101 || !socket) {
+          this.readyState = CLOSED;
+          this.emit("unexpected-response");
+          this.emit("error", new Error(`websocket upgrade failed (status ${resp.status})`));
+          return;
+        }
+        socket.binaryType = "arraybuffer";
+        socket.accept();
+        this.socket = socket;
+        this.readyState = OPEN;
+        let queue2 = Promise.resolve();
+        socket.addEventListener("message", (event) => {
+          const data = event.data;
+          queue2 = queue2.then(async () => {
+            let buf;
+            if (typeof data === "string") {
+              dbg(`recv str ${data.length}`);
+              buf = Buffer.from(data);
+            } else if (data instanceof ArrayBuffer) {
+              dbg(`recv ab ${data.byteLength}`);
+              buf = Buffer.from(data);
+            } else {
+              const ab = await data.arrayBuffer();
+              dbg(`recv blob ${ab.byteLength}`);
+              buf = Buffer.from(ab);
+            }
+            this.emit("message", buf);
+          });
+        });
+        socket.addEventListener("close", (event) => {
+          this.readyState = CLOSED;
+          dbg(`close code=${event.code} reason=${JSON.stringify(event.reason)}`);
+          this.emit("close", event.code, Buffer.from(event.reason ?? ""));
+        });
+        socket.addEventListener("error", (event) => {
+          this.readyState = CLOSED;
+          const msg = event.message ?? "websocket error";
+          dbg(`error ${msg}`);
+          this.emit("error", new Error(msg));
+        });
+        dbg("open");
+        this.emit("open");
+      }
+      send(data, cb) {
+        try {
+          if (!this.socket || this.readyState !== OPEN) throw new Error("socket not open");
+          if (typeof data === "string") {
+            this.socket.send(data);
+            dbg(`send str ${data.length}`);
+          } else if (ArrayBuffer.isView(data)) {
+            const copy = new Uint8Array(data.byteLength);
+            copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+            this.socket.send(copy.buffer);
+            dbg(`send bin ${data.byteLength}`);
+          } else {
+            this.socket.send(data);
+            dbg(`send buf ${data.byteLength}`);
+          }
+          cb?.();
+        } catch (err) {
+          cb?.(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+      close(code, reason) {
+        if (this.readyState === CLOSED || this.readyState === CLOSING) return;
+        this.readyState = CLOSING;
+        try {
+          this.socket?.close(code, reason);
+        } catch {
+        }
+      }
+      // Baileys calls these ws-only helpers; make them harmless no-ops.
+      terminate() {
+        this.close();
+      }
+      ping() {
+      }
+      pong() {
+      }
+    };
+  }
+});
+
 // ../node_modules/baileys/lib/Utils/business.js
 import { createHash as createHash6 } from "crypto";
 import { createWriteStream as createWriteStream2, promises as fs3 } from "fs";
@@ -138002,13 +138135,13 @@ var init_BinaryInfo = __esm({
 });
 
 // ../node_modules/baileys/lib/Socket/Client/types.js
-import { EventEmitter as EventEmitter3 } from "events";
+import { EventEmitter as EventEmitter4 } from "events";
 import { URL as URL3 } from "url";
 var AbstractSocketClient;
 var init_types4 = __esm({
   "../node_modules/baileys/lib/Socket/Client/types.js"() {
     init_modules_watch_stub();
-    AbstractSocketClient = class extends EventEmitter3 {
+    AbstractSocketClient = class extends EventEmitter4 {
       static {
         __name(this, "AbstractSocketClient");
       }
@@ -138017,109 +138150,6 @@ var init_types4 = __esm({
         this.url = url;
         this.config = config;
         this.setMaxListeners(0);
-      }
-    };
-  }
-});
-
-// src/ws-shim.ts
-import { EventEmitter as EventEmitter4 } from "events";
-var CONNECTING, OPEN, CLOSING, CLOSED, WorkerdWebSocket;
-var init_ws_shim = __esm({
-  "src/ws-shim.ts"() {
-    init_modules_watch_stub();
-    CONNECTING = 0;
-    OPEN = 1;
-    CLOSING = 2;
-    CLOSED = 3;
-    WorkerdWebSocket = class extends EventEmitter4 {
-      static {
-        __name(this, "WorkerdWebSocket");
-      }
-      static CONNECTING = CONNECTING;
-      static OPEN = OPEN;
-      static CLOSING = CLOSING;
-      static CLOSED = CLOSED;
-      CONNECTING = CONNECTING;
-      OPEN = OPEN;
-      CLOSING = CLOSING;
-      CLOSED = CLOSED;
-      readyState = CONNECTING;
-      socket = null;
-      constructor(url, options = {}) {
-        super();
-        this.setMaxListeners(0);
-        void this.open(url.toString(), options);
-      }
-      async open(url, options) {
-        const httpUrl = url.replace(/^ws:/, "http:").replace(/^wss:/, "https:");
-        const headers = { Upgrade: "websocket", ...options.headers ?? {} };
-        if (options.origin) headers.Origin = options.origin;
-        let resp;
-        try {
-          resp = await fetch(httpUrl, { headers });
-        } catch (err) {
-          this.readyState = CLOSED;
-          this.emit("error", err instanceof Error ? err : new Error(String(err)));
-          return;
-        }
-        const socket = resp.webSocket;
-        if (resp.status !== 101 || !socket) {
-          this.readyState = CLOSED;
-          this.emit("unexpected-response");
-          this.emit("error", new Error(`websocket upgrade failed (status ${resp.status})`));
-          return;
-        }
-        socket.accept();
-        this.socket = socket;
-        this.readyState = OPEN;
-        socket.addEventListener("message", (event) => {
-          const data = event.data;
-          if (typeof data === "string") this.emit("message", Buffer.from(data));
-          else this.emit("message", Buffer.from(data));
-        });
-        socket.addEventListener("close", (event) => {
-          this.readyState = CLOSED;
-          this.emit("close", event.code, Buffer.from(event.reason ?? ""));
-        });
-        socket.addEventListener("error", () => {
-          this.readyState = CLOSED;
-          this.emit("error", new Error("websocket error"));
-        });
-        this.emit("open");
-      }
-      send(data, cb) {
-        try {
-          if (!this.socket || this.readyState !== OPEN) throw new Error("socket not open");
-          if (typeof data === "string") {
-            this.socket.send(data);
-          } else if (ArrayBuffer.isView(data)) {
-            const copy = new Uint8Array(data.byteLength);
-            copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-            this.socket.send(copy.buffer);
-          } else {
-            this.socket.send(data);
-          }
-          cb?.();
-        } catch (err) {
-          cb?.(err instanceof Error ? err : new Error(String(err)));
-        }
-      }
-      close(code, reason) {
-        if (this.readyState === CLOSED || this.readyState === CLOSING) return;
-        this.readyState = CLOSING;
-        try {
-          this.socket?.close(code, reason);
-        } catch {
-        }
-      }
-      // Baileys calls these ws-only helpers; make them harmless no-ops.
-      terminate() {
-        this.close();
-      }
-      ping() {
-      }
-      pong() {
       }
     };
   }
@@ -167506,15 +167536,16 @@ var init_lib4 = __esm({
   }
 });
 
-// .wrangler/tmp/bundle-I00u5y/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-XQMEB8/middleware-loader.entry.ts
 init_modules_watch_stub();
 
-// .wrangler/tmp/bundle-I00u5y/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-XQMEB8/middleware-insertion-facade.js
 init_modules_watch_stub();
 
 // src/spike.ts
 init_modules_watch_stub();
 init_crypto();
+init_ws_shim();
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -167650,7 +167681,7 @@ async function probeConnect() {
     }
     setTimeout(() => done({ timedOut: true }), 2e4);
   });
-  return json(result);
+  return json({ ...result, wsDebug: [...wsDebug] });
 }
 __name(probeConnect, "probeConnect");
 var spike_default = {
@@ -167721,7 +167752,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-I00u5y/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-XQMEB8/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -167754,7 +167785,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-I00u5y/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-XQMEB8/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

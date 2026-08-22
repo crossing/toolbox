@@ -17,6 +17,7 @@ interface Env {}
 // rejected by workerd, the module fails to load and every route 500s with
 // the reason — exactly the signal the spike wants.
 import { hkdf, md5 } from "baileys/lib/Utils/crypto.js";
+import { wsDebug } from "./ws-shim";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -173,7 +174,7 @@ async function probeConnect(): Promise<Response> {
     }
     setTimeout(() => done({ timedOut: true }), 20000);
   });
-  return json(result);
+  return json({ ...result, wsDebug: [...wsDebug] });
 }
 
 export default {

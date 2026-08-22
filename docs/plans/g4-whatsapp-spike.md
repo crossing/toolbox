@@ -38,27 +38,44 @@ workerd rejected that, the whole vendored-Baileys-in-a-DO plan was dead.
   `connection.update: connecting` and drives the socket — i.e. the shim's
   code path executes end-to-end.
 
-## Could not test here (environment limit, not a workerd/Baileys limit)
+- **Live WhatsApp handshake — PROVEN on deployed workerd.** Local
+  `wrangler dev` in this session has no outbound egress (a plain `fetch()`
+  also throws `internal error`), so the handshake was proven by deploying
+  the spike to a temporary `*.workers.dev` URL and then deleting it. On the
+  deployed worker the full Noise handshake round-trips and WhatsApp emits a
+  QR frame — `reachedQR: true`. The shim trace:
 
-- **Live WhatsApp handshake.** This session's local `wrangler dev` sandbox
-  has **no outbound network egress**: a plain `fetch()` to a normal HTTPS
-  host throws `internal error`, and so does the WS upgrade. That is why
-  `/connect` ends `connecting → close` with an internal error rather than a
-  QR frame — the shim is fine, the network is walled off. Deployed Workers
-  do have egress (the gateway makes outbound calls constantly, and the
-  reference project rafaelsg-01/whatsapp-cloudflare-workers runs Baileys'
-  outbound WS to WhatsApp in production), so the remaining proof needs a
-  **deployed** spike, not local dev.
+  ```
+  fetch status=101 hasWS=true   (outbound WS upgrade to wss://web.whatsapp.com/ws/chat)
+  open
+  send bin 43                   (Baileys ClientHello)
+  recv blob 350                 (server hello)
+  send bin 368                  (client finish)
+  recv blob 698                 (server response)
+  send bin 37
+  connection.update:+qr         (QR pairing frame received)
+  ```
+
+## workerd gotchas the deployed run exposed (keepers for the real bridge)
+
+- **Binary frames arrive as `Blob`, not `ArrayBuffer`.** Setting
+  `binaryType = "arraybuffer"` on an accepted outbound socket is ignored, so
+  the shim reads `await blob.arrayBuffer()` and — because that is async —
+  funnels every message through an ordered promise chain to preserve
+  handshake frame order. Without this the first server frame throws
+  `Buffer.from(Blob)` and the connection dies immediately.
+- **A bare upgrade to WhatsApp sits idle** (no unsolicited server frame);
+  WhatsApp speaks only after the client's ClientHello, so an idle raw
+  upgrade still confirms the upgrade itself succeeded.
+- Deployed bundle is **1.68 MB gzipped** — comfortably inside the 3 MB
+  free-plan script limit even with the doubled inlined WASM.
 
 ## Decision this sets up
 
-Feasibility is strongly positive: the make-or-break unknown (Rust/WASM
-crypto in workerd) works, and the known `ws` gap is solved. One gate is
-still open only because of the local sandbox: the live WhatsApp handshake
-from deployed workerd. Recommended next step is to **deploy the spike**
-(temporarily on a reachable URL) to watch a QR/pairing frame arrive, then —
-only after that green — commit to the full build, which is large and
-net-new:
+Feasibility is now fully positive: the make-or-break unknown (Rust/WASM
+crypto in workerd) works, the `ws` gap is solved, and the **live WhatsApp
+handshake reaches QR on deployed workerd**. Nothing runtime-level remains
+unproven. What's left is the full build, which is large and net-new:
 
 - Baileys `AuthenticationState` ⇄ DO SQLite adapter (replacing the
   file-based store — the main port work).

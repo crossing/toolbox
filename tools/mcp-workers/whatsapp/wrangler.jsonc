@@ -12,5 +12,8 @@
     // workerd. Point it at a shim over workerd's native outbound WebSocket.
     "ws": "./src/ws-shim.ts"
   },
+  // The spike worker was deployed to a *.workers.dev URL to prove the live
+  // WhatsApp handshake, then deleted. The real bridge gets a custom domain
+  // like the gateway; keep workers_dev off.
   "workers_dev": false
 }

@@ -14,6 +14,14 @@
 
 import { EventEmitter } from "events";
 
+// Spike-only diagnostic ring buffer; the /connect probe reads it. Removed
+// with the shim's productionization.
+export const wsDebug: string[] = [];
+function dbg(msg: string): void {
+  wsDebug.push(`${wsDebug.length}:${msg}`);
+  if (wsDebug.length > 100) wsDebug.shift();
+}
+
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSING = 2;
@@ -58,29 +66,52 @@ export default class WorkerdWebSocket extends EventEmitter {
       return;
     }
     const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket;
+    dbg(`fetch status=${resp.status} hasWS=${!!socket}`);
     if (resp.status !== 101 || !socket) {
       this.readyState = CLOSED;
       this.emit("unexpected-response");
       this.emit("error", new Error(`websocket upgrade failed (status ${resp.status})`));
       return;
     }
+    // workerd delivers binary frames as Blob (the arraybuffer binaryType
+    // hint is ignored on an accepted socket), and Baileys' noise decoder
+    // needs a Buffer. Blob→ArrayBuffer is async, so an ordered promise chain
+    // preserves handshake frame order regardless of read latency.
+    (socket as unknown as { binaryType: string }).binaryType = "arraybuffer";
     socket.accept();
     this.socket = socket;
     this.readyState = OPEN;
+    let queue: Promise<void> = Promise.resolve();
     socket.addEventListener("message", (event: MessageEvent) => {
       const data = event.data;
-      // Baileys' noise handler expects a Buffer for binary frames.
-      if (typeof data === "string") this.emit("message", Buffer.from(data));
-      else this.emit("message", Buffer.from(data as ArrayBuffer));
+      queue = queue.then(async () => {
+        let buf: Buffer;
+        if (typeof data === "string") {
+          dbg(`recv str ${data.length}`);
+          buf = Buffer.from(data);
+        } else if (data instanceof ArrayBuffer) {
+          dbg(`recv ab ${data.byteLength}`);
+          buf = Buffer.from(data);
+        } else {
+          const ab = await (data as Blob).arrayBuffer();
+          dbg(`recv blob ${ab.byteLength}`);
+          buf = Buffer.from(ab);
+        }
+        this.emit("message", buf);
+      });
     });
     socket.addEventListener("close", (event: CloseEvent) => {
       this.readyState = CLOSED;
+      dbg(`close code=${event.code} reason=${JSON.stringify(event.reason)}`);
       this.emit("close", event.code, Buffer.from(event.reason ?? ""));
     });
-    socket.addEventListener("error", () => {
+    socket.addEventListener("error", (event: Event) => {
       this.readyState = CLOSED;
-      this.emit("error", new Error("websocket error"));
+      const msg = (event as unknown as { message?: string }).message ?? "websocket error";
+      dbg(`error ${msg}`);
+      this.emit("error", new Error(msg));
     });
+    dbg("open");
     this.emit("open");
   }
 
@@ -90,12 +121,15 @@ export default class WorkerdWebSocket extends EventEmitter {
       // workerd accepts string or BufferSource; normalize Buffer views.
       if (typeof data === "string") {
         this.socket.send(data);
+        dbg(`send str ${data.length}`);
       } else if (ArrayBuffer.isView(data)) {
         const copy = new Uint8Array(data.byteLength);
         copy.set(new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength));
         this.socket.send(copy.buffer);
+        dbg(`send bin ${data.byteLength}`);
       } else {
         this.socket.send(data);
+        dbg(`send buf ${(data as ArrayBuffer).byteLength}`);
       }
       cb?.();
     } catch (err) {
