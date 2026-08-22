@@ -177,6 +177,105 @@ function safeHost(url: string): string {
   }
 }
 
+// --- the send side --------------------------------------------------------
+//
+// Baileys' own upload writes the encrypted file to os.tmpdir() and streams it
+// with node:https — neither exists in workerd — so outgoing media is encrypted
+// in memory here and POSTed with fetch. The wire format is the same one
+// `encryptedStream` produces, because the receiver's client verifies it.
+
+export interface EncryptedUpload {
+  /** enc || mac, exactly what gets POSTed and later downloaded. */
+  body: Uint8Array;
+  mediaKey: Uint8Array;
+  fileSha256: Uint8Array;
+  fileEncSha256: Uint8Array;
+  fileLength: number;
+}
+
+export async function encryptForUpload(
+  plaintext: Uint8Array,
+  mediaType: string,
+  mediaKey: Uint8Array = crypto.getRandomValues(new Uint8Array(32)),
+): Promise<EncryptedUpload> {
+  const { iv, cipherKey, macKey } = await expandMediaKey(mediaKey, mediaType);
+  const aesKey = await crypto.subtle.importKey("raw", cipherKey as BufferSource, "AES-CBC", false, [
+    "encrypt",
+  ]);
+  const enc = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-CBC", iv: iv as BufferSource }, aesKey, plaintext as BufferSource),
+  );
+  const macInput = new Uint8Array(iv.length + enc.length);
+  macInput.set(iv, 0);
+  macInput.set(enc, iv.length);
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    macKey as BufferSource,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", hmacKey, macInput as BufferSource)).subarray(
+    0,
+    10,
+  );
+  const body = new Uint8Array(enc.length + mac.length);
+  body.set(enc, 0);
+  body.set(mac, enc.length);
+  return {
+    body,
+    mediaKey,
+    fileSha256: new Uint8Array(await crypto.subtle.digest("SHA-256", plaintext as BufferSource)),
+    fileEncSha256: new Uint8Array(await crypto.subtle.digest("SHA-256", body as BufferSource)),
+    fileLength: plaintext.length,
+  };
+}
+
+/** WhatsApp's upload URLs use base64url with the padding stripped. */
+export function encodeForUpload(base64: string): string {
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export interface UploadHost {
+  hostname: string;
+}
+
+/** POST the ciphertext to a media host and return where it landed. */
+export async function uploadEncrypted(
+  upload: EncryptedUpload,
+  mediaType: string,
+  conn: { hosts: UploadHost[]; auth: string },
+  pathMap: Record<string, string>,
+  fetcher: typeof fetch = (input, init) => fetch(input, init),
+): Promise<{ url?: string; directPath?: string }> {
+  const path = pathMap[mediaType];
+  if (path === undefined) throw new MediaError(`cannot upload media of type "${mediaType}"`);
+  const token = encodeForUpload(Buffer.from(upload.fileEncSha256).toString("base64"));
+  const failures: string[] = [];
+  for (const { hostname } of conn.hosts) {
+    const url = `https://${hostname}${path}/${token}?auth=${encodeURIComponent(conn.auth)}&token=${token}`;
+    try {
+      const response = await fetcher(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", Origin: ORIGIN },
+        body: upload.body as BodyInit,
+      });
+      if (!response.ok) {
+        failures.push(`${hostname}: HTTP ${response.status}`);
+        continue;
+      }
+      const result = (await response.json()) as { url?: string; direct_path?: string };
+      if (result.url || result.direct_path) {
+        return { url: result.url, directPath: result.direct_path };
+      }
+      failures.push(`${hostname}: ${JSON.stringify(result).slice(0, 120)}`);
+    } catch (err) {
+      failures.push(`${hostname}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  throw new MediaError(`media upload failed on every host (${failures.join("; ")})`);
+}
+
 export async function fetchAndDecrypt(
   descriptor: MediaDescriptor,
   fetcher: typeof fetch = (input, init) => fetch(input, init),

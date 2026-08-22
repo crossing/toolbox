@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { decryptMedia, expandMediaKey, fetchAndDecrypt, mediaUrl, MediaError } from "../src/media";
+import {
+  decryptMedia,
+  encodeForUpload,
+  encryptForUpload,
+  expandMediaKey,
+  fetchAndDecrypt,
+  mediaUrl,
+  MediaError,
+  uploadEncrypted,
+} from "../src/media";
 
 // Build a ciphertext exactly the way WhatsApp does, so the decrypt path is
 // tested against the real layout rather than against itself.
@@ -132,5 +141,85 @@ describe("fetchAndDecrypt", () => {
     const { descriptor } = await encryptLikeWhatsApp(new Uint8Array([1]), KEY, "image");
     const fetcher = (async () => new Response("nope", { status: 500 })) as typeof fetch;
     await expect(fetchAndDecrypt({ ...base, ...descriptor }, fetcher)).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("the send side", () => {
+  const PATHS = { image: "/mms/image", document: "/mms/document" };
+
+  it("produces something the download path accepts", async () => {
+    const plaintext = new Uint8Array(300).map((_, i) => (i * 5) % 251);
+    const upload = await encryptForUpload(plaintext, "image");
+    const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+    const back = await decryptMedia(upload.body, {
+      mediaType: "image",
+      mediaKeyB64: b64(upload.mediaKey),
+      fileSha256B64: b64(upload.fileSha256),
+      fileEncSha256B64: b64(upload.fileEncSha256),
+    });
+    expect(new Uint8Array(back)).toEqual(plaintext);
+    expect(upload.fileLength).toBe(300);
+  });
+
+  it("base64url-encodes the upload token", () => {
+    expect(encodeForUpload("ab+c/d==")).toBe("ab-c_d");
+  });
+
+  it("posts to the media host with the auth token and returns where it landed", async () => {
+    const upload = await encryptForUpload(new Uint8Array([1, 2, 3]), "image");
+    const seen: { url: string; method?: string; contentType: string | null }[] = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        url: String(input),
+        method: init?.method,
+        contentType: new Headers(init?.headers).get("content-type"),
+      });
+      return Response.json({ url: "https://mmg.whatsapp.net/v/up", direct_path: "/v/up" });
+    }) as typeof fetch;
+
+    const placed = await uploadEncrypted(
+      upload,
+      "image",
+      { hosts: [{ hostname: "mmg.whatsapp.net" }], auth: "tok en/+" },
+      PATHS,
+      fetcher,
+    );
+    expect(placed).toEqual({ url: "https://mmg.whatsapp.net/v/up", directPath: "/v/up" });
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.contentType).toBe("application/octet-stream");
+    expect(seen[0]!.url).toContain("https://mmg.whatsapp.net/mms/image/");
+    expect(seen[0]!.url).toContain("auth=tok%20en%2F%2B");
+  });
+
+  it("falls through to the next host and reports every failure", async () => {
+    const upload = await encryptForUpload(new Uint8Array([1]), "document");
+    const tried: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      tried.push(new URL(String(input)).host);
+      return tried.length === 1
+        ? new Response("no", { status: 503 })
+        : Response.json({ direct_path: "/v/ok" });
+    }) as typeof fetch;
+    const placed = await uploadEncrypted(
+      upload,
+      "document",
+      { hosts: [{ hostname: "a.example" }, { hostname: "b.example" }], auth: "t" },
+      PATHS,
+      fetcher,
+    );
+    expect(tried).toEqual(["a.example", "b.example"]);
+    expect(placed.directPath).toBe("/v/ok");
+
+    const allFail = (async () => new Response("no", { status: 500 })) as typeof fetch;
+    await expect(
+      uploadEncrypted(upload, "document", { hosts: [{ hostname: "a.example" }], auth: "t" }, PATHS, allFail),
+    ).rejects.toThrow(/every host.*HTTP 500/s);
+  });
+
+  it("refuses a media type with no upload path", async () => {
+    const upload = await encryptForUpload(new Uint8Array([1]), "image");
+    await expect(
+      uploadEncrypted(upload, "hologram", { hosts: [], auth: "t" }, PATHS),
+    ).rejects.toThrow(/cannot upload/);
   });
 });

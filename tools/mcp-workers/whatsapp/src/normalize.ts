@@ -128,3 +128,37 @@ export function chatNameFor(message: WAMessage): string | null {
   if (message.key?.remoteJid?.endsWith("@g.us")) return null;
   return message.pushName ?? null;
 }
+
+// WhatsApp needs to be told which kind of attachment this is, and its clients
+// key their preview off the mime type, so both are inferred from the filename
+// when the caller does not say.
+const EXTENSION_KINDS: Record<string, string> = {
+  jpg: "image", jpeg: "image", png: "image", gif: "image", webp: "image", heic: "image",
+  mp4: "video", mov: "video", webm: "video", mkv: "video",
+  ogg: "audio", opus: "audio", mp3: "audio", m4a: "audio", wav: "audio", aac: "audio",
+};
+
+const EXTENSION_MIMES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+  webp: "image/webp", heic: "image/heic",
+  mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", mkv: "video/x-matroska",
+  ogg: "audio/ogg; codecs=opus", opus: "audio/ogg; codecs=opus", mp3: "audio/mpeg",
+  m4a: "audio/mp4", wav: "audio/wav", aac: "audio/aac",
+  pdf: "application/pdf", txt: "text/plain", csv: "text/csv", json: "application/json",
+  zip: "application/zip", doc: "application/msword", xls: "application/vnd.ms-excel",
+};
+
+function extensionOf(filename: string): string {
+  const parts = filename.toLowerCase().split(".");
+  return parts.length > 1 ? (parts.pop() ?? "") : "";
+}
+
+export function kindFromFilename(filename: string): string {
+  return EXTENSION_KINDS[extensionOf(filename)] ?? "document";
+}
+
+export function mimeFromFilename(filename: string, kind: string): string {
+  const known = EXTENSION_MIMES[extensionOf(filename)];
+  if (known) return known;
+  return kind === "document" ? "application/octet-stream" : `${kind}/*`;
+}

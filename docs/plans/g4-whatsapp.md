@@ -42,7 +42,7 @@ on demand, which is why the first send in a while takes a few seconds.
 | `whatsapp/src/bridge.ts` | the Durable Object: cycles, pairing, RPC surface |
 | `whatsapp/src/store.ts` | chats/messages schema and the nine read queries |
 | `whatsapp/src/normalize.ts` | `WAMessage` → row |
-| `whatsapp/src/media.ts` | fetch + verify + decrypt, WebCrypto only |
+| `whatsapp/src/media.ts` | fetch/verify/decrypt and encrypt/upload, WebCrypto only |
 | `whatsapp/src/ws-shim.ts` | node-`ws` API over workerd's outbound WebSocket |
 | `shared/src/whatsapp-api.ts` | the gateway ↔ bridge contract |
 | `gateway/src/whatsapp.ts` | the MCP tools |
@@ -69,6 +69,10 @@ on demand, which is why the first send in a while takes a few seconds.
 - **`sock.end(undefined)`, never `logout()`.** The latter unlinks the device
   server-side. Consequently `unpair()` only wipes local state — the device also
   has to be removed on the phone, or orphan "linked device" entries accumulate.
+- **Media send bypasses `sendMessage`.** Baileys' path writes the encrypted
+  file to `os.tmpdir()` and uploads it with `node:https`; the bridge encrypts
+  in memory, POSTs to a host from `refreshMediaConn`, and calls `relayMessage`
+  with a proto it builds itself.
 - **Timestamps are ISO-8601 UTC.** The Go bridge writes `time.Time` with a
   local offset, which does not sort correctly across offsets; the importer
   converts.
@@ -82,7 +86,7 @@ on demand, which is why the first send in a while takes a few seconds.
 | B3 store + read tools | done; nine tools plus `whatsapp_bridge_status` |
 | B4 media | download done (WebCrypto, integrity-checked); R2 offload not built |
 | B5 history import | done; ran against production |
-| B6 send | text done; `send_file` refuses with a reason (see below) |
+| B6 send | text and files done; audio must arrive pre-encoded |
 
 Waiting on a human with the phone: request a code on `/manage/whatsapp`, type
 it into WhatsApp → Linked devices → Link with phone number. Everything up to
@@ -90,13 +94,9 @@ that point is verified in production; nothing past it can be.
 
 ## Not built, deliberately
 
-- **`send_file`.** Baileys' media send writes the encrypted file to
-  `os.tmpdir()` and uploads it with `node:https`. Doing it in workerd means
-  encrypting in memory, POSTing to the media host from `refreshMediaConn`, and
-  calling `relayMessage` with a hand-built proto. The tool exists and explains
-  itself rather than failing obscurely.
-- **`send_audio_message`.** No ffmpeg; pre-encoded Ogg/Opus through `send_file`
-  when that lands.
+- **`send_audio_message`.** No ffmpeg to transcode with; send pre-encoded
+  Ogg/Opus through `send_file` instead, which is what the local tool's
+  workaround was anyway.
 - **R2 offload for large media.** Images inline up to 2 MB as image blocks,
   other types up to 32 KB. Anything larger reports its size and type. The R2
   bucket and a signed `/media/:token` route on the gateway are the shape if it

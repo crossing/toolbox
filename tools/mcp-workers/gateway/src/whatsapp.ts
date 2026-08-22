@@ -206,11 +206,13 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
     "whatsapp_send_file",
     {
       description:
-        "Send a file over WhatsApp. Provide the bytes as base64; audio must already be Opus-in-Ogg (no transcoding here).",
+        "Send a file over WhatsApp: image, video, audio or document. Provide the bytes as base64, up to about 5 MB. Audio must already be Ogg/Opus — nothing here transcodes.",
       inputSchema: {
         recipient: JID_OR_PHONE,
         filename: z.string().describe("File name shown to the recipient"),
         base64: z.string().describe("File contents, base64-encoded (about 5 MB max)"),
+        // The kind decides which WhatsApp message proto is built, and so how
+        // the recipient's client renders it.
         media_type: z
           .enum(["image", "video", "audio", "document"])
           .optional()

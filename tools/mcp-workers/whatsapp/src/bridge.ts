@@ -32,11 +32,11 @@ import type {
   SyncResult,
   WhatsAppBridgeApi,
 } from "@toolbox/mcp-shared";
-import { Curve, fetchLatestWaWebVersion } from "baileys";
+import { Curve, fetchLatestWaWebVersion, generateMessageIDV2, MEDIA_PATH_MAP, proto } from "baileys";
 import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
-import { fetchAndDecrypt, MediaError } from "./media";
-import { chatNameFor, toJid, toStoredMessage } from "./normalize";
+import { encryptForUpload, fetchAndDecrypt, MediaError, uploadEncrypted } from "./media";
+import { chatNameFor, kindFromFilename, mimeFromFilename, toJid, toStoredMessage } from "./normalize";
 import { DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
 import { Store } from "./store";
 
@@ -71,6 +71,9 @@ const POST_DRAIN_SETTLE_MS = 3000;
 // a file the model usually cannot read anyway. Hence the lopsided limits.
 const IMAGE_INLINE_CAP = 2 * 1024 * 1024;
 const FILE_INLINE_CAP = 32 * 1024;
+
+/** Outgoing files: base64 in an MCP call, so the limit is about the request. */
+const MAX_SEND_BYTES = 5 * 1024 * 1024;
 
 export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsAppBridgeApi {
   private sql: SqlStorage;
@@ -552,21 +555,98 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     }
   }
 
+  // Baileys' own media send is unusable here: it writes the encrypted file to
+  // os.tmpdir() and streams it with node:https. So the file is encrypted in
+  // memory, POSTed to a media host with fetch, and the resulting proto is
+  // relayed directly — bypassing sendMessage's file-based machinery entirely.
   async sendFile(
-    _recipient: string,
-    _filename: string,
-    _base64: string,
-    _mediaType?: string,
-    _caption?: string,
+    recipient: string,
+    filename: string,
+    base64: string,
+    mediaType?: string,
+    caption?: string,
   ): Promise<SendResult> {
-    // Baileys' media send writes the encrypted file to os.tmpdir() and uploads
-    // it with node:https — neither exists in workerd. Doing this properly means
-    // encrypting in memory and calling relayMessage with a hand-built proto;
-    // until then, say so plainly rather than failing obscurely.
-    return {
-      ok: false,
-      detail: "sending files is not supported by the cloud bridge yet — use the local WhatsApp tools",
-    };
+    if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
+    if (this.busy) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+
+    let jid: string;
+    let bytes: Uint8Array;
+    try {
+      jid = toJid(recipient);
+      bytes = new Uint8Array(Buffer.from(base64, "base64"));
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    }
+    if (bytes.length === 0) return { ok: false, detail: "the file is empty" };
+    if (bytes.length > MAX_SEND_BYTES) {
+      return { ok: false, detail: `file is ${Math.round(bytes.length / 1024)} KB, over the ${MAX_SEND_BYTES / 1024 / 1024} MB send limit` };
+    }
+    const kind = mediaType ?? kindFromFilename(filename);
+    const mimeType = mimeFromFilename(filename, kind);
+
+    this.busy = true;
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setMeta("connection", "connecting");
+      session = await this.openSession(counters);
+      await session.waitForOpen(60_000);
+      this.setMeta("connection", "open");
+      this.setMeta("lastConnectedAt", Date.now());
+
+      const upload = await encryptForUpload(bytes, kind);
+      const conn = (await session.sock.refreshMediaConn(false)) as unknown as {
+        hosts: { hostname: string }[];
+        auth: string;
+      };
+      const placed = await uploadEncrypted(upload, kind, conn, MEDIA_PATH_MAP as Record<string, string>);
+
+      const descriptor = {
+        url: placed.url,
+        directPath: placed.directPath,
+        mediaKey: upload.mediaKey,
+        mimetype: mimeType,
+        fileEncSha256: upload.fileEncSha256,
+        fileSha256: upload.fileSha256,
+        fileLength: upload.fileLength,
+        mediaKeyTimestamp: Math.floor(Date.now() / 1000),
+      };
+      const message: proto.IMessage =
+        kind === "image"
+          ? { imageMessage: { ...descriptor, caption } }
+          : kind === "video"
+            ? { videoMessage: { ...descriptor, caption } }
+            : kind === "audio"
+              ? { audioMessage: { ...descriptor, ptt: false } }
+              : { documentMessage: { ...descriptor, fileName: filename, caption } };
+
+      const messageId = generateMessageIDV2(this.auth.state.creds.me?.id);
+      await session.sock.relayMessage(jid, message, { messageId });
+
+      const row = toStoredMessage(
+        {
+          key: { remoteJid: jid, fromMe: true, id: messageId },
+          message,
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        } as never,
+        this.auth.state.creds.me?.id ?? null,
+      );
+      if (row) {
+        this.store.upsertMessage(row);
+        this.store.upsertChat({ jid: row.chatJid, lastMessageTime: row.timestamp });
+      }
+      this.log("info", `sent a ${kind} to ${jid}`);
+      return { ok: true, messageId };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      return { ok: false, detail };
+    } finally {
+      this.setMeta("connection", "closing");
+      await session?.close();
+      this.setMeta("connection", "idle");
+      this.busy = false;
+    }
   }
 
   // --- import ---------------------------------------------------------------
