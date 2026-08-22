@@ -54,11 +54,14 @@ protocol design):
 
 ## Secrets
 
-1Password is the source of truth; Cloudflare Secrets Store (account-level,
-free tier) is the runtime store, bound via `secrets_store_secrets`. A
-manifest-driven sync tool maps `op://…` references to secret names and is run
-manually from a persistent op shell at deploy/rotation time; the manifest
-contains references only and is safe to commit. Grants and upstream tokens
+1Password is the source of truth. A manifest-driven sync tool
+(`tools/mcp-workers/scripts/op-cf-secrets.sh` + `secrets.manifest.json`) maps
+`op://…` references to env var names and is run manually from a persistent op
+shell at deploy/rotation time; the manifest contains references only and is
+safe to commit. The current backend is classic per-worker secrets
+(`wrangler secret bulk`, values piped, never on argv); the account-level
+Secrets Store (beta, bound via `secrets_store_secrets`) slots in behind the
+same manifest once a secret is actually shared across workers. Grants and upstream tokens
 are runtime state in KV owned by workers-oauth-provider and are never synced
 back to 1Password; the workers use their own OAuth clients, so the CLI items'
 refresh tokens are never contended.
