@@ -11,12 +11,8 @@ export const FREEAGENT_TOKEN_URL = `${FREEAGENT_BASE_URL}/token_endpoint`;
 // FreeAgent requires a User-Agent on every request; Workers fetch sends none.
 export const USER_AGENT = "freeagent-mcp";
 
-export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
-
-// Never default to a bare `fetch` reference: calling it detached from
-// globalThis throws "Illegal invocation" in workerd (Node is tolerant, so
-// tests won't catch it).
-export const boundFetch: Fetcher = (input, init) => fetch(input, init);
+export { boundFetch, sanitizedTokenError, type Fetcher } from "@toolbox/mcp-shared";
+import { boundFetch, sanitizedTokenError, type Fetcher } from "@toolbox/mcp-shared";
 
 export interface UpstreamTokens {
   accessToken: string;
@@ -25,20 +21,6 @@ export interface UpstreamTokens {
 }
 
 export class UpstreamError extends Error {}
-
-export function sanitizedTokenError(body: string): string {
-  try {
-    const payload: unknown = JSON.parse(body);
-    if (typeof payload !== "object" || payload === null) throw new Error();
-    const record = payload as Record<string, unknown>;
-    const error = typeof record.error === "string" ? record.error : "unknown";
-    const description =
-      typeof record.error_description === "string" ? record.error_description : "no description";
-    return `${error}: ${description}`;
-  } catch {
-    return "unparseable token endpoint response";
-  }
-}
 
 interface TokenEndpointResponse {
   access_token: string;

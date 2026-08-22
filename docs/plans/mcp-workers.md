@@ -86,15 +86,24 @@ refresh tokens are never contended.
   takes `confirm`), expense create. Endpoints hardcoded (no OIDC discovery):
   `/v2/approve_app`, `/v2/token_endpoint`, `client_secret_basic`. Uses a
   second registered app so revocation is independent of the CLI's.
-- **gws-mcp** — a new Web-application OAuth client (the CLI's Desktop client
-  cannot take a Worker redirect URI); `access_type=offline&prompt=consent`;
-  read scopes `gmail.readonly drive.readonly calendar.readonly` (+`userinfo.email`
-  for the gate), write scope adds `gmail.compose gmail.modify calendar.events` — far
-  narrower than the gws binary's baked-in scopes. Never request
-  `cloud-platform`: Workspace accounts then die on Google Cloud session
-  reauth (RAPT). Reads: gmail search/get message/thread/labels/attachment,
-  drive search/get/read (export, size-capped), calendar events/calendars.
-  Writes: draft create, label modify, event create. One account first;
+- **gws-mcp** — reuses the CLI rollout's existing OAuth client (its redirect
+  URI list gains the Worker's /callback); `access_type=offline&prompt=consent`.
+  Upstream scopes are minimized per grant: read-only grants request only
+  `gmail.readonly drive.readonly` (+`openid email` for the gate); write
+  grants add `gmail.compose gmail.modify gmail.labels gmail.settings.basic
+  drive`. Never request `cloud-platform`: Workspace accounts then die on
+  Google Cloud session reauth (RAPT). Google tokens live ~1h, so the DO
+  refreshes in-process from the grant's refresh token (Google does not
+  rotate refresh tokens). Reads: gmail search/get message/thread/labels/
+  drafts/attachment (1MB cap), drive search/get/read (native files export to
+  text/CSV, 1MB cap). Writes: draft create (no send tool exists), message
+  label modify, label create/rename/delete, filter list/create/delete,
+  drive file/folder create, drive update (rename/move/content), drive
+  trash. Deletion is trash-only (30-day recovery; no permanent delete);
+  label/filter delete and trash require `confirm: true` and carry
+  `destructiveHint`. Drive content updates are recoverable via revisions —
+  full history for Google-native files, ~30 days for uploaded binaries — so
+  update is a plain write. Calendar tools deferred. One account first;
   multi-account later via per-account path prefixes.
 - **whatsapp-mcp** — full-cloud reimplementation of the bridge on Baileys
   (TypeScript WhatsApp Web library) in a dedicated Durable Object, paired as
