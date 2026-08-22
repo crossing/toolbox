@@ -10,7 +10,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
-import { registerFreeagentReadTools } from "./freeagent";
+import { registerFreeagentReadTools, registerFreeagentWriteTools } from "./freeagent";
 import type { FreeAgentClient } from "./freeagentapi";
 import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
 import type { GoogleClient } from "./googleapi";
@@ -30,6 +30,50 @@ export interface GatewayToolContext {
   googleClient(service: string, account?: string): Promise<GoogleClient>;
   freeagentClient(): Promise<FreeAgentClient>;
   listAccounts(): Promise<AccountInfo[]>;
+  // Best-effort write audit into the vault; failures never fail a tool call.
+  audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
+}
+
+// Audit summaries keep the arg shape without dumping full content (drafts,
+// file bodies) into the log.
+export function summarizeArgs(args: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(args) ?? "{}";
+  } catch {
+    text = "{}";
+  }
+  return text.length > 200 ? text.slice(0, 200) + "…" : text;
+}
+
+type AnyToolHandler = (args: Record<string, unknown>, extra: unknown) => Promise<{ isError?: boolean }>;
+type AnyToolConfig = { annotations?: { readOnlyHint?: boolean } };
+
+// Wraps registerTool so every non-read tool call lands in the audit log
+// (including confirm-refusals and upstream failures, as status "error").
+// Service modules occasionally register a read tool alongside their writes
+// (gmail_list_filters); the readOnlyHint annotation keeps those out.
+export function auditedServer(server: McpServer, ctx: GatewayToolContext): McpServer {
+  const registerTool = (name: string, config: AnyToolConfig, handler: AnyToolHandler) => {
+    const wrapped: AnyToolHandler =
+      config.annotations?.readOnlyHint === true
+        ? handler
+        : async (args, extra) => {
+            const result = await handler(args, extra);
+            try {
+              await ctx.audit(name, summarizeArgs(args), result?.isError ? "error" : "ok");
+            } catch {
+              // audit is best-effort
+            }
+            return result;
+          };
+    return (server.registerTool as unknown as (n: string, c: AnyToolConfig, h: AnyToolHandler) => unknown)(
+      name,
+      config,
+      wrapped,
+    );
+  };
+  return { registerTool } as unknown as McpServer;
 }
 
 export interface ServiceDef {
@@ -50,7 +94,7 @@ const gmailService: ServiceDef = {
     registerGmailReadTools(server, (account) => ctx.googleClient("gmail", account));
   },
   registerWrite(server, ctx) {
-    registerGmailWriteTools(server, (account) => ctx.googleClient("gmail", account));
+    registerGmailWriteTools(auditedServer(server, ctx), (account) => ctx.googleClient("gmail", account));
   },
 };
 
@@ -63,17 +107,21 @@ const driveService: ServiceDef = {
     registerDriveReadTools(server, (account) => ctx.googleClient("drive", account));
   },
   registerWrite(server, ctx) {
-    registerDriveWriteTools(server, (account) => ctx.googleClient("drive", account));
+    registerDriveWriteTools(auditedServer(server, ctx), (account) => ctx.googleClient("drive", account));
   },
 };
 
 const freeagentService: ServiceDef = {
   id: "freeagent",
   title: "FreeAgent",
-  description: "Accounting reads: bank accounts/transactions, bills, expenses, contacts, reports. No write tools yet.",
+  description:
+    "Accounting reads (bank accounts/transactions, bills, expenses, contacts, reports) and writes (bill/explanation/expense create, approve; deletes confirm-gated).",
   defaultEnabled: true,
   registerRead(server, ctx) {
     registerFreeagentReadTools(server, () => ctx.freeagentClient());
+  },
+  registerWrite(server, ctx) {
+    registerFreeagentWriteTools(auditedServer(server, ctx), () => ctx.freeagentClient());
   },
 };
 

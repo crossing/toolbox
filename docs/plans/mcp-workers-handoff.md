@@ -13,7 +13,7 @@ connectors (OAuth handshake, real tool calls against live data):
 |---|---|---|---|
 | freeagent-mcp | `https://freeagent-mcp.xing.works/mcp` | 10 read + `ping_write` spike | Phase 1 done |
 | gws-mcp | `https://gws-mcp.xing.works/mcp` | Gmail 9r+8w, Drive 3r+3w | Phase 2 done |
-| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (with `account` param), FreeAgent 10r | G2 done (see mcp-gateway.md) |
+| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (with `account` param), FreeAgent 11r+5w | G3 done (see mcp-gateway.md) |
 
 Work happens on branch `feature/mcp-workers` in a dedicated worktree
 (`git worktree list`); the branch is pushed with a PR open to master.
@@ -29,6 +29,11 @@ be on `ALLOWED_EMAILS`. FreeAgent links are company-gated instead
 blobs persist the full token set because FreeAgent access tokens live ~7
 days and the refresh token may rotate on use — every in-DO refresh writes
 the rotated set back.
+
+Every write tool across all gateway services runs through `auditedServer`:
+each call (including confirm-refusals and failures) lands in the owner's
+vault audit log with a capped argument summary, and `/manage` renders the
+50 most recent entries. Auditing is best-effort — it never fails a call.
 
 ## Architecture recap (what you must not regress)
 

@@ -7,3 +7,6 @@
 /gws/node_modules/
 /gws/.wrangler/
 /gws/.dev.vars
+/gateway/node_modules/
+/gateway/.wrangler/
+/gateway/.dev.vars

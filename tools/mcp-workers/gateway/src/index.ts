@@ -59,7 +59,7 @@ interface PendingAuth {
 }
 
 const SERVER_NAME = "gateway";
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 
 export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
   server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
@@ -128,6 +128,8 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
         return new FreeAgentClient(this.freeagentSource);
       },
       listAccounts: async () => vault.listAccounts(),
+      audit: async (tool, summary, status) =>
+        vault.appendAudit({ ts: Date.now(), tool, summary, status }),
     };
 
     registerGatewayTools(this.server, ctx);
