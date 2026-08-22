@@ -1,6 +1,10 @@
 // Read tool surface, mirroring the freeagent CLI's read commands and op-mcp's
 // read allowlist. Responses are the raw FreeAgent JSON, same as the CLI's
 // output contract.
+//
+// Every read tool carries readOnlyHint so MCP clients (claude.ai's tool
+// permission system in particular) can auto-allow reads while keeping
+// per-call prompts for the write tools.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -8,6 +12,8 @@ import { FreeAgentApiError, type FreeAgentClient } from "./api";
 import { UpstreamError } from "./upstream";
 
 type GetClient = () => FreeAgentClient;
+
+const READ_ONLY = { readOnlyHint: true } as const;
 
 function asResult(body: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(body) }] };
@@ -38,7 +44,7 @@ const fromDate = z.string().optional().describe("Only items dated on or after th
 export function registerReadTools(server: McpServer, getClient: GetClient): void {
   server.registerTool(
     "bank_accounts_list",
-    { description: "List all bank accounts.", inputSchema: {} },
+    { description: "List all bank accounts.", inputSchema: {}, annotations: READ_ONLY },
     async () => run(() => getClient().get("/bank_accounts")),
   );
 
@@ -55,6 +61,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
           .describe("Filter: unexplained, explained, manual, imported, marked_for_review"),
         from_date: fromDate,
       },
+      annotations: READ_ONLY,
     },
     async ({ bank_account, view, from_date }) =>
       run(() =>
@@ -72,25 +79,30 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     {
       description: "Show one bank transaction with its explanations.",
       inputSchema: { url: z.string().describe("Bank transaction API URL") },
+      annotations: READ_ONLY,
     },
     async ({ url }) => run(() => getClient().getUrl(url)),
   );
 
   server.registerTool(
     "bills_list",
-    { description: "List bills.", inputSchema: {} },
+    { description: "List bills.", inputSchema: {}, annotations: READ_ONLY },
     async () => run(() => getClient().get("/bills")),
   );
 
   server.registerTool(
     "expenses_list",
-    { description: "List out-of-pocket expenses.", inputSchema: { from_date: fromDate } },
+    {
+      description: "List out-of-pocket expenses.",
+      inputSchema: { from_date: fromDate },
+      annotations: READ_ONLY,
+    },
     async ({ from_date }) => run(() => getClient().get("/expenses", { from_date, per_page: "100" })),
   );
 
   server.registerTool(
     "categories_list",
-    { description: "List accounting categories (nominal codes).", inputSchema: {} },
+    { description: "List accounting categories (nominal codes).", inputSchema: {}, annotations: READ_ONLY },
     async () => run(() => getClient().get("/categories")),
   );
 
@@ -101,6 +113,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
       inputSchema: {
         view: z.string().optional().describe("Filter: all, active, clients, suppliers (default active)"),
       },
+      annotations: READ_ONLY,
     },
     async ({ view }) => run(() => getClient().get("/contacts", { view, per_page: "100" })),
   );
@@ -112,6 +125,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
       inputSchema: {
         as_at_date: z.string().optional().describe("Balance sheet as at this date (YYYY-MM-DD, default today)"),
       },
+      annotations: READ_ONLY,
     },
     async ({ as_at_date }) => run(() => getClient().get("/accounting/balance_sheet", { as_at_date })),
   );
@@ -128,6 +142,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
           .optional()
           .describe("Accounting year, e.g. 2025/26 (default: current period to date)"),
       },
+      annotations: READ_ONLY,
     },
     async ({ from_date, to_date, accounting_period }) =>
       run(() => getClient().get("/accounting/profit_and_loss/summary", { from_date, to_date, accounting_period })),
@@ -141,6 +156,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
         from_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
         to_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
       },
+      annotations: READ_ONLY,
     },
     async ({ from_date, to_date }) =>
       run(() => getClient().get("/accounting/trial_balance/summary", { from_date, to_date })),

@@ -12,4 +12,3 @@ export {
   escapeHtml,
   type ApprovalPageOptions,
 } from "./approval";
-export { requireScope, requireWrite } from "./endpoints";

@@ -6,6 +6,12 @@
 // props. Downstream token refreshes re-refresh the upstream token when it is
 // close to expiry (FreeAgent access tokens live ~7 days; claude.ai refreshes
 // our 1h tokens far more often, so tool calls always see a fresh token).
+//
+// Single MCP endpoint: write access is decided at consent time (checkbox →
+// "write" scope) and enforced server-side by conditional tool registration;
+// per-call friction for writes is the client's permission system, steered by
+// tool annotations (readOnlyHint on reads). A read-only grant never has the
+// write tools registered at all.
 
 import {
   OAuthProvider,
@@ -24,7 +30,6 @@ import {
   grantedScopes,
   hasScope,
   renderApprovalPage,
-  requireWrite,
   WRITE_SCOPE,
   type OwnerProps,
 } from "@toolbox/mcp-shared";
@@ -41,8 +46,7 @@ import {
 export interface Env {
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
-  FREEAGENT_READ_MCP: DurableObjectNamespace;
-  FREEAGENT_RW_MCP: DurableObjectNamespace;
+  FREEAGENT_MCP: DurableObjectNamespace;
   // Secrets (wrangler secret / op-cf-secrets):
   FREEAGENT_CLIENT_ID: string;
   FREEAGENT_CLIENT_SECRET: string;
@@ -68,7 +72,7 @@ const SERVER_VERSION = "0.2.0";
 // perpetually fresh without any DO-side refresh machinery.
 const UPSTREAM_REFRESH_MARGIN_MS = 24 * 60 * 60 * 1000;
 
-export class FreeagentReadMCP extends McpAgent<Env, unknown, FreeagentProps> {
+export class FreeagentMCP extends McpAgent<Env, unknown, FreeagentProps> {
   server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   async init() {
@@ -82,8 +86,9 @@ export class FreeagentReadMCP extends McpAgent<Env, unknown, FreeagentProps> {
       this.server.registerTool(
         "ping_write",
         {
-          description: "Connectivity spike for the write endpoint: pretends to write.",
+          description: "Connectivity spike for write scope: pretends to write.",
           inputSchema: { message: z.string() },
+          annotations: { readOnlyHint: false },
         },
         async ({ message }) => ({
           content: [{ type: "text", text: JSON.stringify({ wrote: message }) }],
@@ -93,12 +98,7 @@ export class FreeagentReadMCP extends McpAgent<Env, unknown, FreeagentProps> {
   }
 }
 
-// Same agent code; a separate DO class so read and rw sessions never share
-// instances and the wrangler binding names the split explicitly.
-export class FreeagentRwMCP extends FreeagentReadMCP {}
-
-const readHandler = FreeagentReadMCP.serve("/mcp", { binding: "FREEAGENT_READ_MCP" });
-const rwHandler = requireWrite(FreeagentRwMCP.serve("/rw", { binding: "FREEAGENT_RW_MCP" }));
+const mcpHandler = FreeagentMCP.serve("/mcp", { binding: "FREEAGENT_MCP" });
 
 function htmlError(status: number, message: string): Response {
   return new Response(
@@ -225,10 +225,8 @@ async function tokenExchangeCallback(
 }
 
 const provider = new OAuthProvider({
-  apiHandlers: {
-    "/mcp": readHandler,
-    "/rw": rwHandler,
-  },
+  apiRoute: "/mcp",
+  apiHandler: mcpHandler,
   defaultHandler: authHandler,
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",

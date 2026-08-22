@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { grantedScopes, hasScope } from "../src/scopes";
 import { decodeAuthRequest, encodeAuthRequest, escapeHtml, renderApprovalPage } from "../src/approval";
-import { requireScope } from "../src/endpoints";
 
 describe("hasScope", () => {
   it("accepts a props object carrying the scope", () => {
@@ -63,35 +62,5 @@ describe("approval page", () => {
   });
   it("escapeHtml covers the five specials", () => {
     expect(escapeHtml(`&<>"'`)).toBe("&amp;&lt;&gt;&quot;&#39;");
-  });
-});
-
-describe("requireScope", () => {
-  const inner = {
-    fetch: async () => new Response("ok", { status: 200 }),
-  };
-  const ctxWith = (props: unknown) =>
-    ({ props, waitUntil() {}, passThroughOnException() {} }) as unknown as ExecutionContext;
-
-  it("passes through when the grant carries the scope", async () => {
-    const res = await requireScope("write", inner).fetch(
-      new Request("https://x/rw"),
-      {},
-      ctxWith({ userId: "owner", scopes: ["read", "write"] }),
-    );
-    expect(res.status).toBe(200);
-  });
-  it("rejects read-only tokens on the write endpoint", async () => {
-    const res = await requireScope("write", inner).fetch(
-      new Request("https://x/rw"),
-      {},
-      ctxWith({ userId: "owner", scopes: ["read"] }),
-    );
-    expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ error: "insufficient_scope" });
-  });
-  it("rejects when props are absent entirely", async () => {
-    const res = await requireScope("write", inner).fetch(new Request("https://x/rw"), {}, ctxWith(undefined));
-    expect(res.status).toBe(403);
   });
 });
