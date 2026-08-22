@@ -3,3 +3,4 @@
 /shared/node_modules/
 /freeagent/node_modules/
 /freeagent/.wrangler/
+/freeagent/.dev.vars
