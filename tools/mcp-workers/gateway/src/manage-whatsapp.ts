@@ -7,23 +7,15 @@
 // never returned to a model — the MCP status tool redacts it.
 //
 // The history importer posts to /manage/whatsapp/import with a short-lived
-// bearer token issued from this page, so the one-off `messages.db` copy can
-// run from a shell without a browser session and without inventing a secret.
+// code issued from this page, so the one-off `messages.db` copy can run from
+// a shell without a browser session and without inventing a secret. The code
+// is deliberately short and typable: it gets read off this page by eye.
 
 import { escapeHtml } from "@toolbox/mcp-shared";
-import type { BridgeStatus, ImportRequest } from "@toolbox/mcp-shared";
-import { signToken, verifyToken } from "./crypto";
+import type { BridgeStatus, ChatRow, ImportRequest, MessageRow } from "@toolbox/mcp-shared";
 import type { Env } from "./env";
 import { page } from "./html";
 import { bridgeFor } from "./whatsapp";
-
-const IMPORT_TTL_MS = 30 * 60 * 1000;
-
-interface ImportToken {
-  kind: "wa-import";
-  owner: string;
-  exp: number;
-}
 
 function when(ts: number | null | undefined): string {
   if (!ts) return "—";
@@ -46,7 +38,47 @@ function renderCycles(status: BridgeStatus): string {
     .join("\n");
 }
 
-function renderPage(status: BridgeStatus, notice: string, importToken: string | null): string {
+// A metadata-only peek at the store, through the same query path the MCP
+// tools use — enough to see that a sync actually landed rows without putting
+// message text on a web page.
+function renderPreview(chats: ChatRow[], messages: MessageRow[]): string {
+  const chatRows =
+    chats.length === 0
+      ? `<tr><td colspan="2" class="muted">No chats stored yet.</td></tr>`
+      : chats
+          .map(
+            (chat) => `<tr><td>${escapeHtml(chat.name ?? chat.jid)}</td>
+            <td class="muted">${escapeHtml(chat.lastMessageTime ?? "—")}</td></tr>`,
+          )
+          .join("\n");
+  const messageRows =
+    messages.length === 0
+      ? `<tr><td colspan="3" class="muted">No messages stored yet.</td></tr>`
+      : messages
+          .map(
+            (msg) => `<tr><td class="muted">${escapeHtml(msg.timestamp)}</td>
+            <td>${escapeHtml(msg.chatName ?? msg.chatJid)}</td>
+            <td>${msg.isFromMe ? "me" : escapeHtml(msg.senderName ?? msg.sender)}${
+              msg.mediaType ? ` <span class="muted">[${escapeHtml(msg.mediaType)}]</span>` : ""
+            }</td></tr>`,
+          )
+          .join("\n");
+  return `<h2>Store</h2>
+<p class="muted">Metadata only — message text is not rendered here.</p>
+<table><tr><th>Chat</th><th>Last activity</th></tr>
+${chatRows}
+</table>
+<table><tr><th>When</th><th>Chat</th><th>From</th></tr>
+${messageRows}
+</table>`;
+}
+
+function renderPage(
+  status: BridgeStatus,
+  notice: string,
+  importCode: string | null,
+  preview: string,
+): string {
   const pairing = status.pendingPairing;
   const pairBlock = status.paired
     ? `<div class="linkbox">
@@ -97,16 +129,17 @@ ${pairBlock}
   <input type="hidden" name="enabled" value="${autoSyncOn ? "0" : "1"}">
   <button type="submit">${autoSyncOn ? "Pause scheduled syncing" : "Resume scheduled syncing"}</button>
 </form>
+${preview}
 <h2>Recent syncs</h2>
 <table><tr><th>Started</th><th>Outcome</th><th>Drained</th><th>Detail</th></tr>
 ${renderCycles(status)}
 </table>
 <h2>History import</h2>
 <div class="linkbox">
-  <form method="post" action="/manage/whatsapp/import-token"><button type="submit">Issue import token</button></form>
-  <div class="muted">One-off copy of the local bridge's messages.db into the cloud store. The token
-  is valid for 30 minutes and authorises POSTs to <code>/manage/whatsapp/import</code>.</div>
-  ${importToken ? `<p><code>${escapeHtml(importToken)}</code></p>` : ""}
+  <form method="post" action="/manage/whatsapp/import-code"><button type="submit">Issue import code</button></form>
+  <div class="muted">One-off copy of the local bridge's messages.db into the cloud store, with
+  <code>tools/mcp-workers/scripts/wa-import.py --code &lt;code&gt;</code>. Valid for 30 minutes.</div>
+  ${importCode ? `<p class="code">${escapeHtml(importCode)}</p>` : ""}
 </div>`;
 }
 
@@ -133,13 +166,11 @@ export async function handleWhatsappManage(
   url: URL,
   email: string | null,
 ): Promise<Response> {
-  // The importer runs from a shell with a bearer token instead of a session.
+  // The importer runs from a shell with an import code instead of a session.
   if (url.pathname === "/manage/whatsapp/import" && request.method === "POST") {
-    const auth = request.headers.get("authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    const payload = await verifyToken<ImportToken>(env.COOKIE_SECRET, token);
-    if (!payload || payload.kind !== "wa-import" || payload.exp < Date.now()) {
-      return Response.json({ error: "invalid or expired import token" }, { status: 401 });
+    const code = request.headers.get("x-import-code") ?? "";
+    if (!code) {
+      return Response.json({ error: "missing x-import-code header" }, { status: 401 });
     }
     let body: ImportRequest;
     try {
@@ -151,12 +182,12 @@ export async function handleWhatsappManage(
       return Response.json({ error: "expected { chats: [], messages: [] }" }, { status: 400 });
     }
     try {
-      return Response.json(await bridgeFor(env).importRows(body));
+      return Response.json(await bridgeFor(env).importRows(body, code));
     } catch (err) {
-      return Response.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        { status: 502 },
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      // A bad code is the caller's fault, not the bridge's.
+      const status = /import code/i.test(message) ? 401 : 502;
+      return Response.json({ error: message }, { status });
     }
   }
 
@@ -165,9 +196,19 @@ export async function handleWhatsappManage(
   if (url.pathname === "/manage/whatsapp" && request.method === "GET") {
     const { status, error } = await statusOrError(env);
     if (!status) return errorPage(`bridge unreachable: ${error}`);
+    const bridge = bridgeFor(env);
+    const [chats, messages] = await Promise.all([
+      bridge.listChats({ limit: 8 }),
+      bridge.listMessages({ limit: 8 }),
+    ]);
     return page(
       "gateway — WhatsApp",
-      renderPage(status, url.searchParams.get("notice") ?? "", url.searchParams.get("token")),
+      renderPage(
+        status,
+        url.searchParams.get("notice") ?? "",
+        url.searchParams.get("code"),
+        renderPreview(chats, messages),
+      ),
     );
   }
 
@@ -218,16 +259,16 @@ export async function handleWhatsappManage(
     return redirectBack("device forgotten");
   }
 
-  if (url.pathname === "/manage/whatsapp/import-token" && request.method === "POST") {
-    const token = await signToken(env.COOKIE_SECRET, {
-      kind: "wa-import",
-      owner: email,
-      exp: Date.now() + IMPORT_TTL_MS,
-    } satisfies ImportToken);
-    return new Response(null, {
-      status: 303,
-      headers: { location: `/manage/whatsapp?token=${encodeURIComponent(token)}` },
-    });
+  if (url.pathname === "/manage/whatsapp/import-code" && request.method === "POST") {
+    try {
+      const issued = await bridgeFor(env).issueImportCode();
+      return new Response(null, {
+        status: 303,
+        headers: { location: `/manage/whatsapp?code=${encodeURIComponent(issued.code)}` },
+      });
+    } catch (err) {
+      return errorPage(`could not issue a code: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return new Response("not found", { status: 404 });

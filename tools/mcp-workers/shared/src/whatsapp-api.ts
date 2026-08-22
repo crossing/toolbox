@@ -141,6 +141,11 @@ export interface ImportResult {
   skipped: number;
 }
 
+export interface ImportCode {
+  code: string;
+  expiresAt: number;
+}
+
 export interface SendResult {
   ok: boolean;
   messageId?: string;
@@ -173,5 +178,7 @@ export interface WhatsAppBridgeApi {
     caption?: string,
   ): Promise<SendResult>;
 
-  importRows(request: ImportRequest): Promise<ImportResult>;
+  /** Mint a short, human-typable code authorising history imports for a while. */
+  issueImportCode(): Promise<ImportCode>;
+  importRows(request: ImportRequest, code: string): Promise<ImportResult>;
 }

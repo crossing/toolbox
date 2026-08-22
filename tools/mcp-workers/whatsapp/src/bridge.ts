@@ -17,6 +17,7 @@ import type {
   BridgeStatus,
   ChatRow,
   ContactRow,
+  ImportCode,
   ImportRequest,
   ImportResult,
   LastInteraction,
@@ -49,6 +50,9 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 const MAX_CYCLES = 10;
+
+/** How long a history-import code stays valid. */
+const IMPORT_CODE_TTL_MS = 30 * 60 * 1000;
 
 export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsAppBridgeApi {
   private sql: SqlStorage;
@@ -198,7 +202,42 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
 
   // --- import ---------------------------------------------------------------
 
-  async importRows(request: ImportRequest): Promise<ImportResult> {
+  // The importer runs from a shell, so its credential has to survive being
+  // read off a web page by eye: a short code from an unambiguous alphabet
+  // rather than a signed blob. ~39 bits, single expiry window, and ten wrong
+  // guesses burn it — enough for a one-off append-only capability.
+  async issueImportCode(): Promise<ImportCode> {
+    const alphabet = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+    const chars = [...bytes].map((b) => alphabet[b % alphabet.length]).join("");
+    const code = `${chars.slice(0, 4)}-${chars.slice(4)}`;
+    const expiresAt = Date.now() + IMPORT_CODE_TTL_MS;
+    this.setMeta("importCode", { code, expiresAt, strikes: 0 });
+    return { code, expiresAt };
+  }
+
+  private assertImportCode(candidate: string): void {
+    const stored = this.getMeta<{ code: string; expiresAt: number; strikes: number } | null>(
+      "importCode",
+      null,
+    );
+    const normalize = (value: string) => value.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+    if (!stored || stored.expiresAt < Date.now()) {
+      throw new Error("no import code is active — issue one on /manage/whatsapp");
+    }
+    if (normalize(stored.code) !== normalize(candidate ?? "")) {
+      const strikes = stored.strikes + 1;
+      if (strikes >= 10) {
+        this.setMeta("importCode", null);
+        throw new Error("import code burned after too many wrong attempts");
+      }
+      this.setMeta("importCode", { ...stored, strikes });
+      throw new Error("import code does not match");
+    }
+  }
+
+  async importRows(request: ImportRequest, code: string): Promise<ImportResult> {
+    this.assertImportCode(code);
     let chatsWritten = 0;
     let messagesWritten = 0;
     let skipped = 0;

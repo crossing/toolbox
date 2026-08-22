@@ -3,9 +3,11 @@
 // the one-off history import is a straight row copy.
 //
 // Deliberate differences from the Go schema, all additive:
-//   - timestamps are stored as ISO-8601 strings, exactly as Go's sqlite driver
-//     writes time.Time, so lexical ordering is chronological and the import
-//     needs no conversion;
+//   - timestamps are ISO-8601 UTC ("2026-08-20T22:32:04.000Z") so that lexical
+//     ordering is chronological and range filters are string comparisons. The
+//     Go bridge writes time.Time in its own layout with a local offset
+//     ("2026-08-20 23:32:04+01:00"), which sorts wrongly across offsets, so the
+//     importer normalizes on the way in (scripts/wa-import.py);
 //   - `sender_name` (WhatsApp's pushName) is kept because Baileys hands it to
 //     us for free and group messages are unreadable without it;
 //   - media descriptors are base64 TEXT rather than BLOB: DO SQLite handles
