@@ -24,12 +24,24 @@ import {
   scopesAllowWrite,
   UpstreamError,
 } from "./google";
-import { defaultServiceToggles, GOOGLE_ACCOUNT_SERVICE, SERVICES } from "./registry";
+import {
+  buildFreeagentAuthorizeRedirect,
+  exchangeFreeagentCode,
+  fetchCompanySubdomain,
+  FreeAgentUpstreamError,
+  staticClient,
+} from "./freeagentapi";
+import { defaultServiceToggles, FREEAGENT_ACCOUNT_SERVICE, GOOGLE_ACCOUNT_SERVICE, SERVICES } from "./registry";
 import type { AccountInfo } from "./vault";
 
-// What a vault account row's ciphertext decrypts to.
+// What a vault account row's ciphertext decrypts to. Google blobs carry only
+// the refresh token (access tokens live ~1h, not worth persisting; Google
+// never rotates refresh tokens). FreeAgent blobs persist the full set:
+// access tokens live ~7 days, and the refresh token may rotate on use.
 export interface VaultBlob {
   refreshToken: string;
+  accessToken?: string;
+  expiresAt?: number; // epoch ms
 }
 
 const SESSION_COOKIE = "gateway_session";
@@ -53,6 +65,13 @@ interface LinkState {
   kind: "link";
   owner: string; // the manage session's email — whose vault gets the account
   write: boolean;
+  nonce: string;
+  exp: number;
+}
+
+interface FreeagentLinkState {
+  kind: "link-freeagent";
+  owner: string;
   nonce: string;
   exp: number;
 }
@@ -171,6 +190,13 @@ ${accountRows}
   <div class="muted">Opens Google's consent screen; the account you approve there becomes the
   linked account (it must be on the gateway's allowlist). Relinking an account replaces its
   stored grant — use it to change access level.</div>
+</div>
+<div class="linkbox">
+  <form method="post" action="/manage/link-freeagent">
+    <button type="submit">Link the FreeAgent account</button>
+  </form>
+  <div class="muted">Opens FreeAgent's sign-in; only the allowlisted company can complete the
+  link. Relinking replaces the stored grant.</div>
 </div>`;
 }
 
@@ -329,6 +355,87 @@ export async function handleLinkCallback(
   });
 }
 
+// FreeAgent linking: no scope choice (FreeAgent OAuth has no scopes) and the
+// account label is the company subdomain, gated against ALLOWED_COMPANY.
+async function handleFreeagentLinkStart(env: Env, url: URL, owner: string): Promise<Response> {
+  const nonce = randomToken();
+  const state = await signToken(env.COOKIE_SECRET, {
+    kind: "link-freeagent",
+    owner,
+    nonce,
+    exp: Date.now() + LOGIN_TTL_MS,
+  } satisfies FreeagentLinkState);
+  const redirect = buildFreeagentAuthorizeRedirect({
+    clientId: env.FREEAGENT_CLIENT_ID,
+    redirectUri: `${url.origin}/callback`,
+    state: `f.${state}`,
+  });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: redirect,
+      "set-cookie": setCookie(NONCE_COOKIE, nonce, LOGIN_TTL_MS / 1000),
+    },
+  });
+}
+
+// Invoked from the worker's shared /callback route for "f."-prefixed states.
+export async function handleFreeagentLinkCallback(
+  request: Request,
+  env: Env,
+  url: URL,
+  stateToken: string,
+): Promise<Response> {
+  const state = await verifyToken<FreeagentLinkState>(env.COOKIE_SECRET, stateToken);
+  if (!state || state.kind !== "link-freeagent" || state.exp < Date.now()) {
+    return page("gateway", "<p>Link flow expired — <a href=\"/manage\">try again</a>.</p>", 400);
+  }
+  if (getCookie(request, NONCE_COOKIE) !== state.nonce) {
+    return page("gateway", "<p>Link did not originate here — <a href=\"/manage\">try again</a>.</p>", 400);
+  }
+  const owner = await sessionEmail(request, env);
+  if (!owner || owner !== state.owner) {
+    return page("gateway", "<p>Manage session expired — <a href=\"/manage\">sign in and retry</a>.</p>", 403);
+  }
+  const upstreamError = url.searchParams.get("error");
+  if (upstreamError) {
+    return page("gateway", `<p>FreeAgent authorization failed: ${escapeHtml(upstreamError)}</p>`, 403);
+  }
+  const code = url.searchParams.get("code");
+  if (!code) return page("gateway", "<p>FreeAgent returned no code.</p>", 400);
+
+  let tokens;
+  try {
+    tokens = await exchangeFreeagentCode({
+      clientId: env.FREEAGENT_CLIENT_ID,
+      clientSecret: env.FREEAGENT_CLIENT_SECRET,
+      code,
+      redirectUri: `${url.origin}/callback`,
+    });
+  } catch (err) {
+    const message = err instanceof FreeAgentUpstreamError ? err.message : "link failed";
+    return page("gateway", `<p>${escapeHtml(message)}</p>`, 502);
+  }
+  // Owner gate: the authorizing FreeAgent user must belong to the configured
+  // company. A stranger's login succeeds upstream but no account is linked.
+  const subdomain = await fetchCompanySubdomain(staticClient(tokens.accessToken));
+  if (!subdomain || subdomain !== env.ALLOWED_COMPANY) {
+    return page("gateway", "<p>That FreeAgent account is not this gateway's company.</p>", 403);
+  }
+
+  const key = await importVaultKey(env.VAULT_KEY);
+  const ciphertext = await encryptJson(key, {
+    refreshToken: tokens.refreshToken,
+    accessToken: tokens.accessToken,
+    expiresAt: tokens.expiresAt,
+  } satisfies VaultBlob);
+  await vaultFor(env, owner).putAccount(FREEAGENT_ACCOUNT_SERVICE, subdomain, ciphertext, []);
+  return new Response(null, {
+    status: 302,
+    headers: { location: "/manage", "set-cookie": clearCookie(NONCE_COOKIE) },
+  });
+}
+
 export async function handleManage(request: Request, env: Env, url: URL): Promise<Response> {
   if (url.pathname === "/manage/login" && request.method === "GET") {
     return handleLogin(env, url);
@@ -364,6 +471,11 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
     return handleLinkStart(request, env, url, email);
   }
 
+  if (url.pathname === "/manage/link-freeagent" && request.method === "POST") {
+    if (!email) return new Response("not signed in", { status: 401 });
+    return handleFreeagentLinkStart(env, url, email);
+  }
+
   if (url.pathname === "/manage/accounts" && request.method === "POST") {
     if (!email) return new Response("not signed in", { status: 401 });
     const form = await request.formData();
@@ -377,16 +489,20 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
     if (action === "default") {
       await vault.setDefaultAccount(service, label);
     } else if (action === "unlink") {
-      // Revoke upstream first (best-effort) so no live refresh token
-      // dangles after the vault row is gone.
-      const acct = await vault.getAccount(service, label);
-      if (acct) {
-        try {
-          const key = await importVaultKey(env.VAULT_KEY);
-          const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
-          await revokeToken(blob.refreshToken);
-        } catch {
-          // an undecryptable row still gets deleted below
+      // Google grants get revoked upstream first (best-effort) so no live
+      // refresh token dangles after the vault row is gone. FreeAgent has no
+      // revocation endpoint — revoke from the FreeAgent app settings if
+      // needed.
+      if (service === GOOGLE_ACCOUNT_SERVICE) {
+        const acct = await vault.getAccount(service, label);
+        if (acct) {
+          try {
+            const key = await importVaultKey(env.VAULT_KEY);
+            const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
+            await revokeToken(blob.refreshToken);
+          } catch {
+            // an undecryptable row still gets deleted below
+          }
         }
       }
       await vault.deleteAccount(service, label);

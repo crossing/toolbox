@@ -10,6 +10,9 @@ export interface Env {
   GWS_CLIENT_ID: string; // Google web client, shared with gws-mcp until it retires
   GWS_CLIENT_SECRET: string;
   ALLOWED_EMAILS: string; // comma-separated Google account emails
+  FREEAGENT_CLIENT_ID: string; // FreeAgent app, shared with freeagent-mcp until it retires
+  FREEAGENT_CLIENT_SECRET: string;
+  ALLOWED_COMPANY: string; // FreeAgent company subdomain of the owner
   VAULT_KEY: string; // base64 32-byte AES-GCM key for vault ciphertext
   COOKIE_SECRET: string; // HMAC key for manage sessions and OAuth state
 }
