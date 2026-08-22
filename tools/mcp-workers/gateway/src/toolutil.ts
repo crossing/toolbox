@@ -38,6 +38,46 @@ export function asResult(body: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(body) }] };
 }
 
+/**
+ * Media results carry bytes. Images go back as an MCP image block — the model
+ * sees the picture and pays image tokens for it — while everything else stays
+ * a description, because base64 in a text block costs ~1.37 characters per
+ * byte for content the model usually cannot read.
+ */
+export function asMedia(result: {
+  ok: boolean;
+  base64?: string;
+  mimeType?: string;
+  filename?: string | null;
+  size?: number;
+  detail?: string;
+}) {
+  const summary = JSON.stringify({
+    ok: result.ok,
+    mimeType: result.mimeType,
+    filename: result.filename,
+    size: result.size,
+    detail: result.detail,
+  });
+  if (!result.ok || !result.base64) {
+    return { content: [{ type: "text" as const, text: summary }], isError: !result.ok };
+  }
+  if (result.mimeType?.startsWith("image/")) {
+    return {
+      content: [
+        { type: "image" as const, data: result.base64, mimeType: result.mimeType },
+        { type: "text" as const, text: summary },
+      ],
+    };
+  }
+  return {
+    content: [
+      { type: "text" as const, text: summary },
+      { type: "text" as const, text: result.base64 },
+    ],
+  };
+}
+
 export function asError(err: unknown) {
   let text: string;
   if (err instanceof GoogleApiError && err.status === 401) {

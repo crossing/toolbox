@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 import type { Env } from "./env";
-import { asResult, DESTRUCTIVE, READ_ONLY, WRITE, needsConfirm, run } from "./toolutil";
+import { asError, asMedia, asResult, DESTRUCTIVE, READ_ONLY, WRITE, needsConfirm, run } from "./toolutil";
 
 // One bridge per gateway: a single WhatsApp account, one paired device.
 export const BRIDGE_INSTANCE = "default";
@@ -153,14 +153,20 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     "whatsapp_download_media",
     {
       description:
-        "Download and decrypt the media attached to a WhatsApp message. Small files come back inline as base64.",
+        "Download and decrypt the media attached to a WhatsApp message. Images come back as images; other files return their type and size (large attachments are not delivered inline).",
       inputSchema: {
         message_id: z.string().describe("Message id from whatsapp_list_messages"),
         chat_jid: z.string().describe("The message's chat JID"),
       },
       annotations: READ_ONLY,
     },
-    async ({ message_id, chat_jid }) => run(async () => (await bridge()).downloadMedia(message_id, chat_jid)),
+    async ({ message_id, chat_jid }) => {
+      try {
+        return asMedia(await (await bridge()).downloadMedia(message_id, chat_jid));
+      } catch (err) {
+        return asError(err);
+      }
+    },
   );
 
   server.registerTool(

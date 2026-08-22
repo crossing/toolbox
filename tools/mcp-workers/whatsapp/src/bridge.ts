@@ -65,10 +65,12 @@ const PAIRING_WINDOW_MS = 3 * 60 * 1000;
 /** Baileys re-buffers events right after the drain marker; wait it out. */
 const POST_DRAIN_SETTLE_MS = 3000;
 
-// Inline caps. Images come back to the model as image blocks, which cost
-// image tokens rather than ~1.37 characters per byte, so they can be larger.
+// Inline caps. An image comes back to the model as an image block, costing
+// image tokens; anything else can only be base64 in a text block, where a
+// megabyte is ~1.37 million characters — hundreds of thousands of tokens for
+// a file the model usually cannot read anyway. Hence the lopsided limits.
 const IMAGE_INLINE_CAP = 2 * 1024 * 1024;
-const FILE_INLINE_CAP = 1024 * 1024;
+const FILE_INLINE_CAP = 32 * 1024;
 
 export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsAppBridgeApi {
   private sql: SqlStorage;
