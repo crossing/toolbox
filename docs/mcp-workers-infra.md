@@ -107,33 +107,99 @@ live only inside the Worker and die with it. Current names:
 the Worker and 1Password. Lose both and every linked account must be
 re-linked; the vault rows become undecryptable.
 
-## Upstream OAuth apps (hand-created, easy to forget)
+## Google
 
-Neither is removed by deleting Workers. Both are dedicated to the hosted
-path — revoking them does not affect the local CLIs, which use separate
-credentials on the same 1Password items.
+Everything here lives in one personal-account Google Cloud project (the
+project id is in the private notes). **Console access needs
+`authuser=<the project-owner account>` in the URL** — the other allowlisted
+account gets "You need additional access" and it looks like a permissions
+bug. Nothing on this side is removed by deleting Workers.
 
-**Google Web OAuth client, named `gws-mcp`** — in the Google Cloud console
-(APIs & Services → Credentials) of the personal-account project. Redirect
-URIs currently list both `https://gws-mcp.xing.works/callback` and
-`https://mcp.xing.works/callback`; drop the gws one when that worker
-retires. Console access needs `authuser=<the project-owner account>` in the
-URL — the other account gets "You need additional access". Credentials live
-in 1Password (see below). Deleting this client breaks both the gateway's
-identity sign-in and its Google account linking.
+### OAuth clients — two, only one is ours
 
-**FreeAgent app, named `freeagent-mcp`** — at dev.freeagent.com/apps
-(separate from the older CLI app, so revocation is independent). Redirect
-URIs list both `https://freeagent-mcp.xing.works/callback` and
-`https://mcp.xing.works/callback`. FreeAgent has no token-revocation
-endpoint, so unlinking in `/manage` only drops the stored token: to truly
-revoke, use FreeAgent → Settings → Approved Applications, or destroy the app
-here.
+APIs & Services → Credentials lists both. **Check the type before
+deleting.**
 
-Granted user consents also survive Worker deletion:
+| Name | Type | Created | Owner |
+|---|---|---|---|
+| `gws-mcp` | Web application | 2026-08-21 | **This work** — delete on teardown |
+| `GWS` | Desktop | 2026-04-18 | The `gws` CLI / op-oauth wrappers — **leave alone** |
 
-- Google: myaccount.google.com → Data & privacy → Third-party apps.
-- FreeAgent: Settings → Approved Applications.
+The Desktop client is why a new one was needed at all: Google refuses
+`https://` redirect URIs on Desktop clients, so a hosted Worker cannot use
+it. The project has no API keys and no service accounts.
+
+`gws-mcp` redirect URIs currently list **both**
+`https://gws-mcp.xing.works/callback` and `https://mcp.xing.works/callback`;
+drop the first when `gws-mcp` retires. Its id/secret are the `mcp_client_id`
+/ `mcp_client_secret` fields in 1Password. Deleting this client breaks the
+gateway's identity sign-in *and* its Google account linking — it is the
+single Google credential the gateway has.
+
+### Consent screen (Google Auth Platform)
+
+- **Publishing status: In production; user type: External.** This matters
+  operationally: in *Testing* mode Google expires refresh tokens after 7
+  days, which would break linked accounts weekly. Do not click "Back to
+  testing".
+- **OAuth user cap: 2 of 100 used.** The cap counts distinct accounts that
+  have ever granted consent, applies for the **lifetime of the project, and
+  cannot be reset**. Re-linking an account already counted does not consume
+  another slot; onboarding a new account does.
+- **Data Access lists no scopes.** Scopes are requested per authorization at
+  runtime, so the source of truth is
+  [`gateway/src/google.ts`](../tools/mcp-workers/gateway/src/google.ts)
+  (identity: `openid email`; link: readonly, or the write set), not the
+  console. Because those sensitive scopes were never submitted for
+  verification, every link shows the **"Google hasn't verified this app"**
+  interstitial — Advanced → "Go to xing.works (unsafe)" is the expected path,
+  not a misconfiguration.
+- The app's display name is **xing.works**, which is what the consent screen
+  says and what to look for when revoking per-account.
+- Never add the `cloud-platform` scope: Workspace accounts then die on Google
+  Cloud session reauth (`invalid_rapt`).
+
+### Per-account consent
+
+Each linked account holds its own grant, and grants outlive the
+infrastructure. Revoke at myaccount.google.com → Data & privacy →
+Third-party apps & services ("Linked apps"), entry **xing.works** — once per
+allowlisted account, signed in as that account.
+
+## FreeAgent
+
+### Apps — two, only one is ours
+
+dev.freeagent.com/apps lists both. **Check the creation date before
+deleting.**
+
+| Name | Created | Owner |
+|---|---|---|
+| `freeagent-mcp` | 2026-08-21 | **This work** — delete on teardown |
+| `Freeagent CLI` | 2013-05-05 | The `freeagent` CLI — **leave alone** |
+
+Separate apps were the point: revoking the hosted path cannot disturb the
+CLI. `freeagent-mcp`'s redirect URIs list both
+`https://freeagent-mcp.xing.works/callback` and
+`https://mcp.xing.works/callback`; drop the first when `freeagent-mcp`
+retires. Its OAuth identifier and secret are the `mcp_client_id` /
+`mcp_client_secret` fields in 1Password.
+
+The app page also manages secrets directly — "Generate new secret" adds one
+and each row has its own **Revoke**. Rolling a secret there means
+re-running `op-cf-secrets.sh` for both `gateway` and `freeagent` after
+pasting the new value into 1Password.
+
+### Per-company approval
+
+FreeAgent has **no token-revocation endpoint**, so unlinking on `/manage`
+only drops the stored token — the upstream grant stays live. To actually
+revoke: FreeAgent → Settings → Approved Applications (as the authorizing
+user), or destroy the app in the developer dashboard.
+
+Only one company can ever be linked: the callback compares the subdomain
+from `GET /v2/company` against `ALLOWED_COMPANY` and refuses anything else,
+which is why the FreeAgent tools carry no `account` parameter.
 
 ## 1Password
 
@@ -196,15 +262,21 @@ Reverse of creation, so nothing is orphaned:
 
 1. **claude.ai** — disconnect and remove the custom connectors (otherwise
    they linger, failing).
-2. **Upstream consents** — revoke in the Google account and in FreeAgent's
-   Approved Applications, so no live grant outlives the infrastructure.
+2. **Upstream consents** — revoke per account, so no live grant outlives the
+   infrastructure: **xing.works** in each allowlisted Google account's Linked
+   apps (signed in as that account), and FreeAgent → Settings → Approved
+   Applications. FreeAgent's has no API equivalent; it is this click or
+   nothing.
 3. **Workers** — `wrangler delete` each of the three. Takes the Durable
    Objects (including the vault and its encrypted tokens) and detaches the
    custom domains.
 4. **KV namespaces** — delete all three explicitly; they survive step 3.
 5. **Custom domains** — verify none are orphaned; delete any that are.
-6. **Upstream OAuth apps** — delete the `gws-mcp` Google client and the
-   `freeagent-mcp` FreeAgent app.
+6. **Upstream OAuth apps** — delete the **Web** client `gws-mcp` (not the
+   Desktop `GWS`) and the FreeAgent app `freeagent-mcp` (not `Freeagent
+   CLI`). Deleting either sibling breaks the local CLIs. The Google project
+   itself can stay: its consent screen and lifetime user cap are shared with
+   the CLI client.
 7. **Cloudflare API tokens** — delete `wrangler-mcp-workers` (and its dead
    duplicate) in the dashboard.
 8. **1Password** — delete the `mcp-gateway` item and only the `mcp_*` fields
@@ -212,5 +284,10 @@ Reverse of creation, so nothing is orphaned:
 
 Partial teardown (retiring just `gws-mcp` and `freeagent-mcp` once the
 gateway has proven itself) is steps 1, 3, 4 for those two workers, plus
-trimming their redirect URIs from the upstream OAuth apps in step 6 —
-leaving the apps themselves in place, since the gateway still uses them.
+trimming the `gws-mcp.xing.works` and `freeagent-mcp.xing.works` redirect
+URIs from the two upstream apps — **keeping the apps, their secrets, and
+every user consent**, since the gateway authenticates through exactly the
+same `gws-mcp` client and `freeagent-mcp` app. Skip step 2 entirely there:
+revoking consent would knock the gateway's own linked accounts offline.
+Also drop the retired workers' entries from
+[`secrets.manifest.json`](../tools/mcp-workers/secrets.manifest.json).
