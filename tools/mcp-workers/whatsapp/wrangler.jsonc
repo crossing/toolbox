@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "whatsapp-spike",
+  "main": "src/spike.ts",
+  "compatibility_date": "2026-08-01",
+  // nodejs_compat gives Buffer/crypto/events that Baileys and its deps reach
+  // for; the WASM bridge instantiates at module top-level (startup), which
+  // workerd permits — the spike proves whether that actually holds.
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    // Baileys hardcodes `import WebSocket from 'ws'`, which throws in
+    // workerd. Point it at a shim over workerd's native outbound WebSocket.
+    "ws": "./src/ws-shim.ts"
+  },
+  // The spike worker was deployed to a *.workers.dev URL to prove the live
+  // WhatsApp handshake, then deleted. The real bridge gets a custom domain
+  // like the gateway; keep workers_dev off.
+  "workers_dev": false
+}

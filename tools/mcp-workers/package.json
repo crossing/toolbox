@@ -7,14 +7,16 @@
     "shared",
     "freeagent",
     "gws",
-    "gateway"
+    "gateway",
+    "whatsapp"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json && tsc --noEmit -p gws/tsconfig.json && tsc --noEmit -p gateway/tsconfig.json",
+    "typecheck": "tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p freeagent/tsconfig.json && tsc --noEmit -p gws/tsconfig.json && tsc --noEmit -p gateway/tsconfig.json && tsc --noEmit -p whatsapp/tsconfig.json",
     "test": "vitest run",
     "deploy:freeagent": "wrangler deploy -c freeagent/wrangler.jsonc",
     "deploy:gws": "wrangler deploy -c gws/wrangler.jsonc",
-    "deploy:gateway": "wrangler deploy -c gateway/wrangler.jsonc"
+    "deploy:gateway": "wrangler deploy -c gateway/wrangler.jsonc",
+    "deploy:whatsapp": "wrangler deploy -c whatsapp/wrangler.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",
