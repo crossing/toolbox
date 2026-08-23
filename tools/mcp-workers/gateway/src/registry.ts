@@ -16,6 +16,8 @@ import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
 import type { GoogleClient } from "./googleapi";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
+import { registerWhatsappReadTools, registerWhatsappWriteTools } from "./whatsapp";
+import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 
 // The account namespaces links are stored under.
 export const GOOGLE_ACCOUNT_SERVICE = "google";
@@ -29,6 +31,7 @@ export interface GatewayToolContext {
   canWrite: boolean;
   googleClient(service: string, account?: string): Promise<GoogleClient>;
   freeagentClient(): Promise<FreeAgentClient>;
+  whatsappBridge(): Promise<WhatsAppBridgeApi>;
   listAccounts(): Promise<AccountInfo[]>;
   // Best-effort write audit into the vault; failures never fail a tool call.
   audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
@@ -81,6 +84,12 @@ export interface ServiceDef {
   title: string;
   description: string;
   defaultEnabled: boolean;
+  /**
+   * The linked-account namespace this service draws on, when it has one.
+   * Gmail and Drive both name "google" — one link, two services — which is
+   * exactly why each of them can be pinned to a different account.
+   */
+  accountService?: string;
   registerRead(server: McpServer, ctx: GatewayToolContext): void;
   registerWrite?(server: McpServer, ctx: GatewayToolContext): void;
 }
@@ -90,6 +99,7 @@ const gmailService: ServiceDef = {
   title: "Gmail",
   description: "Search, read, drafts, labels, filters. No send tool exists; deletes are confirm-gated.",
   defaultEnabled: true,
+  accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerGmailReadTools(server, (account) => ctx.googleClient("gmail", account));
   },
@@ -103,6 +113,7 @@ const driveService: ServiceDef = {
   title: "Google Drive",
   description: "Search, metadata, content reads; create/update files. Deletion is trash-only and confirm-gated.",
   defaultEnabled: true,
+  accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerDriveReadTools(server, (account) => ctx.googleClient("drive", account));
   },
@@ -117,6 +128,7 @@ const freeagentService: ServiceDef = {
   description:
     "Accounting reads (bank accounts/transactions, bills, expenses, contacts, reports) and writes (bill/explanation/expense create, approve; deletes confirm-gated).",
   defaultEnabled: true,
+  accountService: FREEAGENT_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerFreeagentReadTools(server, () => ctx.freeagentClient());
   },
@@ -125,7 +137,24 @@ const freeagentService: ServiceDef = {
   },
 };
 
-export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService];
+// Off until a device is paired on /manage/whatsapp: an unpaired bridge would
+// otherwise add a dozen tools to the live catalog that can only answer "not
+// paired yet".
+const whatsappService: ServiceDef = {
+  id: "whatsapp",
+  title: "WhatsApp",
+  description:
+    "Chats, messages, contacts and media from the cloud bridge (a second linked device); file sends are confirm-gated.",
+  defaultEnabled: false,
+  registerRead(server, ctx) {
+    registerWhatsappReadTools(server, () => ctx.whatsappBridge());
+  },
+  registerWrite(server, ctx) {
+    registerWhatsappWriteTools(auditedServer(server, ctx), () => ctx.whatsappBridge());
+  },
+};
+
+export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService, whatsappService];
 
 export function defaultServiceToggles(): Record<string, boolean> {
   return Object.fromEntries(SERVICES.map((svc) => [svc.id, svc.defaultEnabled]));
@@ -144,7 +173,7 @@ export function registerGatewayTools(server: McpServer, ctx: GatewayToolContext)
   );
 
   server.registerTool(
-    "list_accounts",
+    "gateway_list_accounts",
     {
       description:
         "List the accounts linked to this gateway (service, label, default flag). Multi-account tools take an `account` parameter matching a label here.",

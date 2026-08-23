@@ -20,7 +20,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "GATEWAY_MCP", "class_name": "GatewayMCP" },
-      { "name": "USER_VAULT", "class_name": "UserVault" }
+      { "name": "USER_VAULT", "class_name": "UserVault" },
+      // Cross-script: the WhatsApp bridge object is defined and migrated by
+      // the whatsapp-bridge Worker, so gateway deploys never evict a live
+      // WhatsApp session. Deploy that Worker before this one.
+      {
+        "name": "WHATSAPP_BRIDGE",
+        "class_name": "WhatsAppBridge",
+        "script_name": "whatsapp-bridge"
+      }
     ]
   },
   "kv_namespaces": [

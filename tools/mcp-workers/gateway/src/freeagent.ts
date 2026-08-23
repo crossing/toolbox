@@ -63,18 +63,18 @@ export function explanationPayload(args: {
 
 export function registerFreeagentReadTools(server: McpServer, getClient: GetFreeagentClient): void {
   server.registerTool(
-    "bank_accounts_list",
+    "freeagent_bank_accounts_list",
     { description: "List all bank accounts.", inputSchema: {}, annotations: READ_ONLY },
     async () => run(async () => (await getClient()).get("/bank_accounts")),
   );
 
   server.registerTool(
-    "bank_transactions_list",
+    "freeagent_bank_transactions_list",
     {
       description:
         "List bank transactions for a bank account. Useful for finding transactions that need explanations.",
       inputSchema: {
-        bank_account: z.string().describe("Bank account API URL (from bank_accounts_list)"),
+        bank_account: z.string().describe("Bank account API URL (from freeagent_bank_accounts_list)"),
         view: z
           .string()
           .optional()
@@ -95,7 +95,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "bank_transaction_get",
+    "freeagent_bank_transaction_get",
     {
       description: "Show one bank transaction with its explanations.",
       inputSchema: { url: z.string().describe("Bank transaction API URL") },
@@ -105,13 +105,13 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "bills_list",
+    "freeagent_bills_list",
     { description: "List bills.", inputSchema: {}, annotations: READ_ONLY },
     async () => run(async () => (await getClient()).get("/bills")),
   );
 
   server.registerTool(
-    "expenses_list",
+    "freeagent_expenses_list",
     {
       description: "List out-of-pocket expenses.",
       inputSchema: { from_date: fromDate },
@@ -121,13 +121,13 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "categories_list",
+    "freeagent_categories_list",
     { description: "List accounting categories (nominal codes).", inputSchema: {}, annotations: READ_ONLY },
     async () => run(async () => (await getClient()).get("/categories")),
   );
 
   server.registerTool(
-    "contacts_list",
+    "freeagent_contacts_list",
     {
       description: "List contacts (suppliers and clients).",
       inputSchema: {
@@ -139,7 +139,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "balance_sheet",
+    "freeagent_balance_sheet",
     {
       description: "Show the balance sheet (assets, liabilities, owners' equity).",
       inputSchema: {
@@ -151,7 +151,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "profit_and_loss",
+    "freeagent_profit_and_loss",
     {
       description: "Show the profit and loss summary.",
       inputSchema: {
@@ -171,7 +171,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "trial_balance",
+    "freeagent_trial_balance",
     {
       description: "Show the trial balance summary (per-category totals).",
       inputSchema: {
@@ -185,11 +185,11 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
   );
 
   server.registerTool(
-    "users_list",
+    "freeagent_users_list",
     {
       // Not in the original read set, but expense_create needs a user API
       // URL and there is no other way to discover one.
-      description: "List the company's users (their API URLs are needed for expense_create).",
+      description: "List the company's users (their API URLs are needed for freeagent_expense_create).",
       inputSchema: {},
       annotations: READ_ONLY,
     },
@@ -199,15 +199,15 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
 
 export function registerFreeagentWriteTools(server: McpServer, getClient: GetFreeagentClient): void {
   server.registerTool(
-    "bill_create",
+    "freeagent_bill_create",
     {
       description: "Create a bill (a supplier invoice to be paid) with a single line item.",
       inputSchema: {
-        contact: z.string().describe("Contact API URL (from contacts_list)"),
+        contact: z.string().describe("Contact API URL (from freeagent_contacts_list)"),
         reference: z.string().describe("Bill reference"),
         date: z.string().describe("Bill date (YYYY-MM-DD)"),
         due: z.string().describe("Due date (YYYY-MM-DD)"),
-        category: z.string().describe("Category API URL (from categories_list)"),
+        category: z.string().describe("Category API URL (from freeagent_categories_list)"),
         value: z.string().describe("Total value"),
         description: z.string().optional().describe("Line item description"),
       },
@@ -228,12 +228,12 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
   );
 
   server.registerTool(
-    "explanation_create",
+    "freeagent_explanation_create",
     {
       description:
         "Explain a bank transaction. Exactly one of category (spending/income), paid_bill (a bill this payment settles), or transfer_account (the other own-account of a transfer) must be given.",
       inputSchema: {
-        transaction: z.string().optional().describe("Bank transaction API URL (from bank_transactions_list)"),
+        transaction: z.string().optional().describe("Bank transaction API URL (from freeagent_bank_transactions_list)"),
         bank_account: z.string().optional().describe("Bank account API URL (when creating a manual explanation)"),
         date: z.string().describe("Explanation date (YYYY-MM-DD)"),
         value: z.string().describe("Gross value (negative for money out)"),
@@ -259,7 +259,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
   );
 
   server.registerTool(
-    "explanation_approve",
+    "freeagent_explanation_approve",
     {
       description:
         "Approve a marked-for-review explanation (one FreeAgent guessed from a bank feed), confirming its category.",
@@ -275,7 +275,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
   );
 
   server.registerTool(
-    "explanation_delete",
+    "freeagent_explanation_delete",
     {
       description:
         "Delete an explanation, returning its bank transaction to the unexplained state. Requires confirm: true.",
@@ -292,13 +292,13 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
   );
 
   server.registerTool(
-    "expense_create",
+    "freeagent_expense_create",
     {
       description:
         "Record an out-of-pocket expense (money a user paid personally on behalf of the company). Gross value must be negative for money paid out.",
       inputSchema: {
-        user: z.string().describe("User API URL who paid (from users_list)"),
-        category: z.string().describe("Category API URL (from categories_list)"),
+        user: z.string().describe("User API URL who paid (from freeagent_users_list)"),
+        category: z.string().describe("Category API URL (from freeagent_categories_list)"),
         date: z.string().describe("Expense date (YYYY-MM-DD)"),
         value: z.string().describe("Gross value (negative for money paid out)"),
         description: z.string().optional(),

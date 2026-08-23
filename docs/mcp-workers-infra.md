@@ -29,13 +29,20 @@ tearing down mcp-workers.
 Account and zone IDs: `npx wrangler whoami`, or the dashboard URL. All
 commands below need `CLOUDFLARE_API_TOKEN` (see *Credentials*).
 
-### Workers (3)
+### Workers (4)
 
 | Worker | Custom domain | Purpose | Retire when |
 |---|---|---|---|
 | `gateway-mcp` | `mcp.xing.works` | The gateway — the only connector claude.ai needs | Tearing down the whole stack |
+| `whatsapp-bridge` | none, by design | Hosts the WhatsApp bridge Durable Object; reached only over the gateway's cross-script binding | Tearing down the whole stack, or abandoning G4 |
 | `gws-mcp` | `gws-mcp.xing.works` | Pre-gateway Gmail/Drive worker | Superseded by gateway G1; retire after probation |
 | `freeagent-mcp` | `freeagent-mcp.xing.works` | Pre-gateway FreeAgent worker | Superseded by gateway G2/G3; retire after probation |
+
+`whatsapp-bridge` is **not** `tools/whatsapp-bridge`, the local Go bridge it
+mirrors. Deleting the Worker destroys the cloud WhatsApp session and its stored
+messages; the local stack is untouched by anything here. Delete the Worker
+before or after the gateway — the gateway simply reports the bridge as
+unreachable in the meantime.
 
 Deleting a Worker also deletes its Durable Object namespaces and their
 SQLite contents, and detaches its custom domain. It does **not** delete KV
@@ -61,12 +68,18 @@ npx wrangler kv namespace list          # confirm ids/titles
 npx wrangler kv namespace delete --namespace-id <id>
 ```
 
-### Durable Object namespaces (4)
+### Durable Object namespaces (5)
 
 `gateway-mcp_GatewayMCP` (per-session MCP agent), **`gateway-mcp_UserVault`**
 (per-identity vault: service toggles, linked-account refresh tokens as
-AES-GCM ciphertext, audit log), `gws-mcp_GwsMCP`, `freeagent-mcp_FreeagentMCP`.
-All SQLite-backed, all removed when their Worker is deleted.
+AES-GCM ciphertext, audit log), **`whatsapp-bridge_WhatsAppBridge`** (the
+WhatsApp session: Signal keys, chats and messages), `gws-mcp_GwsMCP`,
+`freeagent-mcp_FreeagentMCP`. All SQLite-backed, all removed when their Worker
+is deleted.
+
+`whatsapp-bridge_WhatsAppBridge` holds **Signal session keys and message
+history**. Deleting it means re-pairing the device (and removing the orphaned
+entry from the phone's linked-devices list) and re-importing history.
 
 `UserVault` is the only place linked upstream tokens live. Deleting
 `gateway-mcp` destroys them — accounts must be re-linked on `/manage`
@@ -102,6 +115,8 @@ live only inside the Worker and die with it. Current names:
 - `gws-mcp`: `GWS_CLIENT_ID`, `GWS_CLIENT_SECRET`, `ALLOWED_EMAILS`
 - `freeagent-mcp`: `FREEAGENT_CLIENT_ID`, `FREEAGENT_CLIENT_SECRET`,
   `ALLOWED_COMPANY`
+- `whatsapp-bridge`: none. It has no upstream OAuth and no HTTP surface; the
+  WhatsApp session lives in its Durable Object and nowhere else.
 
 `VAULT_KEY` is the AES-GCM key for vault ciphertext and exists **only** in
 the Worker and 1Password. Lose both and every linked account must be

@@ -6,6 +6,10 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
   GATEWAY_MCP: DurableObjectNamespace;
   USER_VAULT: DurableObjectNamespace<UserVault>;
+  // The WhatsApp bridge Durable Object lives in its own Worker script so that
+  // gateway deploys never evict a live WhatsApp session; cross-script stubs
+  // are untyped, and gateway/src/whatsapp.ts casts to the shared contract.
+  WHATSAPP_BRIDGE: DurableObjectNamespace;
   // Secrets (op-cf-secrets):
   GWS_CLIENT_ID: string; // Google web client, shared with gws-mcp until it retires
   GWS_CLIENT_SECRET: string;
