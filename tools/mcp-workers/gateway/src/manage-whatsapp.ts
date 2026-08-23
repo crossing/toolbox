@@ -137,7 +137,7 @@ function renderPreview(chats: ChatRow[], messages: MessageRow[]): string {
       ? `<tr><td colspan="2" class="muted">No chats stored yet.</td></tr>`
       : chats
           .map(
-            (chat) => `<tr><td>${escapeHtml(chat.name ?? chat.jid)}</td>
+            (chat) => `<tr><td>${escapeHtml(chat.name || chat.jid)}</td>
             <td class="muted mono nowrap">${escapeHtml(shortTs(chat.lastMessageTime))}</td></tr>`,
           )
           .join("\n");
@@ -147,7 +147,7 @@ function renderPreview(chats: ChatRow[], messages: MessageRow[]): string {
       : messages
           .map(
             (msg) => `<tr><td class="muted mono nowrap">${escapeHtml(shortTs(msg.timestamp))}</td>
-            <td>${escapeHtml(msg.chatName ?? msg.chatJid)}</td>
+            <td>${escapeHtml(msg.chatName || msg.chatJid)}</td>
             <td>${msg.isFromMe ? "me" : escapeHtml(msg.senderName ?? msg.sender)}${
               msg.mediaType ? ` ${pill(msg.mediaType)}` : ""
             }</td></tr>`,
@@ -157,16 +157,14 @@ function renderPreview(chats: ChatRow[], messages: MessageRow[]): string {
   <h2>Store</h2>
   <p class="hint">Metadata only — message text is never rendered here, only returned through the
   tools.</p>
-  <div class="grid2">
-    <div class="scroll"><table>
-      <thead><tr><th>Chat</th><th>Last activity</th></tr></thead>
-      <tbody>${chatRows}</tbody>
-    </table></div>
-    <div class="scroll"><table>
-      <thead><tr><th>When</th><th>Chat</th><th>From</th></tr></thead>
-      <tbody>${messageRows}</tbody>
-    </table></div>
-  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>Chat</th><th>Last activity</th></tr></thead>
+    <tbody>${chatRows}</tbody>
+  </table></div>
+  <div class="scroll" style="margin-top:1rem"><table>
+    <thead><tr><th>When</th><th>Chat</th><th>From</th></tr></thead>
+    <tbody>${messageRows}</tbody>
+  </table></div>
 </section>`;
 }
 
