@@ -112,6 +112,42 @@ on demand, which is why the first send in a while takes a few seconds.
   local offset, which does not sort correctly across offsets; the importer
   converts.
 
+## Logging
+
+Workers Logs is the log of record — `observability` is enabled on the Worker, so
+every console call is indexed and queryable for three days. The bridge writes
+**structured** entries (`console.log({ service, level, msg, … })`), because
+Workers Logs indexes an object's fields but can only match a formatted string
+by substring. A cycle emits one summary event worth querying across days:
+
+```json
+{"level":"info","service":"whatsapp-bridge","msg":"sync cycle ok",
+ "event":"cycle","ok":true,"messages":0,"chats":0,"ms":4172}
+```
+
+Read it with `POST /accounts/<id>/workers/observability/telemetry/query`
+filtering `$metadata.service = whatsapp-bridge`. **Not** with `wrangler tail`,
+which withholds logs from WebSocket-upgraded invocations until the socket
+closes — which, for this Worker, is always.
+
+The SQLite ring the management page renders is a *mirror*, not the log: a Worker
+cannot query Workers Logs without an API token, and the page has to show
+something without one.
+
+Three things respect the Workers Free budget of **200,000 log events per day,
+account-wide** (3-day retention):
+
+- **Verbose logging expires after 30 minutes.** It forwards Baileys' own output
+  and every inbound stanza — hundreds of events per cycle instead of a dozen —
+  so a flag left on by someone who got distracted is the one realistic way to
+  spend the budget.
+- **The management page stops polling when its tab is hidden.** Each poll is a
+  gateway request *and* a bridge RPC, both of which produce an invocation
+  event; at eight seconds that is over twenty thousand events a day from a tab
+  nobody is looking at.
+- **The sync cycle is intermittent anyway** — 144 wake-ups a day, about a dozen
+  events each, which is under 1% of the budget.
+
 ## State
 
 | Step | State |

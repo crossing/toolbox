@@ -31,6 +31,30 @@ import { wsDebug } from "./ws-shim";
 // certainly seen before.
 export const DEFAULT_BROWSER: [string, string, string] = ["Mac OS", "Chrome", "14.4.1"];
 
+/**
+ * The client identity for a socket that is registering a *new* device, with
+ * the name in the slot WhatsApp actually reads.
+ *
+ * Baileys' tuple is `[os, browser, version]`, and it is tempting to read that
+ * as "platform, client name, client version" — it is not what reaches the
+ * phone. `generateRegistrationNode` (Utils/validate-connection.js) builds
+ *
+ *     { os: browser[0], platformType: getPlatformType(browser[1]), … }
+ *
+ * and **`os` is the string WhatsApp → Linked devices displays**. `browser[1]`
+ * is only looked up in the `DeviceProps.PlatformType` enum, where anything
+ * unrecognised silently falls through to CHROME. Putting a device name in the
+ * second slot therefore does nothing at all except leave the first slot —
+ * "Mac OS" — showing as the device's name, which is exactly what it looked
+ * like when the QR pairing came back named after the platform.
+ *
+ * `browser[2]` reaches nothing: the advertised app version comes from
+ * `config.version`, which is md5'd separately.
+ */
+export function deviceBrowser(name: string): [string, string, string] {
+  return [name, "Chrome", "14.4.1"];
+}
+
 interface BinaryNodeish {
   tag?: string;
   attrs?: Record<string, unknown>;

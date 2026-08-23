@@ -2,7 +2,20 @@
 // ones it would be convenient for it to follow.
 
 import { describe, expect, it } from "vitest";
-import { ConnectionWaiters, isFatalDisconnect, DisconnectReason } from "../src/session";
+import { ConnectionWaiters, deviceBrowser, isFatalDisconnect, DisconnectReason } from "../src/session";
+
+describe("deviceBrowser", () => {
+  it("puts the device name where WhatsApp reads it", () => {
+    // Baileys' registration node is { os: browser[0], platformType:
+    // getPlatformType(browser[1]) }, and `os` is what Linked devices shows.
+    // A name in the second slot is looked up in the PlatformType enum, misses,
+    // and falls back to CHROME — leaving the platform string showing as the
+    // device's name. This assertion is the whole point of the helper.
+    expect(deviceBrowser("Xing's Assistant")[0]).toBe("Xing's Assistant");
+    // The second slot has to stay a recognised platform keyword.
+    expect(deviceBrowser("anything")[1]).toBe("Chrome");
+  });
+});
 
 describe("ConnectionWaiters", () => {
   it("matches state that arrived before the waiter did", async () => {

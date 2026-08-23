@@ -104,12 +104,20 @@ const POLL_SCRIPT = `(function(){
     var c = document.querySelector('[data-f="connection"]');
     if (c) c.className = "pill " + s.connectionTone;
   }
-  setInterval(function(){
+  function tick(){
+    // A tab left open in the background would otherwise spend the account's
+    // Workers Logs budget on invocation events nobody is looking at: every
+    // poll is one gateway request plus one bridge RPC, and at eight seconds
+    // that is over twenty thousand events a day out of the free plan's two
+    // hundred thousand. Nothing is lost by waiting until someone looks.
+    if (document.hidden) return;
     fetch("/manage/whatsapp/status.json", { credentials: "same-origin" })
       .then(function(r){ return r.ok ? r.json() : null; })
       .then(function(s){ if (s) apply(s); })
       .catch(function(){});
-  }, every);
+  }
+  setInterval(tick, every);
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden) tick(); });
 })();`;
 
 function renderCycles(status: BridgeStatus): string {
@@ -281,7 +289,17 @@ ${preview}
 
 <section class="card">
   <h2>Log</h2>
-  <pre class="log">${escapeHtml(status.log.slice(0, 25).join("\n")) || "nothing logged yet"}</pre>
+  <p class="hint">Newest first. A mirror of what goes to Workers Logs, which is the log of
+  record — three days' retention, queryable, and filtered on <code>service = whatsapp-bridge</code>.${
+    status.verbose
+      ? " Verbose is on: Baileys' own logs and every inbound stanza. It switches itself off after 30 minutes, because the free plan allows 200,000 log events a day across the whole account."
+      : ""
+  }</p>
+  <pre class="log">${
+    // Verbose mode exists to see more, so showing the same 25 lines either way
+    // throws away the whole point of turning it on — the bridge keeps 250.
+    escapeHtml(status.log.slice(0, status.verbose ? 150 : 25).join("\n")) || "nothing logged yet"
+  }</pre>
 </section>
 
 <section class="card">

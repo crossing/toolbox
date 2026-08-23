@@ -37,7 +37,7 @@ import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
 import { encryptForUpload, fetchAndDecrypt, MediaError, uploadEncrypted } from "./media";
 import { chatNameFor, kindFromFilename, mimeFromFilename, toJid, toStoredMessage } from "./normalize";
-import { DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
+import { deviceBrowser, DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
 import { Store } from "./store";
 
 export interface BridgeEnv {
@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 const MAX_CYCLES = 10;
+
+/** How long verbose logging stays on before it switches itself off. */
+const VERBOSE_TTL_MS = 30 * 60 * 1000;
 
 /** How long a history-import code stays valid. */
 const IMPORT_CODE_TTL_MS = 30 * 60 * 1000;
@@ -186,7 +189,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       deviceName: this.deviceName(),
       connection: this.connectionState(),
       autoSync: this.getMeta<boolean>("autoSync", false),
-      verbose: this.getMeta<boolean>("verbose", false),
+      verbose: this.isVerbose(),
       lastConnectedAt: this.getMeta<number | null>("lastConnectedAt", null),
       lastDrainAt: this.getMeta<number | null>("lastDrainAt", null),
       lastError: this.getMeta<string | null>("lastError", null),
@@ -317,15 +320,31 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     };
   }
 
-  private log(level: "info" | "warn" | "error", message: string): void {
-    // wrangler tail withholds logs from WebSocket-upgraded invocations until
-    // the socket closes, so the bridge keeps its own short log instead.
-    const entry = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
-    const keep = this.getMeta<boolean>("verbose", false) ? 250 : 40;
-    const lines = [entry, ...this.getMeta<string[]>("log", [])].slice(0, keep);
+  // Workers Logs is the log of record. `observability` is enabled on this
+  // Worker, so everything written to console is indexed and queryable for
+  // three days — and console arguments that are objects are indexed field by
+  // field, which is why this emits a structured entry rather than a formatted
+  // string. Query it with
+  //   POST /accounts/<id>/workers/observability/telemetry/query
+  // filtering `$metadata.service = whatsapp-bridge`, not with `wrangler tail`,
+  // which withholds logs from WebSocket-upgraded invocations until the socket
+  // closes — which for this Worker is always.
+  //
+  // The console method carries the level, so warnings and errors are filterable
+  // as such instead of by grepping a prefix.
+  private log(level: "info" | "warn" | "error", message: string, fields: Record<string, unknown> = {}): void {
+    const entry = { service: "whatsapp-bridge", level, msg: message.slice(0, 300), ...fields };
+    if (level === "error") console.error(entry);
+    else if (level === "warn") console.warn(entry);
+    else console.log(entry);
+
+    // The SQLite ring is a mirror, not the log. A Worker cannot query Workers
+    // Logs without an API token, and /manage/whatsapp has to be able to show
+    // the last few minutes without one; it also outlives the three-day
+    // retention window for the handful of lines anyone comes back to.
+    const line = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
+    const lines = [line, ...this.getMeta<string[]>("log", [])].slice(0, this.isVerbose() ? 250 : 40);
     this.setMeta("log", lines);
-    // Also to the console, so `wrangler tail` can watch a live cycle.
-    console.log(`[bridge] ${entry}`);
   }
 
   // `qr` is only ever set for the socket that registers a new device: that is
@@ -338,11 +357,11 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     return new Session({
       ...this.makeHandlers(counters),
       version: await this.waVersion(),
-      verbose: this.getMeta<boolean>("verbose", false),
+      verbose: this.isVerbose(),
       ...(options.qr
         ? {
             qrTimeoutMs: QR_ROTATE_MS,
-            browser: ["Mac OS", this.deviceName(), "14.4.1"] as [string, string, string],
+            browser: deviceBrowser(this.deviceName()),
             onQr: (qr: string) => {
               this.setMeta("pendingQr", {
                 qr,
@@ -386,10 +405,19 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     return { useLatestVersion: enabled };
   }
 
+  // Verbose logging forwards Baileys' own output and every inbound stanza,
+  // which is hundreds of events per cycle instead of a dozen. The Workers Free
+  // plan allows 200,000 log events a day *across the account*, shared with the
+  // gateway, so a verbose flag left on by someone who got distracted is the
+  // one realistic way to spend it. It expires by itself.
   async setVerbose(enabled: boolean): Promise<{ verbose: boolean }> {
-    this.setMeta("verbose", enabled);
-    this.log("info", `verbose logging ${enabled ? "on" : "off"}`);
+    this.setMeta("verboseUntil", enabled ? Date.now() + VERBOSE_TTL_MS : 0);
+    this.log("info", `verbose logging ${enabled ? `on for ${VERBOSE_TTL_MS / 60000} minutes` : "off"}`);
     return { verbose: enabled };
+  }
+
+  private isVerbose(): boolean {
+    return this.getMeta<number>("verboseUntil", 0) > Date.now();
   }
 
   // The web version is md5'd into the registration payload, so a stale one can
@@ -570,7 +598,11 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         this.setMeta("lastConnectedAt", Date.now());
         this.setMeta("lastError", null);
         this.setConnection("open");
-        this.log("info", `paired as ${this.auth.state.creds.me?.id ?? "unknown"}`);
+        this.log("info", `paired as ${this.auth.state.creds.me?.id ?? "unknown"}`, {
+          event: "paired",
+          jid: this.auth.state.creds.me?.id ?? null,
+          deviceName: this.deviceName(),
+        });
         // Best-effort: a fresh device usually has a backlog waiting.
         await second.waitForDrain(90_000).catch((err) => this.log("warn", `first drain: ${String(err)}`));
         await scheduler.wait(POST_DRAIN_SETTLE_MS);
@@ -662,6 +694,17 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       this.setConnection("idle");
       this.busy = false;
     }
+    // The one line worth querying across days: "how many cycles failed, and
+    // with what". Structured, so it filters on `event` and `ok` rather than
+    // on the shape of a sentence.
+    this.log(ok ? "info" : "error", `sync cycle ${ok ? "ok" : "failed"}`, {
+      event: "cycle",
+      ok,
+      messages: counters.messages,
+      chats: counters.chats,
+      ms: Date.now() - startedAt,
+      detail,
+    });
     this.recordCycle({
       startedAt,
       endedAt: Date.now(),
