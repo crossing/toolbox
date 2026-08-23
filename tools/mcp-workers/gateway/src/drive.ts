@@ -15,9 +15,9 @@ import { GoogleApiError } from "./googleapi";
 import type { GetClient } from "./gmail";
 import { ACCOUNT_PARAM, DESTRUCTIVE, needsConfirm, READ_ONLY, run, WRITE } from "./toolutil";
 
-const DRIVE = "https://www.googleapis.com/drive/v3";
-const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
-const FILE_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,trashed,owners(emailAddress)";
+export const DRIVE = "https://www.googleapis.com/drive/v3";
+export const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
+export const FILE_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,trashed,owners(emailAddress)";
 const READ_BYTE_CAP = 1_000_000;
 
 // Export mapping for Google-native formats (unit-tested).
@@ -114,44 +114,73 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
   );
 }
 
+// Gmail and Drive resolve to *different Google accounts* here — work mailbox,
+// personal Drive — so there is no server-side "save to Drive" between them. An
+// attachment has to come down as base64 and go back up as bytes, which is only
+// possible if the upload can carry something other than text.
+//
+// Google's multipart upload takes the media part verbatim, so base64 handed to
+// a text/plain part is stored as a text file full of base64 — a PDF that opens
+// in a text editor. Declaring `Content-Transfer-Encoding: base64` makes Drive
+// decode it instead.
+export function multipartBody(
+  metadata: Record<string, unknown>,
+  media: { text: string; base64?: undefined; mimeType: string } | { base64: string; text?: undefined; mimeType: string },
+): { contentType: string; body: string } {
+  const boundary = "toolbox-mcp-" + crypto.randomUUID();
+  const mediaPart =
+    media.base64 !== undefined
+      ? [`Content-Type: ${media.mimeType}`, "Content-Transfer-Encoding: base64", "", media.base64]
+      : [`Content-Type: ${media.mimeType}`, "", media.text];
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    ...mediaPart,
+    `--${boundary}--`,
+  ].join("\r\n");
+  return { contentType: `multipart/related; boundary=${boundary}`, body };
+}
+
 export function registerDriveWriteTools(server: McpServer, getClient: GetClient): void {
   server.registerTool(
     "drive_create_file",
     {
       description:
-        "Create a Drive file or folder. Text content uploads as-is; set mime_type 'application/vnd.google-apps.document' to convert text into a Google Doc, 'application/vnd.google-apps.folder' for a folder.",
+        "Create a Drive file or folder. Text goes in `content`; binary (a Gmail attachment, a scan) goes in `base64` with its real mime_type — Gmail and Drive are different accounts here, so an attachment must be downloaded and re-uploaded rather than saved across. Set mime_type 'application/vnd.google-apps.document' to convert text into a Google Doc, 'application/vnd.google-apps.folder' for a folder.",
       inputSchema: {
         name: z.string(),
         parent_id: z.string().optional(),
         mime_type: z.string().optional().describe("Target mime type (default text/plain for content, folder otherwise)"),
         content: z.string().optional().describe("Text content; omit for an empty file or folder"),
+        base64: z
+          .string()
+          .optional()
+          .describe("Binary content, base64-encoded (e.g. straight from gmail_get_attachment). Give mime_type too; not combinable with content."),
         account: ACCOUNT_PARAM,
       },
       annotations: WRITE,
     },
-    async ({ name, parent_id, mime_type, content, account }) =>
+    async ({ name, parent_id, mime_type, content, base64, account }) =>
       run(async () => {
+        if (content !== undefined && base64 !== undefined) {
+          throw new GoogleApiError(400, "pass content or base64, not both");
+        }
         const client = await getClient(account);
         const metadata: Record<string, unknown> = { name };
         if (parent_id) metadata.parents = [parent_id];
-        if (content === undefined) {
+        if (content === undefined && base64 === undefined) {
           metadata.mimeType = mime_type ?? "application/vnd.google-apps.folder";
           return client.sendJson("POST", `${DRIVE}/files`, metadata, { fields: FILE_FIELDS });
         }
         if (mime_type) metadata.mimeType = mime_type;
-        const boundary = "toolbox-mcp-" + crypto.randomUUID();
-        const body = [
-          `--${boundary}`,
-          "Content-Type: application/json; charset=UTF-8",
-          "",
-          JSON.stringify(metadata),
-          `--${boundary}`,
-          'Content-Type: text/plain; charset="UTF-8"',
-          "",
-          content,
-          `--${boundary}--`,
-        ].join("\r\n");
-        return client.sendBody("POST", `${DRIVE_UPLOAD}/files`, `multipart/related; boundary=${boundary}`, body, {
+        const { contentType, body } =
+          base64 !== undefined
+            ? multipartBody(metadata, { base64, mimeType: mime_type ?? "application/octet-stream" })
+            : multipartBody(metadata, { text: content!, mimeType: 'text/plain; charset="UTF-8"' });
+        return client.sendBody("POST", `${DRIVE_UPLOAD}/files`, contentType, body, {
           uploadType: "multipart",
           fields: FILE_FIELDS,
         });
@@ -170,12 +199,20 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
         add_parent_id: z.string().optional(),
         remove_parent_id: z.string().optional(),
         content: z.string().optional().describe("New text content (replaces the file body)"),
+        base64: z
+          .string()
+          .optional()
+          .describe("New binary content, base64-encoded; give mime_type too. Not combinable with content."),
+        mime_type: z.string().optional().describe("Mime type for base64 content"),
         account: ACCOUNT_PARAM,
       },
       annotations: WRITE,
     },
-    async ({ file_id, name, description, add_parent_id, remove_parent_id, content, account }) =>
+    async ({ file_id, name, description, add_parent_id, remove_parent_id, content, base64, mime_type, account }) =>
       run(async () => {
+        if (content !== undefined && base64 !== undefined) {
+          throw new GoogleApiError(400, "pass content or base64, not both");
+        }
         const client = await getClient(account);
         let result: unknown = null;
         if (name !== undefined || description !== undefined || add_parent_id || remove_parent_id) {
@@ -197,7 +234,14 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
             { uploadType: "media", fields: FILE_FIELDS },
           );
         }
-        if (result === null) throw new GoogleApiError(400, "nothing to update — pass name, parents, or content");
+        if (base64 !== undefined) {
+          const { contentType, body } = multipartBody({}, { base64, mimeType: mime_type ?? "application/octet-stream" });
+          result = await client.sendBody("PATCH", `${DRIVE_UPLOAD}/files/${file_id}`, contentType, body, {
+            uploadType: "multipart",
+            fields: FILE_FIELDS,
+          });
+        }
+        if (result === null) throw new GoogleApiError(400, "nothing to update — pass name, parents, content or base64");
         return result;
       }),
   );
