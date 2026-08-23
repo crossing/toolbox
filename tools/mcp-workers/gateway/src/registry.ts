@@ -13,6 +13,7 @@ import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
 import { registerFreeagentReadTools, registerFreeagentWriteTools } from "./freeagent";
 import type { FreeAgentClient } from "./freeagentapi";
 import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
+import { registerRelayTools } from "./relay";
 import type { GoogleClient } from "./googleapi";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
@@ -118,7 +119,16 @@ const driveService: ServiceDef = {
     registerDriveReadTools(server, (account) => ctx.googleClient("drive", account));
   },
   registerWrite(server, ctx) {
-    registerDriveWriteTools(auditedServer(server, ctx), (account) => ctx.googleClient("drive", account));
+    const audited = auditedServer(server, ctx);
+    registerDriveWriteTools(audited, (account) => ctx.googleClient("drive", account));
+    // Cross-account transfer lands here because its output is a Drive file.
+    // Each resolver still asserts its own service is enabled, so with Gmail or
+    // WhatsApp switched off the relay fails closed rather than half-working.
+    registerRelayTools(audited, {
+      gmail: (account) => ctx.googleClient("gmail", account),
+      drive: (account) => ctx.googleClient("drive", account),
+      whatsapp: () => ctx.whatsappBridge(),
+    });
   },
 };
 

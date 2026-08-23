@@ -8,7 +8,7 @@ import { z } from "zod";
 import { GoogleApiError, type GoogleClient } from "./googleapi";
 import { ACCOUNT_PARAM, DESTRUCTIVE, needsConfirm, READ_ONLY, run, WRITE } from "./toolutil";
 
-const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+export const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 const BODY_CHAR_CAP = 20000;
 const ATTACHMENT_BYTE_CAP = 1_000_000;
 
