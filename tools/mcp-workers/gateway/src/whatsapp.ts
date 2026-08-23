@@ -235,8 +235,10 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     async () =>
       bridgeRun(async () => {
         const status = await (await bridge()).status();
-        // The pairing code is a credential for adding a device — never worth
-        // putting in a model's context.
+        // A pairing code adds a device to the account, and so does a scanned
+        // QR. Neither is ever worth putting in a model's context: the fact
+        // that one is outstanding is all a tool needs to know. `status` does
+        // not carry the QR string at all, so only the code needs flattening.
         return { ...status, pendingPairing: status.pendingPairing ? { pending: true } : null };
       }),
   );

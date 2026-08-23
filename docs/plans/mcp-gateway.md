@@ -35,9 +35,11 @@ N reconnect flows.
   page's per-service toggles are the pressure valve.
 - **Accounts: no protocol concept at all.** A session has one authenticated
   principal (the gateway grant). Accounts are modeled by us: an `account`
-  parameter on multi-account tools, a `list_accounts` tool, and a
-  management-set default per service so single-account use never notices the
-  parameter. (Alternatives considered: name-duplicated tools per account —
+  parameter on multi-account tools, a `gateway_list_accounts` tool, and a
+  management-set account per service so single-account use never notices the
+  parameter. Gmail and Drive share one Google link but resolve independently:
+  the mail account and the Drive account are routinely different, so the pin
+  is per catalog service, not per namespace. (Alternatives considered: name-duplicated tools per account —
   catalog explosion; per-account path-prefix connectors — kept as the
   escape hatch below, but it is the opposite of the single-endpoint goal.)
 
@@ -72,9 +74,10 @@ domain). Three cooperating parts:
 **Service modules** are the existing tool surfaces, lifted as-is from the
 per-service workers into `tools/mcp-workers/gateway/` imports: freeagent
 (10 reads, writes in a later phase), gmail (9r+8w), drive (3r+3w), later
-whatsapp and calendar. Tool names stay stable (`gmail_search`,
-`bank_accounts_list`, …) — already unique across the merged catalog — so
-existing claude.ai per-tool permission decisions transfer conceptually, and
+whatsapp and calendar. Every tool carries its service as a prefix
+(`gmail_search`, `drive_read_file`, `freeagent_bank_accounts_list`,
+`whatsapp_list_chats`, `gateway_ping`) — unique across the merged catalog, and
+legible in a client that shows a flat list of forty tools — and
 `readOnlyHint`/`destructiveHint`/`confirm` semantics are unchanged.
 
 **Management interface** — a small web app on the same worker (`/manage`),
@@ -126,7 +129,7 @@ as the escape hatch, not the default.
 
 - **G0 — gateway skeleton.** Worker + connector OAuth (Google identity,
   allowlist), vault DO with encryption, session McpAgent reading vault
-  config, `/manage` with sign-in + service toggles, `list_accounts` +
+  config, `/manage` with sign-in + service toggles, `gateway_list_accounts` +
   a ping tool. Verify the claude.ai handshake and that toggling a service
   changes the next session's catalog.
 - **G1 — Google services fold-in.** Gmail + Drive modules with the

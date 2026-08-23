@@ -84,6 +84,12 @@ export interface ServiceDef {
   title: string;
   description: string;
   defaultEnabled: boolean;
+  /**
+   * The linked-account namespace this service draws on, when it has one.
+   * Gmail and Drive both name "google" — one link, two services — which is
+   * exactly why each of them can be pinned to a different account.
+   */
+  accountService?: string;
   registerRead(server: McpServer, ctx: GatewayToolContext): void;
   registerWrite?(server: McpServer, ctx: GatewayToolContext): void;
 }
@@ -93,6 +99,7 @@ const gmailService: ServiceDef = {
   title: "Gmail",
   description: "Search, read, drafts, labels, filters. No send tool exists; deletes are confirm-gated.",
   defaultEnabled: true,
+  accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerGmailReadTools(server, (account) => ctx.googleClient("gmail", account));
   },
@@ -106,6 +113,7 @@ const driveService: ServiceDef = {
   title: "Google Drive",
   description: "Search, metadata, content reads; create/update files. Deletion is trash-only and confirm-gated.",
   defaultEnabled: true,
+  accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerDriveReadTools(server, (account) => ctx.googleClient("drive", account));
   },
@@ -120,6 +128,7 @@ const freeagentService: ServiceDef = {
   description:
     "Accounting reads (bank accounts/transactions, bills, expenses, contacts, reports) and writes (bill/explanation/expense create, approve; deletes confirm-gated).",
   defaultEnabled: true,
+  accountService: FREEAGENT_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerFreeagentReadTools(server, () => ctx.freeagentClient());
   },
@@ -164,7 +173,7 @@ export function registerGatewayTools(server: McpServer, ctx: GatewayToolContext)
   );
 
   server.registerTool(
-    "list_accounts",
+    "gateway_list_accounts",
     {
       description:
         "List the accounts linked to this gateway (service, label, default flag). Multi-account tools take an `account` parameter matching a label here.",

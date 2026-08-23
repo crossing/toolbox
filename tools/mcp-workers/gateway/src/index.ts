@@ -84,7 +84,10 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
       canWrite: hasScope(this.props, WRITE_SCOPE),
       googleClient: async (service, account) => {
         await assertEnabled(service);
-        const acct = await vault.getAccount(GOOGLE_ACCOUNT_SERVICE, account);
+        // Gmail and Drive share the "google" namespace but not necessarily
+        // the same account: each resolves its own pin before the namespace
+        // default. An explicit `account` argument still wins over both.
+        const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, service, account);
         if (!acct) throw new NoLinkedAccountError(service, account);
         let source = this.tokenSources.get(acct.label);
         if (!source) {
@@ -101,7 +104,7 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
       },
       freeagentClient: async () => {
         await assertEnabled("freeagent");
-        const acct = await vault.getAccount(FREEAGENT_ACCOUNT_SERVICE);
+        const acct = await vault.getAccountForService(FREEAGENT_ACCOUNT_SERVICE, "freeagent");
         if (!acct) throw new NoLinkedAccountError("freeagent");
         if (!this.freeagentSource) {
           const key = await importVaultKey(this.env.VAULT_KEY);

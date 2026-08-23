@@ -107,6 +107,19 @@ export interface SessionHandlers {
   version?: WAVersion;
   /** Forward Baileys' own debug/info logs; for diagnosing a stuck handshake. */
   verbose?: boolean;
+  /**
+   * Every linking QR WhatsApp issues, including the rotations. Only the QR
+   * pairing flow sets this; every other connection ignores the event.
+   */
+  onQr?(qr: string): void;
+  /** How long each QR lives before Baileys asks for the next ref. */
+  qrTimeoutMs?: number;
+  /**
+   * The client identity, which is also what WhatsApp → Linked devices ends up
+   * displaying. Overriding it is safe on the QR path and *not* on the
+   * phone-code path, where an unrecognised identity is answered with 400.
+   */
+  browser?: [string, string, string];
 }
 
 interface Waiter {
@@ -209,7 +222,7 @@ export class Session {
       auth: handlers.auth.state,
       logger: makeLogger(handlers.log, handlers.verbose ?? false),
       ...(handlers.version ? { version: handlers.version } : {}),
-      browser: DEFAULT_BROWSER,
+      browser: handlers.browser ?? DEFAULT_BROWSER,
       // A bridge that syncs every few minutes has no use for a full history
       // replay, and asking for one costs a 20 s wait on every first connect.
       syncFullHistory: false,
@@ -218,7 +231,7 @@ export class Session {
       fireInitQueries: false,
       emitOwnEvents: false,
       generateHighQualityLinkPreview: false,
-      qrTimeout: QR_TIMEOUT_MS,
+      qrTimeout: handlers.qrTimeoutMs ?? QR_TIMEOUT_MS,
       msgRetryCounterCache: memCache(),
       callOfferCache: memCache(),
       userDevicesCache: memCache(),
@@ -242,6 +255,9 @@ export class Session {
         err ? `closed code=${err.output?.statusCode ?? "?"} reason=${(err.message ?? "").slice(0, 120)}` : "",
       ].filter(Boolean).join(" ");
       if (shape) handlers.log("info", `connection.update: ${shape}`);
+      // Baileys rotates the QR on its own timer until the refs run out, so
+      // this fires several times per pairing attempt.
+      if (update.qr && handlers.onQr) handlers.onQr(update.qr);
     });
 
     this.sock.ev.on("connection.update", (update) => {

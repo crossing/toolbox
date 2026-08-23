@@ -16,7 +16,7 @@ connectors (OAuth handshake, real tool calls against live data):
 |---|---|---|---|
 | freeagent-mcp | `https://freeagent-mcp.xing.works/mcp` | 10 read + `ping_write` spike | Phase 1 done |
 | gws-mcp | `https://gws-mcp.xing.works/mcp` | Gmail 9r+8w, Drive 3r+3w | Phase 2 done |
-| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, list_accounts, Gmail 9r+8w, Drive 3r+3w (with `account` param), FreeAgent 11r+5w, WhatsApp 10r+3w | G3 done; G4 built, awaiting pairing (see g4-whatsapp.md) |
+| gateway-mcp | `https://mcp.xing.works/mcp` | gateway_ping, gateway_list_accounts, Gmail 9r+8w, Drive 3r+3w (with `account` param), FreeAgent 11r+5w, WhatsApp 10r+3w — every tool prefixed with its service | G3 done; G4 paired and live (see g4-whatsapp.md) |
 | whatsapp-bridge | no HTTP surface | hosts the WhatsApp bridge Durable Object | G4; reached only over the gateway's cross-script DO binding |
 
 Work happens on branch `feature/mcp-workers` in a dedicated worktree
@@ -123,12 +123,14 @@ revocation from the CLIs').
 
 ## Remaining phases
 
-G4 (WhatsApp) is built and deployed: the bridge Worker, the Durable Object,
-the ten read tools and text send, `/manage/whatsapp` for pairing and health,
-and a history importer. It cannot be finished without the phone — request a
-pairing code on `/manage/whatsapp` and type it into WhatsApp → Linked devices.
-The WhatsApp service is **off by default** in the gateway catalog until then.
-See [g4-whatsapp.md](g4-whatsapp.md).
+G4 (WhatsApp) is **done**: the bridge Worker, the Durable Object, ten read
+tools plus text and file send, `/manage/whatsapp` for pairing and health, and a
+history importer. A device is paired and the ten-minute sync cycle is running.
+Pairing is QR-first; the phone-code flow is kept as a fallback. See
+[g4-whatsapp.md](g4-whatsapp.md).
+
+Next up, not started: [aaisp-sms.md](aaisp-sms.md) — an AAISP SMS receive hook
+and `sms_*` tools on the same gateway.
 
 Superseded: the original phases 3–5 (writes, WhatsApp, multi-account) are
 folded into the gateway plan — see [mcp-gateway.md](mcp-gateway.md) for the

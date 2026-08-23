@@ -9,7 +9,7 @@
 // on Google's top-level redirect back to /callback).
 
 import { escapeHtml } from "@toolbox/mcp-shared";
-import { page } from "./html";
+import { page, pill } from "./html";
 import { handleWhatsappManage } from "./manage-whatsapp";
 import { encryptJson, decryptJson, importVaultKey, randomToken, signToken, verifyToken } from "./crypto";
 import { vaultFor, type Env } from "./env";
@@ -113,31 +113,69 @@ function renderAuditRows(audit: AuditEntry[]): string {
   return audit
     .map(
       (entry) => `<tr>
-      <td class="muted">${escapeHtml(new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19))}</td>
-      <td>${escapeHtml(entry.tool)}</td>
-      <td>${escapeHtml(entry.status)}</td>
-      <td class="muted">${escapeHtml(entry.summary)}</td>
+      <td class="muted mono">${escapeHtml(new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19))}</td>
+      <td class="mono">${escapeHtml(entry.tool)}</td>
+      <td>${pill(entry.status, entry.status === "ok" ? "ok" : "err")}</td>
+      <td class="muted mono">${escapeHtml(entry.summary)}</td>
     </tr>`,
     )
     .join("\n");
+}
+
+// Which linked account a service resolves to, as a control. Gmail and Drive
+// share the "google" namespace, so this is the difference between "my mail
+// account" and "my Drive account" without linking anything twice.
+function renderAccountPicker(
+  svc: { id: string; accountService?: string },
+  accounts: AccountInfo[],
+  serviceAccounts: Record<string, string>,
+): string {
+  if (!svc.accountService) return `<span class="muted">—</span>`;
+  const candidates = accounts.filter((acct) => acct.service === svc.accountService);
+  if (candidates.length === 0) return `<span class="muted">not linked</span>`;
+  const fallback = candidates.find((acct) => acct.isDefault)?.label ?? candidates[0]!.label;
+  const pinned = serviceAccounts[svc.id] ?? "";
+  // Access level rides along in the label: pinning a service to a read-only
+  // grant is legitimate, but it should not be a surprise when a write fails.
+  const describe = (acct: AccountInfo) =>
+    acct.service === GOOGLE_ACCOUNT_SERVICE && !scopesAllowWrite(acct.scopes)
+      ? `${acct.label} (read-only)`
+      : acct.label;
+  const options = [
+    `<option value=""${pinned === "" ? " selected" : ""}>default — ${escapeHtml(fallback)}</option>`,
+    ...candidates.map(
+      (acct) =>
+        `<option value="${escapeHtml(acct.label)}"${acct.label === pinned ? " selected" : ""}>${escapeHtml(describe(acct))}</option>`,
+    ),
+  ].join("");
+  return `<form method="post" action="/manage/service-account" class="field">
+    <input type="hidden" name="service" value="${escapeHtml(svc.id)}">
+    <select name="label" aria-label="Account for ${escapeHtml(svc.id)}">${options}</select>
+    <button type="submit">Use</button>
+  </form>`;
 }
 
 function renderManagePage(
   email: string,
   services: Record<string, boolean>,
   accounts: AccountInfo[],
+  serviceAccounts: Record<string, string>,
   audit: AuditEntry[],
 ): string {
   const serviceRows = SERVICES.map((svc) => {
     const enabled = services[svc.id] ?? svc.defaultEnabled;
-    const action = enabled ? "Disable" : "Enable";
     return `<tr>
-      <td><strong>${escapeHtml(svc.title)}</strong><div class="muted">${escapeHtml(svc.description)}</div></td>
-      <td>${enabled ? "enabled" : "disabled"}</td>
+      <td>
+        <strong>${escapeHtml(svc.title)}</strong>
+        ${svc.id === "whatsapp" ? ` <a href="/manage/whatsapp">bridge&nbsp;→</a>` : ""}
+        <div class="muted">${escapeHtml(svc.description)}</div>
+      </td>
+      <td>${enabled ? pill("enabled", "ok") : pill("off")}</td>
+      <td>${renderAccountPicker(svc, accounts, serviceAccounts)}</td>
       <td><form method="post" action="/manage/services">
         <input type="hidden" name="service" value="${escapeHtml(svc.id)}">
         <input type="hidden" name="enabled" value="${enabled ? "0" : "1"}">
-        <button type="submit">${action}</button>
+        <button type="submit">${enabled ? "Disable" : "Enable"}</button>
       </form></td>
     </tr>`;
   }).join("\n");
@@ -149,7 +187,7 @@ function renderManagePage(
           .map(
             (acct) => `<tr>
       <td>${escapeHtml(acct.service)}</td>
-      <td>${escapeHtml(acct.label)}${acct.isDefault ? " <strong>(default)</strong>" : ""}</td>
+      <td class="mono">${escapeHtml(acct.label)}${acct.isDefault ? ` ${pill("default")}` : ""}</td>
       <td>${
         // Google links carry granted scopes; FreeAgent grants are always
         // full-access upstream (write tools are gated by the connector tier).
@@ -159,7 +197,7 @@ function renderManagePage(
             : "read-only"
           : "full"
       }</td>
-      <td>
+      <td class="actions" style="margin:0">
         ${
           acct.isDefault
             ? ""
@@ -167,59 +205,74 @@ function renderManagePage(
           <input type="hidden" name="action" value="default">
           <input type="hidden" name="service" value="${escapeHtml(acct.service)}">
           <input type="hidden" name="label" value="${escapeHtml(acct.label)}">
-          <button type="submit">Set default</button>
+          <button type="submit">Make default</button>
         </form>`
         }
         <form method="post" action="/manage/accounts">
           <input type="hidden" name="action" value="unlink">
           <input type="hidden" name="service" value="${escapeHtml(acct.service)}">
           <input type="hidden" name="label" value="${escapeHtml(acct.label)}">
-          <button type="submit">Unlink</button>
+          <button type="submit" class="danger">Unlink</button>
         </form>
       </td>
     </tr>`,
           )
           .join("\n");
 
-  return `<h1>gateway</h1>
-<p>Signed in as <strong>${escapeHtml(email)}</strong>.
-<form method="post" action="/manage/logout"><button type="submit">Sign out</button></form></p>
-<p class="muted">Changes affect which tools the connector offers; active conversations pick them up
-when they next check, new conversations immediately.</p>
-<h2>Services</h2>
-<table><tr><th>Service</th><th>Status</th><th></th></tr>
-${serviceRows}
-</table>
-<h2>Linked accounts</h2>
-<table><tr><th>Service</th><th>Account</th><th>Access</th><th></th></tr>
-${accountRows}
-</table>
-<div class="linkbox">
-  <form method="post" action="/manage/link">
-    <label><input type="checkbox" name="write" value="1"> include write scopes (drafts, labels, filters, Drive edits)</label>
-    <button type="submit">Link a Google account</button>
-  </form>
-  <div class="muted">Opens Google's consent screen; the account you approve there becomes the
-  linked account (it must be on the gateway's allowlist). Relinking an account replaces its
-  stored grant — use it to change access level.</div>
-</div>
-<div class="linkbox">
-  <form method="post" action="/manage/link-freeagent">
-    <button type="submit">Link the FreeAgent account</button>
-  </form>
-  <div class="muted">Opens FreeAgent's sign-in; only the allowlisted company can complete the
-  link. Relinking replaces the stored grant.</div>
-</div>
-<div class="linkbox">
-  <a href="/manage/whatsapp">WhatsApp bridge</a>
-  <div class="muted">Pair the cloud device, check sync health, import history. WhatsApp is not an
-  OAuth account, so it is paired there rather than linked above.</div>
-</div>
-<h2>Audit log</h2>
-<p class="muted">The most recent write-tool calls (including refused and failed ones).</p>
-<table><tr><th>Time (UTC)</th><th>Tool</th><th>Status</th><th>Arguments</th></tr>
-${renderAuditRows(audit)}
-</table>`;
+  return `<section class="card">
+  <h2>Services</h2>
+  <p class="hint">What the connector offers. New conversations see a change immediately; an open
+  one picks it up when it next calls a tool. <strong>Account</strong> is which linked account the
+  service resolves to when a tool is called without one — Gmail and Drive share a single Google
+  link but need not share an account.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Service</th><th>Status</th><th>Account</th><th></th></tr></thead>
+    <tbody>${serviceRows}</tbody>
+  </table></div>
+</section>
+
+<section class="card">
+  <h2>Linked accounts</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Namespace</th><th>Account</th><th>Access</th><th></th></tr></thead>
+    <tbody>${accountRows}</tbody>
+  </table></div>
+  <div class="actions">
+    <form method="post" action="/manage/link" class="field">
+      <label class="check"><input type="checkbox" name="write" value="1"> write scopes</label>
+      <button type="submit" class="primary">Link a Google account</button>
+    </form>
+    <form method="post" action="/manage/link-freeagent">
+      <button type="submit">Link FreeAgent</button>
+    </form>
+  </div>
+  <p class="hint" style="margin-bottom:0">Google's consent screen decides the account, and it must be
+  on the gateway's allowlist; write scopes cover drafts, labels, filters and Drive edits. FreeAgent
+  admits only the configured company. Relinking replaces a stored grant — that is how you change
+  access level. WhatsApp is not an OAuth account: it is <a href="/manage/whatsapp">paired</a>
+  instead.</p>
+</section>
+
+<section class="card">
+  <h2>Audit log</h2>
+  <p class="hint">Every write-tool call, including the ones refused for want of a confirmation and
+  the ones the upstream rejected.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Time (UTC)</th><th>Tool</th><th>Status</th><th>Arguments</th></tr></thead>
+    <tbody>${renderAuditRows(audit)}</tbody>
+  </table></div>
+</section>`;
+}
+
+/** The header's right-hand side once a session exists. */
+function whoBar(email: string): string {
+  return `<span>${escapeHtml(email)}</span>
+    <form method="post" action="/manage/logout"><button type="submit">Sign out</button></form>`;
+}
+
+/** A bare outcome page — expired flows, upstream refusals, callback errors. */
+function messagePage(message: string, status = 400): Response {
+  return page("gateway", `<section class="card"><p class="warn">${message}</p></section>`, { status });
 }
 
 async function handleLogin(env: Env, url: URL): Promise<Response> {
@@ -252,13 +305,13 @@ export async function handleManageCallback(
 ): Promise<Response> {
   const state = await verifyToken<LoginState>(env.COOKIE_SECRET, stateToken);
   if (!state || state.kind !== "manage-login" || state.exp < Date.now()) {
-    return page("gateway", "<p>Sign-in expired — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Sign-in expired — <a href=\"/manage\">try again</a>.", 400);
   }
   if (getCookie(request, NONCE_COOKIE) !== state.nonce) {
-    return page("gateway", "<p>Sign-in did not originate here — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Sign-in did not originate here — <a href=\"/manage\">try again</a>.", 400);
   }
   const code = url.searchParams.get("code");
-  if (!code) return page("gateway", "<p>Google returned no code.</p>", 400);
+  if (!code) return messagePage("Google returned no code.", 400);
 
   let email: string;
   try {
@@ -271,10 +324,10 @@ export async function handleManageCallback(
     email = await fetchUserEmail(accessToken);
   } catch (err) {
     const message = err instanceof UpstreamError ? err.message : "sign-in failed";
-    return page("gateway", `<p>${escapeHtml(message)}</p>`, 502);
+    return messagePage(`${escapeHtml(message)}`, 502);
   }
   if (!emailAllowed(email, env.ALLOWED_EMAILS)) {
-    return page("gateway", "<p>This gateway is not available for your Google account.</p>", 403);
+    return messagePage("This gateway is not available for your Google account.", 403);
   }
 
   const session = await signToken(env.COOKIE_SECRET, {
@@ -326,22 +379,22 @@ export async function handleLinkCallback(
 ): Promise<Response> {
   const state = await verifyToken<LinkState>(env.COOKIE_SECRET, stateToken);
   if (!state || state.kind !== "link" || state.exp < Date.now()) {
-    return page("gateway", "<p>Link flow expired — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Link flow expired — <a href=\"/manage\">try again</a>.", 400);
   }
   if (getCookie(request, NONCE_COOKIE) !== state.nonce) {
-    return page("gateway", "<p>Link did not originate here — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Link did not originate here — <a href=\"/manage\">try again</a>.", 400);
   }
   // The vault being written must belong to the live manage session.
   const owner = await sessionEmail(request, env);
   if (!owner || owner !== state.owner) {
-    return page("gateway", "<p>Manage session expired — <a href=\"/manage\">sign in and retry</a>.</p>", 403);
+    return messagePage("Manage session expired — <a href=\"/manage\">sign in and retry</a>.", 403);
   }
   const upstreamError = url.searchParams.get("error");
   if (upstreamError) {
-    return page("gateway", `<p>Google authorization failed: ${escapeHtml(upstreamError)}</p>`, 403);
+    return messagePage(`Google authorization failed: ${escapeHtml(upstreamError)}`, 403);
   }
   const code = url.searchParams.get("code");
-  if (!code) return page("gateway", "<p>Google returned no code.</p>", 400);
+  if (!code) return messagePage("Google returned no code.", 400);
 
   const requested = state.write ? GOOGLE_WRITE_SCOPES : GOOGLE_READ_SCOPES;
   let label: string;
@@ -360,12 +413,12 @@ export async function handleLinkCallback(
     label = (await fetchUserEmail(result.tokens.accessToken)).trim().toLowerCase();
   } catch (err) {
     const message = err instanceof UpstreamError ? err.message : "link failed";
-    return page("gateway", `<p>${escapeHtml(message)}</p>`, 502);
+    return messagePage(`${escapeHtml(message)}`, 502);
   }
   // The linked account itself must be allowlisted, not just the owner.
   if (!emailAllowed(label, env.ALLOWED_EMAILS)) {
     await revokeToken(refreshToken);
-    return page("gateway", "<p>That Google account is not on this gateway's allowlist.</p>", 403);
+    return messagePage("That Google account is not on this gateway's allowlist.", 403);
   }
 
   const key = await importVaultKey(env.VAULT_KEY);
@@ -410,21 +463,21 @@ export async function handleFreeagentLinkCallback(
 ): Promise<Response> {
   const state = await verifyToken<FreeagentLinkState>(env.COOKIE_SECRET, stateToken);
   if (!state || state.kind !== "link-freeagent" || state.exp < Date.now()) {
-    return page("gateway", "<p>Link flow expired — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Link flow expired — <a href=\"/manage\">try again</a>.", 400);
   }
   if (getCookie(request, NONCE_COOKIE) !== state.nonce) {
-    return page("gateway", "<p>Link did not originate here — <a href=\"/manage\">try again</a>.</p>", 400);
+    return messagePage("Link did not originate here — <a href=\"/manage\">try again</a>.", 400);
   }
   const owner = await sessionEmail(request, env);
   if (!owner || owner !== state.owner) {
-    return page("gateway", "<p>Manage session expired — <a href=\"/manage\">sign in and retry</a>.</p>", 403);
+    return messagePage("Manage session expired — <a href=\"/manage\">sign in and retry</a>.", 403);
   }
   const upstreamError = url.searchParams.get("error");
   if (upstreamError) {
-    return page("gateway", `<p>FreeAgent authorization failed: ${escapeHtml(upstreamError)}</p>`, 403);
+    return messagePage(`FreeAgent authorization failed: ${escapeHtml(upstreamError)}`, 403);
   }
   const code = url.searchParams.get("code");
-  if (!code) return page("gateway", "<p>FreeAgent returned no code.</p>", 400);
+  if (!code) return messagePage("FreeAgent returned no code.", 400);
 
   let tokens;
   try {
@@ -436,13 +489,13 @@ export async function handleFreeagentLinkCallback(
     });
   } catch (err) {
     const message = err instanceof FreeAgentUpstreamError ? err.message : "link failed";
-    return page("gateway", `<p>${escapeHtml(message)}</p>`, 502);
+    return messagePage(`${escapeHtml(message)}`, 502);
   }
   // Owner gate: the authorizing FreeAgent user must belong to the configured
   // company. A stranger's login succeeds upstream but no account is linked.
   const subdomain = await fetchCompanySubdomain(staticClient(tokens.accessToken));
   if (!subdomain || subdomain !== env.ALLOWED_COMPANY) {
-    return page("gateway", "<p>That FreeAgent account is not this gateway's company.</p>", 403);
+    return messagePage("That FreeAgent account is not this gateway's company.", 403);
   }
 
   const key = await importVaultKey(env.VAULT_KEY);
@@ -473,13 +526,34 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
     if (!email) {
       return page(
         "gateway",
-        `<h1>gateway</h1><p><a href="/manage/login">Sign in with Google</a> to manage services and accounts.</p>`,
+        `<section class="card">
+          <h2>Sign in</h2>
+          <p class="hint">Services, linked accounts and the WhatsApp bridge are managed here.</p>
+          <div class="actions"><a class="btn" href="/manage/login">Sign in with Google</a></div>
+        </section>`,
       );
     }
     const vault = vaultFor(env, email);
     const config = await vault.getCatalogConfig(defaultServiceToggles());
     const audit = await vault.listAudit(50);
-    return page("gateway", renderManagePage(email, config.services, config.accounts, audit));
+    return page(
+      "gateway",
+      renderManagePage(email, config.services, config.accounts, config.serviceAccounts, audit),
+      { who: whoBar(email) },
+    );
+  }
+
+  if (url.pathname === "/manage/service-account" && request.method === "POST") {
+    if (!email) return new Response("not signed in", { status: 401 });
+    const form = await request.formData();
+    const service = form.get("service");
+    const label = form.get("label");
+    const def = SERVICES.find((svc) => svc.id === service);
+    if (typeof service !== "string" || !def?.accountService || typeof label !== "string") {
+      return new Response("unknown service", { status: 400 });
+    }
+    await vaultFor(env, email).setServiceAccount(service, def.accountService, label);
+    return new Response(null, { status: 303, headers: { location: "/manage" } });
   }
 
   if (url.pathname === "/manage/services" && request.method === "POST") {

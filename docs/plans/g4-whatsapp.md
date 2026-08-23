@@ -47,7 +47,8 @@ on demand, which is why the first send in a while takes a few seconds.
 | `whatsapp/src/pbkdf2.ts` | PBKDF2-HMAC-SHA256, for the iteration count workerd refuses |
 | `shared/src/whatsapp-api.ts` | the gateway ↔ bridge contract |
 | `gateway/src/whatsapp.ts` | the MCP tools |
-| `gateway/src/manage-whatsapp.ts` | `/manage/whatsapp` |
+| `gateway/src/manage-whatsapp.ts` | `/manage/whatsapp`: QR pairing, health, store preview, import |
+| `gateway/src/qr.ts` | ISO 18004 byte-mode level-L encoder → inline SVG, no dependency |
 | `scripts/wa-import.py` | one-off history copy from the local bridge |
 
 ## Things that are load-bearing and non-obvious
@@ -75,7 +76,19 @@ on demand, which is why the first send in a while takes a few seconds.
   past the marker before closing.
 - **515 after pairing is success.** WhatsApp confirms the pair, then tears the
   stream down with "restart required"; the session only becomes usable on the
-  reconnect that follows.
+  reconnect that follows. Both pairing paths share that tail.
+- **The client identity is negotiable on the QR path and not on the code
+  path.** `link_code_companion_reg` answers an unrecognised `browser` tuple
+  with `<error code="400" text="bad-request"/>`, which is what a whole
+  afternoon of "couldn't link device" turned out to be; QR registration
+  accepts a custom name, and that name is what WhatsApp → Linked devices then
+  displays. So the QR flow sends `["Mac OS", <device name>, "14.4.1"]` and the
+  code flow sends Baileys' stock tuple. Only the *registration* socket matters
+  — ordinary reconnects log in as the device that already exists.
+- **QR refs run out.** Baileys asks WhatsApp for five, rotates one every
+  `qrTimeout`, and then closes with 408 "QR refs attempts ended". At 50 s a ref
+  that is a little over four minutes, which is what sets the length of the
+  pairing window.
 - **`sock.end(undefined)`, never `logout()`.** The latter unlinks the device
   server-side. Consequently `unpair()` only wipes local state — the device also
   has to be removed on the phone, or orphan "linked device" entries accumulate.
@@ -97,10 +110,13 @@ on demand, which is why the first send in a while takes a few seconds.
 | B4 media | download done (WebCrypto, integrity-checked); R2 offload not built |
 | B5 history import | done; ran against production |
 | B6 send | text and files done; audio must arrive pre-encoded |
+| B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
-Waiting on a human with the phone: request a code on `/manage/whatsapp`, type
-it into WhatsApp → Linked devices → Link with phone number. Everything up to
-that point is verified in production; nothing past it can be.
+Paired 2026-08-23 and syncing on the ten-minute alarm. The pairing that
+succeeded used the phone-code path, before the QR path existed; the QR path is
+verified as far as production can take it without unpairing a working device —
+routes, rendering and the refusal-while-paired guard — and the encoder itself
+is checked against `qrencode` and decoded back by zbar in the test suite.
 
 ## Not built, deliberately
 
@@ -114,6 +130,20 @@ that point is verified in production; nothing past it can be.
 - **Group metadata.** `cachedGroupMetadata` is unset, so group sends pay a
   metadata query. Groups are named from `chats.upsert`; a group we have never
   seen named appears as its JID.
+- **Member tags.** WhatsApp's per-group self-assigned label ("Share your role,
+  title or how you're known in this group", 30 characters, shown under your
+  name to everyone in that group) cannot be set from here. Baileys 7.0.0-rc14
+  has no API for it: `Socket/groups.js` exposes subject, description, settings,
+  ephemeral, invites and participants, and nothing else. The WAProto knows the
+  feature exists but only as a capability flag
+  (`DeviceCapabilities.MemberNameTagPrimarySupport`), which is a receiver-side
+  advertisement, not a setter. The operation is almost certainly a `w:mex`
+  GraphQL mutation, and MEX mutations are addressed by numeric query IDs minted
+  by WhatsApp and published only inside the WhatsApp Web JS bundle — so
+  supporting it means lifting an ID out of that bundle and re-lifting it every
+  time they rebuild. Not worth it for a 30-character label. The bridge's own
+  name in **Linked devices** is the supported equivalent, and it is
+  configurable on `/manage/whatsapp`.
 
 ## Accepted risks
 

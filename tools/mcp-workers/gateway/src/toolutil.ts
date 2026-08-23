@@ -12,7 +12,7 @@ import { UpstreamError } from "./google";
 export const ACCOUNT_PARAM = z
   .string()
   .optional()
-  .describe("Linked account to use (an email label from list_accounts); omit for the default account");
+  .describe("Linked account to use (an email label from gateway_list_accounts); omit for the default account");
 
 export const READ_ONLY = { readOnlyHint: true } as const;
 export const WRITE = { readOnlyHint: false } as const;
@@ -28,7 +28,7 @@ export class NoLinkedAccountError extends Error {
   constructor(service: string, label?: string) {
     super(
       label
-        ? `no linked ${service} account labelled "${label}" — check list_accounts, or link it on the management page`
+        ? `no linked ${service} account labelled "${label}" — check gateway_list_accounts, or link it on the management page`
         : `no ${service} account is linked yet — link one on the management page`,
     );
   }

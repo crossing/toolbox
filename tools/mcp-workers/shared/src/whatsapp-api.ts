@@ -34,7 +34,17 @@ export interface BridgeStatus {
   me: { id: string; name: string | null } | null;
   /** Pending pairing code, if one was requested and has not expired. */
   pendingPairing: { phoneNumber: string; code: string; expiresAt: number } | null;
+  /**
+   * A live linking QR, described but not quoted. The string itself only comes
+   * back from `pairingQr()`, so the page that draws it asks for it and nothing
+   * else — including the MCP status tool — ever carries it.
+   */
+  pendingQr: { issuedAt: number; expiresAt: number } | null;
+  /** What WhatsApp → Linked devices will call this bridge. */
+  deviceName: string;
   connection: "idle" | "connecting" | "open" | "closing";
+  autoSync: boolean;
+  verbose: boolean;
   lastConnectedAt: number | null;
   lastDrainAt: number | null;
   lastError: string | null;
@@ -164,6 +174,18 @@ export interface WhatsAppBridgeApi {
    * run against a paired session.
    */
   preflight(): Promise<PreflightResult>;
+  /**
+   * Open a socket and hold it while WhatsApp issues linking QRs. Preferred
+   * over the phone-code path: it is the flow WhatsApp itself treats as
+   * ordinary, and it is the only one where a client may name itself.
+   */
+  beginQrPairing(): Promise<{ expiresAt: number }>;
+  /** The live QR string, for whoever is drawing it. Null once it has expired. */
+  pairingQr(): Promise<{ qr: string; expiresAt: number } | null>;
+  /** Drop an attempt nobody completed, instead of waiting out the window. */
+  cancelPairing(): Promise<{ ok: boolean }>;
+  /** The name a QR pairing registers; takes effect at the next pairing. */
+  setDeviceName(name: string): Promise<{ deviceName: string }>;
   requestPairingCode(phoneNumber: string): Promise<PairingResult>;
   unpair(): Promise<{ ok: boolean }>;
   syncNow(): Promise<SyncResult>;

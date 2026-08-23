@@ -65,6 +65,18 @@ const IMPORT_CODE_TTL_MS = 30 * 60 * 1000;
 // it, and find Linked devices.
 const PAIRING_WINDOW_MS = 5 * 60 * 1000;
 
+// How long each linking QR is displayed before Baileys asks WhatsApp for the
+// next ref. WhatsApp hands out five, so this also sets the length of the whole
+// QR window: five rotations at 50 s is a little over four minutes, just inside
+// PAIRING_WINDOW_MS.
+const QR_ROTATE_MS = 50 * 1000;
+
+/** What WhatsApp → Linked devices calls this bridge, unless told otherwise. */
+const DEFAULT_DEVICE_NAME = "Xing's Assistant";
+
+/** Device names have to be legible in a phone's UI, not expressive. */
+const MAX_DEVICE_NAME = 40;
+
 /** Baileys re-buffers events right after the drain marker; wait it out. */
 const POST_DRAIN_SETTLE_MS = 3000;
 
@@ -93,6 +105,10 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   private busySince = 0;
   /** The detached tail of a pairing attempt, kept referenced while it runs. */
   private pairing: Promise<void> | null = null;
+  /** The socket that tail is watching, so an abandoned attempt can be dropped. */
+  private pairingSession: Session | null = null;
+  /** Set by cancelPairing so the tail knows the close was ours. */
+  private pairingCancelled = false;
 
   constructor(ctx: DurableObjectState, env: BridgeEnv) {
     super(ctx, env);
@@ -158,13 +174,19 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   async status(): Promise<BridgeStatus> {
     const counts = this.store.counts();
     const pending = this.getMeta<BridgeStatus["pendingPairing"]>("pendingPairing", null);
+    const qr = this.pendingQr();
     return {
       paired: this.auth.isPaired(),
       me: this.auth.state.creds.me
         ? { id: this.auth.state.creds.me.id, name: this.auth.state.creds.me.name ?? null }
         : null,
       pendingPairing: pending && pending.expiresAt > Date.now() ? pending : null,
+      // Described, never quoted: the string is only handed out by pairingQr().
+      pendingQr: qr ? { issuedAt: qr.issuedAt, expiresAt: qr.expiresAt } : null,
+      deviceName: this.deviceName(),
       connection: this.connectionState(),
+      autoSync: this.getMeta<boolean>("autoSync", false),
+      verbose: this.getMeta<boolean>("verbose", false),
       lastConnectedAt: this.getMeta<number | null>("lastConnectedAt", null),
       lastDrainAt: this.getMeta<number | null>("lastDrainAt", null),
       lastError: this.getMeta<string | null>("lastError", null),
@@ -306,12 +328,56 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     console.log(`[bridge] ${entry}`);
   }
 
-  private async openSession(counters: { messages: number; chats: number }): Promise<Session> {
+  // `qr` is only ever set for the socket that registers a new device: that is
+  // the one WhatsApp takes the client identity from, and the only one whose
+  // QR events anyone wants recorded.
+  private async openSession(
+    counters: { messages: number; chats: number },
+    options: { qr?: boolean } = {},
+  ): Promise<Session> {
     return new Session({
       ...this.makeHandlers(counters),
       version: await this.waVersion(),
       verbose: this.getMeta<boolean>("verbose", false),
+      ...(options.qr
+        ? {
+            qrTimeoutMs: QR_ROTATE_MS,
+            browser: ["Mac OS", this.deviceName(), "14.4.1"] as [string, string, string],
+            onQr: (qr: string) => {
+              this.setMeta("pendingQr", {
+                qr,
+                issuedAt: Date.now(),
+                expiresAt: Date.now() + QR_ROTATE_MS,
+              });
+            },
+          }
+        : {}),
     });
+  }
+
+  private deviceName(): string {
+    return this.getMeta<string>("deviceName", DEFAULT_DEVICE_NAME);
+  }
+
+  private pendingQr(): { qr: string; issuedAt: number; expiresAt: number } | null {
+    const stored = this.getMeta<{ qr: string; issuedAt: number; expiresAt: number } | null>(
+      "pendingQr",
+      null,
+    );
+    return stored && stored.expiresAt > Date.now() ? stored : null;
+  }
+
+  async setDeviceName(name: string): Promise<{ deviceName: string }> {
+    const cleaned = name.replace(/\s+/g, " ").trim().slice(0, MAX_DEVICE_NAME);
+    const deviceName = cleaned === "" ? DEFAULT_DEVICE_NAME : cleaned;
+    this.setMeta("deviceName", deviceName);
+    this.log("info", `device name for the next pairing: ${deviceName}`);
+    return { deviceName };
+  }
+
+  async pairingQr(): Promise<{ qr: string; expiresAt: number } | null> {
+    const pending = this.pendingQr();
+    return pending ? { qr: pending.qr, expiresAt: pending.expiresAt } : null;
   }
 
   async setUseLatestVersion(enabled: boolean): Promise<{ useLatestVersion: boolean }> {
@@ -352,6 +418,65 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     }
   }
 
+  // The preferred way in. WhatsApp treats a QR link as the ordinary case —
+  // no phone number is disclosed to the bridge, the client may name itself,
+  // and there is nothing to mistype. The socket has to stay open while the
+  // codes rotate, which is what keeps this object resident.
+  async beginQrPairing(): Promise<{ expiresAt: number }> {
+    if (this.inProgress) throw new Error("the bridge is busy — try again in a minute");
+    if (this.auth.isPaired()) throw new Error("a device is already paired; unpair it first");
+
+    // Any earlier attempt left creds.me set, which would send this connection
+    // down the login path with an identity WhatsApp never registered.
+    this.auth.reset();
+    this.setMeta("pendingQr", null);
+    this.setMeta("pendingPairing", null);
+    this.pairingCancelled = false;
+    this.beginOperation();
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setConnection("connecting");
+      this.log("info", `QR pairing: opening a socket as "${this.deviceName()}"`);
+      session = await this.openSession(counters, { qr: true });
+      // The first QR arrives with the same event the phone-code path waits on.
+      await session.waitForPairingWindow(90_000);
+      const expiresAt = Date.now() + PAIRING_WINDOW_MS;
+      this.log("info", "QR pairing: code displayed, waiting for the phone");
+      this.pairingSession = session;
+      this.pairing = this.finishPairing(session, counters).finally(() => {
+        this.busy = false;
+        this.pairing = null;
+        this.pairingSession = null;
+      });
+      return { expiresAt };
+    } catch (err) {
+      this.busy = false;
+      this.setConnection("idle");
+      this.setMeta("pendingQr", null);
+      this.setMeta("lastError", err instanceof Error ? err.message : String(err));
+      await session?.close();
+      throw err;
+    }
+  }
+
+  // Someone changed their mind, or the QR went stale while nobody was looking.
+  // Closing the socket resolves the detached tail's wait; the cancelled flag is
+  // what stops it filing that close as a failed pairing.
+  async cancelPairing(): Promise<{ ok: boolean }> {
+    const session = this.pairingSession;
+    this.pairingCancelled = true;
+    this.pairingSession = null;
+    this.setMeta("pendingQr", null);
+    this.setMeta("pendingPairing", null);
+    if (session) await session.close();
+    if (!this.auth.isPaired()) this.auth.reset();
+    this.busy = false;
+    this.setConnection("idle");
+    this.log("info", "pairing attempt cancelled");
+    return { ok: true };
+  }
+
   async requestPairingCode(phoneNumber: string): Promise<PairingResult> {
     if (this.inProgress) throw new Error("the bridge is busy — try again in a minute");
     if (this.auth.isPaired()) throw new Error("a device is already paired; unpair it first");
@@ -362,6 +487,8 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     // previously abandoned attempt would send the next connect down the login
     // path with an unregistered identity. Always start from a clean identity.
     this.auth.reset();
+    this.setMeta("pendingQr", null);
+    this.pairingCancelled = false;
     this.beginOperation();
     const counters = { messages: 0, chats: 0 };
     let session: Session | null = null;
@@ -380,9 +507,11 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       // The rest happens on WhatsApp's schedule — minutes, maybe. Hand the
       // code back now and let the socket run on; an open outbound socket keeps
       // this object resident.
+      this.pairingSession = session;
       this.pairing = this.finishPairing(session, counters).finally(() => {
         this.busy = false;
         this.pairing = null;
+        this.pairingSession = null;
       });
       return { code, phoneNumber: digits, expiresAt };
     } catch (err) {
@@ -413,11 +542,15 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         // and colliding with the next attempt.
         await session.close();
       }
+      // cancelPairing() closed the socket on purpose; it has already tidied up.
+      if (this.pairingCancelled) return;
+
       const code = session.lastDisconnectCode;
       if (code !== DisconnectReason.restartRequired) {
         const detail = `pairing did not complete (${code ?? "no code"}: ${session.lastDisconnectMessage ?? "closed"})`;
         this.setMeta("lastError", detail);
         this.setMeta("pendingPairing", null);
+        this.setMeta("pendingQr", null);
         if (!this.auth.isPaired()) this.auth.reset();
         this.recordCycle({ startedAt, endedAt: Date.now(), outcome: "error", messages: 0, chats: 0, detail });
         return;
@@ -433,6 +566,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       try {
         await second.waitForOpen(90_000);
         this.setMeta("pendingPairing", null);
+        this.setMeta("pendingQr", null);
         this.setMeta("lastConnectedAt", Date.now());
         this.setMeta("lastError", null);
         this.setConnection("open");
@@ -469,6 +603,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     }
     this.auth.reset();
     this.setMeta("pendingPairing", null);
+    this.setMeta("pendingQr", null);
     this.setMeta("lastError", null);
     this.setMeta("autoSync", false);
     await this.ctx.storage.deleteAlarm();
