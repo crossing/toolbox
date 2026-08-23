@@ -85,6 +85,18 @@ on demand, which is why the first send in a while takes a few seconds.
   displays. So the QR flow sends `["Mac OS", <device name>, "14.4.1"]` and the
   code flow sends Baileys' stock tuple. Only the *registration* socket matters
   — ordinary reconnects log in as the device that already exists.
+- **`creds.registered` is a phone-code artefact, not a pairing flag.** Baileys
+  sets it in exactly one place, the `link_code_companion_reg` notification
+  handler in `Socket/messages-recv.js`. A QR pairing never sets it, so a
+  `isPaired()` resting on it reports a perfectly good device as unpaired — and
+  because `alarm()` and every write tool consult that predicate, the bridge
+  then skips every scheduled cycle in silence while looking healthy. The honest
+  signal is `creds.account`, the signed ADV device identity that
+  `configureSuccessfulPairing` returns on `pair-success` for both paths and
+  never writes speculatively. `creds.me` alone is not enough either:
+  `requestPairingCode` writes it from the phone number before anything is
+  confirmed. Found by pairing over QR for the first time — the failure is
+  invisible until then.
 - **QR refs run out.** Baileys asks WhatsApp for five, rotates one every
   `qrTimeout`, and then closes with 408 "QR refs attempts ended". At 50 s a ref
   that is a little over four minutes, which is what sets the length of the
@@ -112,11 +124,11 @@ on demand, which is why the first send in a while takes a few seconds.
 | B6 send | text and files done; audio must arrive pre-encoded |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
-Paired 2026-08-23 and syncing on the ten-minute alarm. The pairing that
-succeeded used the phone-code path, before the QR path existed; the QR path is
-verified as far as production can take it without unpairing a working device —
-routes, rendering and the refusal-while-paired guard — and the encoder itself
-is checked against `qrencode` and decoded back by zbar in the test suite.
+Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the
+ten-minute alarm: scan, 515, reconnect, drain of 9 queued messages, then a
+manual cycle with an empty queue and no error. The encoder is checked against
+`qrencode` and decoded back by zbar in the test suite. That first real QR
+pairing is what turned up the `creds.registered` trap above.
 
 ## Not built, deliberately
 

@@ -131,9 +131,25 @@ export function makeSqlAuthState(
   return {
     state,
     saveCreds,
-    // `registered` flips during pairing; `me` only exists once the device
-    // identity has been issued, so require both before trusting the session.
-    isPaired: () => Boolean(creds.registered && creds.me?.id),
+    // What "paired" means, precisely, because getting it wrong is silent.
+    //
+    // `me` alone will not do: `requestPairingCode` writes it from the phone
+    // number *before* anything is confirmed (Socket/socket.js), so an
+    // abandoned code attempt would look paired forever.
+    //
+    // `registered` will not do either, and this is the trap: Baileys sets it
+    // in exactly one place — the `link_code_companion_reg` notification
+    // handler (Socket/messages-recv.js) — so it is true after a phone-code
+    // pairing and false after a QR pairing, which is otherwise identical and
+    // just as usable. A predicate resting on it reports a perfectly good
+    // QR-linked device as unpaired, and then the alarm skips every cycle.
+    //
+    // `account` is the honest signal. It is the signed ADV device identity
+    // that `configureSuccessfulPairing` returns on `pair-success`
+    // (Utils/validate-connection.js) — the same stanza on both paths, and
+    // never written speculatively. `registered` stays in the disjunction only
+    // so a session paired before this was understood keeps working.
+    isPaired: () => Boolean(creds.me?.id && (creds.account || creds.registered)),
     reset: () => {
       sql.exec("DELETE FROM auth_keys");
       sql.exec("DELETE FROM auth_creds");

@@ -98,6 +98,26 @@ describe("makeSqlAuthState", () => {
     sql.close();
   });
 
+  it("counts a QR pairing as paired, and an abandoned code attempt as not", () => {
+    // Baileys sets `registered` in exactly one place — the
+    // link_code_companion_reg handler — so a QR-linked device never has it,
+    // and is every bit as paired. A predicate resting on it reports a working
+    // device as unpaired, and the sync alarm then skips every cycle in silence.
+    const qr = makeSqlAuthState(makeFakeSql());
+    qr.state.creds.me = { id: "44700000000:1@s.whatsapp.net", name: "test" };
+    qr.state.creds.account = { details: new Uint8Array([1]) };
+    expect(qr.state.creds.registered).toBe(false);
+    expect(qr.isPaired()).toBe(true);
+
+    // What `me` on its own cannot distinguish: requestPairingCode writes it
+    // from the phone number before WhatsApp has confirmed anything, so an
+    // attempt nobody completed must not read as paired.
+    const abandoned = makeSqlAuthState(makeFakeSql());
+    abandoned.state.creds.me = { id: "44700000000@s.whatsapp.net", name: "~" };
+    abandoned.state.creds.pairingCode = "ABCD1234";
+    expect(abandoned.isPaired()).toBe(false);
+  });
+
   it("reports pairing state and resets to a fresh identity", () => {
     const sql = makeFakeSql();
     const auth = makeSqlAuthState(sql);
