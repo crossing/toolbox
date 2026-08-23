@@ -41,12 +41,14 @@ export const DEFAULT_BROWSER: [string, string, string] = ["Mac OS", "Chrome", "1
  *
  *     { os: browser[0], platformType: getPlatformType(browser[1]), … }
  *
- * and **`os` is the string WhatsApp → Linked devices displays**. `browser[1]`
- * is only looked up in the `DeviceProps.PlatformType` enum, where anything
- * unrecognised silently falls through to CHROME. Putting a device name in the
- * second slot therefore does nothing at all except leave the first slot —
- * "Mac OS" — showing as the device's name, which is exactly what it looked
- * like when the QR pairing came back named after the platform.
+ * The phone renders that as "<platform label> (<os>)" — so `["Xing's
+ * Assistant", "Chrome", …]` shows up as **Google Chrome (Xing's Assistant)**.
+ * `os` is the only free text of the two: `browser[1]` is looked up in the
+ * `DeviceProps.PlatformType` enum, where anything unrecognised silently falls
+ * through to CHROME. Putting a device name in the second slot therefore does
+ * nothing at all except leave the first slot — "Mac OS" — as the parenthetical,
+ * which is exactly what it looked like when the first QR pairing came back
+ * named after the platform.
  *
  * `browser[2]` reaches nothing: the advertised app version comes from
  * `config.version`, which is md5'd separately.

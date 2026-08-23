@@ -80,9 +80,13 @@ on demand, which is why the first send in a while takes a few seconds.
 - **The client identity is negotiable on the QR path and not on the code
   path.** `link_code_companion_reg` answers an unrecognised `browser` tuple
   with `<error code="400" text="bad-request"/>`, which is what a whole
-  afternoon of "couldn't link device" turned out to be; QR registration
-  accepts a custom name, and that name is what WhatsApp → Linked devices then
-  displays. So the QR flow sends `["Mac OS", <device name>, "14.4.1"]` and the
+  afternoon of "couldn't link device" turned out to be; QR registration accepts
+  a custom name. It goes in `browser[0]`, not `browser[1]`: the registration
+  node is `{ os: browser[0], platformType: getPlatformType(browser[1]) }`, the
+  phone renders "<platform label> (<os>)", and `browser[1]` is only an enum
+  lookup that falls back to CHROME. `["Xing's Assistant", "Chrome", …]` shows
+  as **Google Chrome (Xing's Assistant)**; the name in the second slot shows as
+  nothing at all. So the QR flow sends `["Mac OS", <device name>, "14.4.1"]` and the
   code flow sends Baileys' stock tuple. Only the *registration* socket matters
   — ordinary reconnects log in as the device that already exists.
 - **`creds.registered` is a phone-code artefact, not a pairing flag.** Baileys
