@@ -117,9 +117,83 @@ interface Waiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * Waiting for connection milestones, against the state accumulated so far
+ * rather than only against future events.
+ *
+ * WhatsApp does not promise an order. A reconnecting device is told its
+ * offline queue is drained *before* Baileys reports the connection open:
+ *
+ *     connection.update: drained            12:57:02.259
+ *     connection.update: connection=open    12:57:02.346
+ *
+ * Code that awaits "open" and only then asks for "drained" misses the marker
+ * by 87ms and waits out its whole timeout for an event that already happened.
+ * So every update is merged into a running state, and a new waiter is tested
+ * against that state before it is queued.
+ */
+export class ConnectionWaiters {
+  private waiters: Waiter[] = [];
+  private state: Partial<ConnectionState> = {};
+
+  /** Merge an update and settle whatever it satisfies. */
+  settle(update: Partial<ConnectionState>): void {
+    Object.assign(this.state, update);
+    const closed = update.connection === "close";
+    for (const waiter of [...this.waiters]) {
+      if (waiter.check(this.state)) {
+        this.remove(waiter);
+        clearTimeout(waiter.timer);
+        waiter.resolve(this.state);
+      } else if (closed && waiter.rejectOnClose) {
+        this.remove(waiter);
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error(this.closeReason()));
+      }
+    }
+  }
+
+  /** Populated by the owner so a rejection can say why the socket went. */
+  closeReason: () => string = () => "connection closed";
+
+  wait(
+    check: (update: Partial<ConnectionState>) => boolean,
+    timeoutMs: number,
+    { rejectOnClose = true }: { rejectOnClose?: boolean } = {},
+  ): Promise<Partial<ConnectionState>> {
+    // Already true? Then there is nothing to wait for.
+    if (check(this.state)) return Promise.resolve(this.state);
+    if (rejectOnClose && this.state.connection === "close") {
+      return Promise.reject(new Error(this.closeReason()));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: Waiter = {
+        check,
+        resolve,
+        reject,
+        rejectOnClose,
+        timer: setTimeout(() => {
+          this.remove(waiter);
+          reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for WhatsApp`));
+        }, timeoutMs),
+      };
+      this.waiters.push(waiter);
+    });
+  }
+
+  cancelAll(): void {
+    for (const waiter of this.waiters) clearTimeout(waiter.timer);
+    this.waiters = [];
+  }
+
+  private remove(waiter: Waiter): void {
+    this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
+  }
+}
+
 export class Session {
   readonly sock: ReturnType<typeof makeWASocket>;
-  private waiters: Waiter[] = [];
+  private waiters = new ConnectionWaiters();
   private ended = false;
   /** Populated when WhatsApp tears the stream down; a Boom status code. */
   lastDisconnectCode: number | null = null;
@@ -128,6 +202,8 @@ export class Session {
   offlineCount: number | null = null;
 
   constructor(private handlers: SessionHandlers) {
+    this.waiters.closeReason = () =>
+      `connection closed (${this.lastDisconnectCode ?? "?"}: ${this.lastDisconnectMessage ?? "no reason"})`;
     handlers.log("info", `opening socket with version ${handlers.version ? handlers.version.join(".") : "baileys default"}`);
     this.sock = makeWASocket({
       auth: handlers.auth.state,
@@ -176,7 +252,7 @@ export class Session {
         this.lastDisconnectCode = err?.output?.statusCode ?? null;
         this.lastDisconnectMessage = err?.message ?? null;
       }
-      this.settle(update);
+      this.waiters.settle(update);
     });
 
     this.sock.ev.on("messages.upsert", ({ messages, type }) => {
@@ -223,47 +299,12 @@ export class Session {
     }
   }
 
-  private settle(update: Partial<ConnectionState>): void {
-    const closed = update.connection === "close";
-    for (const waiter of [...this.waiters]) {
-      if (waiter.check(update)) {
-        this.remove(waiter);
-        clearTimeout(waiter.timer);
-        waiter.resolve(update);
-      } else if (closed && waiter.rejectOnClose) {
-        this.remove(waiter);
-        clearTimeout(waiter.timer);
-        waiter.reject(
-          new Error(
-            `connection closed (${this.lastDisconnectCode ?? "?"}: ${this.lastDisconnectMessage ?? "no reason"})`,
-          ),
-        );
-      }
-    }
-  }
-
-  private remove(waiter: Waiter): void {
-    this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
-  }
-
   waitForUpdate(
     check: (update: Partial<ConnectionState>) => boolean,
     timeoutMs: number,
-    { rejectOnClose = true }: { rejectOnClose?: boolean } = {},
+    options: { rejectOnClose?: boolean } = {},
   ): Promise<Partial<ConnectionState>> {
-    return new Promise((resolve, reject) => {
-      const waiter: Waiter = {
-        check,
-        resolve,
-        reject,
-        rejectOnClose,
-        timer: setTimeout(() => {
-          this.remove(waiter);
-          reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for WhatsApp`));
-        }, timeoutMs),
-      };
-      this.waiters.push(waiter);
-    });
+    return this.waiters.wait(check, timeoutMs, options);
   }
 
   /** Resolves once the socket is authenticated and usable. */
@@ -295,8 +336,7 @@ export class Session {
     if (this.ended) return;
     this.ended = true;
     this.handlers.log("info", `socket trace: ${wsDebug.slice(-12).join(" | ")}`);
-    for (const waiter of this.waiters) clearTimeout(waiter.timer);
-    this.waiters = [];
+    this.waiters.cancelAll();
     try {
       // sock.end() finishes with ev.destroy(), which DISCARDS whatever is in
       // Baileys' event buffer rather than flushing it — and the buffer is
