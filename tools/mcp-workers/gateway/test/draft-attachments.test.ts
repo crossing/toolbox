@@ -39,7 +39,33 @@ interface HarnessOptions {
   driveBytes?: Uint8Array;
   driveError?: GoogleApiError;
   parentError?: GoogleApiError;
+  draftRaw?: string;
+  draftError?: GoogleApiError;
 }
+
+const CRLF = "\r\n";
+/** The shape a draft written in the Gmail UI actually has. */
+const HTML_DRAFT = [
+  "MIME-Version: 1.0",
+  "To: a@b.com",
+  "Subject: Invoice",
+  'Content-Type: multipart/mixed; boundary="OUTER"',
+  "",
+  "--OUTER",
+  'Content-Type: multipart/alternative; boundary="INNER"',
+  "",
+  "--INNER",
+  'Content-Type: text/plain; charset="UTF-8"',
+  "",
+  "plain body",
+  "--INNER",
+  'Content-Type: text/html; charset="UTF-8"',
+  "",
+  "<div><b>rich</b> body</div>",
+  "--INNER--",
+  "--OUTER--",
+  "",
+].join(CRLF);
 
 function harness(opts: HarnessOptions = {}) {
   const calls: Call[] = [];
@@ -48,6 +74,15 @@ function harness(opts: HarnessOptions = {}) {
   const gmail = {
     async getJson(url: string, query?: unknown) {
       calls.push({ method: "GET", url, query });
+      if (url.includes("/drafts/")) {
+        if (opts.draftError) throw opts.draftError;
+        const raw = Buffer.from(opts.draftRaw ?? HTML_DRAFT, "latin1")
+          .toString("base64")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+        return { id: "DRAFT1", message: { raw, threadId: "THREAD1" } };
+      }
       if (opts.parentError) throw opts.parentError;
       return PARENT;
     },
@@ -89,10 +124,16 @@ async function createDraft(tools: Map<string, Handler>, args: Record<string, unk
   return { isError: result.isError === true, text: result.content[0]!.text };
 }
 
-/** The message/rfc822 part of a multipart upload body. */
+/**
+ * The message/rfc822 part of a multipart upload body, without the envelope's
+ * own closing delimiter — which is itself a toolbox-mcp boundary and would
+ * otherwise defeat any assertion about the message not having been re-wrapped.
+ */
 function rfc822From(body: string): string {
   const marker = "Content-Type: message/rfc822\r\n\r\n";
-  return body.slice(body.indexOf(marker) + marker.length);
+  const start = body.indexOf(marker) + marker.length;
+  const end = body.lastIndexOf("\r\n--toolbox-mcp-");
+  return body.slice(start, end > start ? end : undefined);
 }
 
 describe("gmail_create_draft — the existing plain path", () => {
@@ -349,5 +390,85 @@ describe("gmail_create_draft — attachments relayed from Drive", () => {
     expect(isError).toBe(true);
     expect(text).toContain("huge.zip");
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+});
+
+describe("gmail_attach_drive_file — the mirror of drive_save_gmail_attachment", () => {
+  async function attach(tools: Map<string, Handler>, args: Record<string, unknown>) {
+    const result = await tools.get("gmail_attach_drive_file")!(args, {});
+    return { isError: result.isError === true, text: result.content[0]!.text };
+  }
+
+  it("adds the file to an existing draft without touching what was there", async () => {
+    const { calls, driveCalls, tools } = harness();
+    const { isError, text } = await attach(tools, { draft_id: "DRAFT1", file_id: "FILE1" });
+
+    expect(isError).toBe(false);
+    expect(driveCalls.some((c) => c.url.endsWith("/files/FILE1"))).toBe(true);
+    // Read the draft as raw — the only representation that survives a write-back.
+    expect(calls[0]!.query).toMatchObject({ format: "raw" });
+
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(put.url).toBe("https://gmail.googleapis.com/upload/gmail/v1/users/me/drafts/DRAFT1");
+    expect(put.query).toMatchObject({ uploadType: "multipart" });
+    expect(String(put.body)).toContain('{"message":{"threadId":"THREAD1"}}');
+
+    const rfc822 = rfc822From(String(put.body));
+    // The html alternative and the original wrapper are untouched...
+    expect(rfc822).toContain("<div><b>rich</b> body</div>");
+    expect(rfc822).toContain('Content-Type: multipart/alternative; boundary="INNER"');
+    expect(rfc822).toContain('boundary="OUTER"');
+    expect(rfc822).not.toContain("toolbox-mcp-");
+    // ...and the new part is simply one more member of the mixed list.
+    expect(rfc822).toContain('name="contract.pdf"');
+    expect(JSON.parse(text).attached).toMatchObject({ filename: "contract.pdf", bytes: 9 });
+  });
+
+  it("wraps a plain draft instead of refusing it", async () => {
+    const plain = ["To: a@b.com", "Subject: s", 'Content-Type: text/plain; charset="UTF-8"', "", "words"].join(CRLF);
+    const { calls, tools } = harness({ draftRaw: plain });
+    const { isError } = await attach(tools, { draft_id: "DRAFT1", file_id: "FILE1" });
+
+    expect(isError).toBe(false);
+    const rfc822 = rfc822From(String(calls.find((c) => c.method === "PUT")!.body));
+    expect(rfc822).toContain("multipart/mixed");
+    expect(rfc822).toContain("words");
+    expect(rfc822).toContain('name="contract.pdf"');
+  });
+
+  it("tells the caller a draft id is not a message id", async () => {
+    const { calls, tools } = harness({ draftError: new GoogleApiError(404, "Requested entity was not found.") });
+    const { isError, text } = await attach(tools, { draft_id: "NOT_A_DRAFT", file_id: "FILE1" });
+
+    expect(isError).toBe(true);
+    expect(text).toContain("NOT_A_DRAFT");
+    expect(text).toContain("gmail_list_drafts");
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("names the Drive account when the file id belongs to another one", async () => {
+    const { calls, tools } = harness({ driveError: new GoogleApiError(404, "File not found: FILE1.") });
+    const { isError, text } = await attach(tools, {
+      draft_id: "DRAFT1",
+      file_id: "FILE1",
+      drive_account: "personal@example.com",
+    });
+
+    expect(isError).toBe(true);
+    expect(text).toContain('"personal@example.com" Drive account');
+    // The draft is left exactly as it was.
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("exports a Google Doc on the way onto the draft", async () => {
+    const { calls, driveCalls, tools } = harness({
+      driveMeta: { name: "Offer letter", mimeType: "application/vnd.google-apps.document" },
+    });
+    const { isError, text } = await attach(tools, { draft_id: "DRAFT1", file_id: "DOC1" });
+
+    expect(isError).toBe(false);
+    expect(driveCalls.find((c) => c.url.endsWith("/export"))!.query).toMatchObject({ mimeType: "application/pdf" });
+    expect(JSON.parse(text).attached.filename).toBe("Offer letter.pdf");
+    expect(rfc822From(String(calls.find((c) => c.method === "PUT")!.body))).toContain('name="Offer letter.pdf"');
   });
 });

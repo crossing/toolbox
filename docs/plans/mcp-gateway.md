@@ -156,8 +156,14 @@ as the escape hatch, not the default.
   is the difference between a routine that works and one that spends its
   whole budget on plumbing. Inbound shipped first
   (`drive_save_gmail_attachment`, `drive_save_whatsapp_media`); outbound is
-  `gmail_create_draft`'s `drive_attachments`, which fetches with the Drive
-  account and attaches with the mail account. The same phase adds in-thread
+  `gmail_attach_drive_file` — the direct mirror, a Drive file onto a draft
+  that already exists — plus `gmail_create_draft`'s `drive_attachments` for
+  doing it at composition time. Both fetch with the Drive account and attach
+  with the mail account. Attaching to an existing draft splices the new part
+  into the stored raw message rather than rebuilding it from Gmail's parsed
+  payload: a real draft is multipart/mixed around a multipart/alternative of
+  text/plain and text/html, and a rebuild that picks one body would silently
+  throw away the other. The same phase adds in-thread
   replies: given a parent message id the gateway reads its Message-ID and
   References itself and derives `Re: <subject>`, because a caller that has to
   assemble threading headers by hand will get them wrong and Gmail will

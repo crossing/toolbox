@@ -110,7 +110,7 @@ export class GoogleClient {
     return text ? JSON.parse(text) : {};
   }
 
-  async sendBody(method: "POST" | "PATCH", url: string, contentType: string, body: string, query?: QueryParams): Promise<unknown> {
+  async sendBody(method: "POST" | "PATCH" | "PUT", url: string, contentType: string, body: string, query?: QueryParams): Promise<unknown> {
     const response = await this.doFetch(method, url, query, {
       headers: { "content-type": contentType },
       body,

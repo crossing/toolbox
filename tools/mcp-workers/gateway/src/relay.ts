@@ -18,10 +18,10 @@
 // understood, fetch it, understand it, and write a note. These tools are for
 // when it does not.
 //
-// The same reasoning runs outbound: gmail_create_draft's `drive_attachments`
-// is the inverse of drive_save_gmail_attachment, fetching with the Drive
-// account and attaching with the mail account. It lives in gmail.ts because
-// its output is a draft, exactly as these live here because theirs is a file.
+// The same reasoning runs outbound, in gmail.ts because the output is a draft
+// rather than a file: `gmail_attach_drive_file` is the direct inverse of
+// drive_save_gmail_attachment — a Drive file onto a draft that already exists —
+// and `gmail_create_draft`'s `drive_attachments` does it at composition time.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -69,7 +69,7 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
     "drive_save_gmail_attachment",
     {
       description:
-        "Copy a Gmail attachment straight into Drive without the bytes passing through this conversation — the gateway fetches it with the mail account's credentials and uploads it with the Drive account's. Prefer this over gmail_get_attachment + drive_create_file for anything you do not need to read: it costs no context and handles files up to 25 MB rather than 1 MB. Find message_id and attachment_id with gmail_get_message. For the opposite direction — a Drive file onto an outgoing message — use gmail_create_draft's drive_attachments.",
+        "Copy a Gmail attachment straight into Drive without the bytes passing through this conversation — the gateway fetches it with the mail account's credentials and uploads it with the Drive account's. Prefer this over gmail_get_attachment + drive_create_file for anything you do not need to read: it costs no context and handles files up to 25 MB rather than 1 MB. Find message_id and attachment_id with gmail_get_message. For the opposite direction — a Drive file onto an outgoing message — use gmail_attach_drive_file, or gmail_create_draft's drive_attachments.",
       inputSchema: {
         message_id: z.string(),
         attachment_id: z.string(),

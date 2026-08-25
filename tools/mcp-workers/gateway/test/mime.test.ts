@@ -12,6 +12,12 @@ import {
   normalizeBase64,
   sanitizeHeaderValue,
   wrapBase64,
+  addAttachmentToMessage,
+  base64UrlToBytes,
+  bytesToLatin1,
+  inspectMessage,
+  latin1ToBytes,
+  toBase64Url,
 } from "../src/mime";
 import { attachExportFor, exportedFilename } from "../src/drive";
 
@@ -230,5 +236,139 @@ describe("attachExportFor", () => {
     expect(exportedFilename("Report", "application/pdf")).toBe("Report.pdf");
     expect(exportedFilename("Report.pdf", "application/pdf")).toBe("Report.pdf");
     expect(exportedFilename("Report.PDF", "application/pdf")).toBe("Report.PDF");
+  });
+});
+
+describe("addAttachmentToMessage", () => {
+  const attachment = { filename: "extra.pdf", mimeType: "application/pdf", base64: normalizeBase64("JVBERi0=") };
+  const CRLF = "\r\n";
+
+  // The shape a real Gmail draft actually has: a mixed wrapper around an
+  // alternative pair, plus an attachment already on it.
+  const realDraft = [
+    "MIME-Version: 1.0",
+    "Subject: Invoice",
+    "From: me@example.com",
+    'Content-Type: multipart/mixed; boundary="OUTER"',
+    "",
+    "--OUTER",
+    'Content-Type: multipart/alternative; boundary="INNER"',
+    "",
+    "--INNER",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    "invoice and timesheet are attached.",
+    "--INNER",
+    'Content-Type: text/html; charset="UTF-8"',
+    "",
+    "<div><b>invoice</b> and timesheet are attached.</div>",
+    "--INNER--",
+    "--OUTER",
+    "Content-Type: application/pdf; name=\"invoice.pdf\"",
+    "Content-Transfer-Encoding: base64",
+    "",
+    "JVBERi0x",
+    "--OUTER--",
+    "",
+  ].join(CRLF);
+
+  it("splices into multipart/mixed, leaving every existing byte alone", () => {
+    const updated = addAttachmentToMessage(realDraft, attachment);
+    // The html alternative and the existing attachment survive verbatim.
+    expect(updated).toContain("<div><b>invoice</b> and timesheet are attached.</div>");
+    expect(updated).toContain('name="invoice.pdf"');
+    expect(updated).toContain("JVBERi0x");
+    expect(updated).toContain('name="extra.pdf"');
+    // Same wrapper, no new nesting, closing delimiter still last.
+    expect(updated).not.toContain("toolbox-mcp-");
+    expect(updated.split("--OUTER--").length - 1).toBe(1);
+    expect(updated.trimEnd().endsWith("--OUTER--")).toBe(true);
+    // Everything before the new part is unchanged, character for character.
+    const insertedAt = updated.indexOf("--OUTER" + CRLF + "Content-Type: application/pdf; name=\"extra.pdf\"");
+    expect(realDraft.startsWith(updated.slice(0, insertedAt))).toBe(true);
+  });
+
+  it("demotes a multipart/alternative body into a part rather than joining it", () => {
+    const alternative = [
+      "Subject: Note",
+      'Content-Type: multipart/alternative; boundary="INNER"',
+      "",
+      "--INNER",
+      'Content-Type: text/plain; charset="UTF-8"',
+      "",
+      "plain version",
+      "--INNER",
+      'Content-Type: text/html; charset="UTF-8"',
+      "",
+      "<p>html version</p>",
+      "--INNER--",
+      "",
+    ].join(CRLF);
+
+    const updated = addAttachmentToMessage(alternative, attachment);
+    const shape = inspectMessage(updated);
+    expect(shape.isMixed).toBe(true);
+    expect(shape.boundary).toMatch(/^toolbox-mcp-/);
+    // The alternative pair is intact, one level down — an attachment must not
+    // become a third "alternative rendering" of the body.
+    expect(updated).toContain('Content-Type: multipart/alternative; boundary="INNER"');
+    expect(updated).toContain("<p>html version</p>");
+    expect(updated).toContain("plain version");
+    expect(updated).toContain("--INNER--");
+    expect(updated).toContain('name="extra.pdf"');
+    // Subject stays a message header; Content-Type travels down with the body.
+    const newHeaders = updated.split(CRLF + CRLF)[0]!;
+    expect(newHeaders).toContain("Subject: Note");
+    expect(newHeaders).not.toContain("multipart/alternative");
+  });
+
+  it("wraps a plain text/plain draft", () => {
+    const plain = [
+      "To: a@b.com",
+      "Subject: Simple",
+      "MIME-Version: 1.0",
+      'Content-Type: text/plain; charset="UTF-8"',
+      "Content-Transfer-Encoding: 8bit",
+      "",
+      "just some words",
+    ].join(CRLF);
+
+    const updated = addAttachmentToMessage(plain, attachment);
+    expect(inspectMessage(updated).isMixed).toBe(true);
+    expect(updated).toContain("just some words");
+    expect(updated).toContain("Content-Transfer-Encoding: 8bit");
+    expect(updated).toContain('name="extra.pdf"');
+    expect(updated.split(CRLF + CRLF)[0]!).toContain("To: a@b.com");
+    // MIME-Version appears once, not twice.
+    expect(updated.match(/^MIME-Version:/gm)).toHaveLength(1);
+  });
+
+  it("keeps a folded header folded and finds a boundary pushed onto a continuation", () => {
+    const folded = [
+      "Subject: Long",
+      "Content-Type: multipart/mixed;",
+      '\tboundary="FOLDED"',
+      "",
+      "--FOLDED",
+      "Content-Type: text/plain",
+      "",
+      "body",
+      "--FOLDED--",
+      "",
+    ].join(CRLF);
+    expect(inspectMessage(folded).boundary).toBe("FOLDED");
+    const updated = addAttachmentToMessage(folded, attachment);
+    expect(updated).toContain('name="extra.pdf"');
+    expect(updated).not.toContain("toolbox-mcp-");
+  });
+});
+
+describe("byte-exact message round-trip", () => {
+  it("survives base64url -> latin1 -> bytes for content this code never decodes", () => {
+    // A latin-1 8bit body: transcoding it as utf-8 anywhere would corrupt it.
+    const original = new Uint8Array([72, 101, 0xe9, 0x0d, 0x0a, 0xff, 0x00, 0x80, 65]);
+    const roundTripped = latin1ToBytes(bytesToLatin1(original));
+    expect([...roundTripped]).toEqual([...original]);
+    expect([...base64UrlToBytes(toBase64Url(original))]).toEqual([...original]);
   });
 });

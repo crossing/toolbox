@@ -256,16 +256,7 @@ export function buildMimeMessage(opts: MessageOptions): string {
     wrapBase64(toBase64Standard(opts.body)),
   ];
   for (const attachment of attachments) {
-    const name = sanitizeHeaderValue(attachment.filename).replace(/[/\\]/g, "_");
-    const asciiName = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "attachment";
-    parts.push(
-      `--${boundary}`,
-      `Content-Type: ${sanitizeHeaderValue(attachment.mimeType)}; name="${asciiName}"`,
-      "Content-Transfer-Encoding: base64",
-      contentDisposition(attachment.filename),
-      "",
-      wrapBase64(attachment.base64),
-    );
+    parts.push(`--${boundary}`, attachmentPart(attachment));
   }
   parts.push(`--${boundary}--`, "");
   return lines.join(CRLF) + CRLF + CRLF + parts.join(CRLF);
@@ -273,4 +264,133 @@ export function buildMimeMessage(opts: MessageOptions): string {
 
 function toBase64Standard(text: string): string {
   return bytesToBase64(new TextEncoder().encode(text));
+}
+
+/** One MIME part: its headers, a blank line, and the wrapped payload. */
+export function attachmentPart(attachment: OutgoingAttachment): string {
+  const name = sanitizeHeaderValue(attachment.filename).replace(/[/\\]/g, "_");
+  const asciiName = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "attachment";
+  return [
+    `Content-Type: ${sanitizeHeaderValue(attachment.mimeType)}; name="${asciiName}"`,
+    "Content-Transfer-Encoding: base64",
+    contentDisposition(attachment.filename),
+    "",
+    wrapBase64(attachment.base64),
+  ].join(CRLF);
+}
+
+// ---- adding an attachment to a message that already exists ----
+//
+// Everything below works on the message as *bytes*, held in a latin1 string so
+// one character is one octet. Rebuilding a draft from Gmail's parsed payload
+// would be far easier to write and quietly lossy: a real draft is
+// multipart/mixed wrapping a multipart/alternative of text/plain and text/html,
+// and a rebuild that picks one body would throw the other away, along with any
+// header this code did not think to carry over. Splicing preserves every byte
+// that was already there, including bodies in encodings we never decode.
+
+export function base64UrlToBytes(data: string): Uint8Array {
+  const b64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+/** Bytes as a latin1 string: one char per octet, no transcoding, reversible. */
+export function bytesToLatin1(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let out = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+  }
+  return out;
+}
+
+export function latin1ToBytes(text: string): Uint8Array {
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
+// Headers that describe the *content* rather than the message, and so have to
+// travel with the body when it is demoted into a part.
+const CONTENT_HEADERS =
+  /^(content-type|content-transfer-encoding|content-disposition|content-id|content-description|content-language|content-location|content-md5):/i;
+
+export interface MessageShape {
+  headerBlock: string;
+  body: string;
+  /** Top-level boundary, when the message is multipart. */
+  boundary?: string;
+  /** Only multipart/mixed can take another attachment by insertion. */
+  isMixed: boolean;
+}
+
+/**
+ * Splits a raw message at its first blank line and reads the top-level
+ * Content-Type. Nothing nested is parsed — the splice never needs to know.
+ */
+export function inspectMessage(message: string): MessageShape {
+  const match = /\r?\n\r?\n/.exec(message);
+  const headerBlock = match ? message.slice(0, match.index) : message;
+  const body = match ? message.slice(match.index + match[0].length) : "";
+  // Unfold before reading, or a boundary pushed onto a continuation line is missed.
+  const unfolded = headerBlock.replace(/\r?\n[ \t]+/g, " ");
+  const contentType = /^content-type:(.*)$/im.exec(unfolded)?.[1]?.trim() ?? "";
+  const boundary = /boundary\s*=\s*(?:"([^"]*)"|([^\s;]+))/i.exec(contentType);
+  return {
+    headerBlock,
+    body,
+    boundary: boundary?.[1] ?? boundary?.[2],
+    isMixed: /^multipart\/mixed/i.test(contentType),
+  };
+}
+
+/**
+ * Adds one attachment to an existing raw message.
+ *
+ * multipart/mixed already is a list of parts, so the new one goes in ahead of
+ * the closing delimiter and every existing byte is untouched. Anything else —
+ * a bare text/plain, or a multipart/alternative whose parts are *alternative
+ * representations of one body* and would misread an attachment as a third
+ * rendering of it — gets demoted whole into the first part of a new
+ * multipart/mixed.
+ */
+export function addAttachmentToMessage(message: string, attachment: OutgoingAttachment): string {
+  const part = attachmentPart(attachment);
+  const shape = inspectMessage(message);
+
+  if (shape.isMixed && shape.boundary) {
+    const closing = `--${shape.boundary}--`;
+    const index = message.lastIndexOf(closing);
+    if (index !== -1) {
+      return message.slice(0, index) + `--${shape.boundary}${CRLF}${part}${CRLF}` + message.slice(index);
+    }
+    // A multipart message with no closing delimiter is malformed; fall through
+    // and wrap it rather than appending into nothing.
+  }
+
+  const boundary = "toolbox-mcp-" + crypto.randomUUID();
+  // Split on newlines that do not begin a folded continuation.
+  const entries = shape.headerBlock.split(/\r?\n(?![ \t])/).filter((line) => line.trim() !== "");
+  const messageHeaders = entries.filter((h) => !CONTENT_HEADERS.test(h) && !/^mime-version:/i.test(h));
+  const contentHeaders = entries.filter((h) => CONTENT_HEADERS.test(h));
+  if (contentHeaders.length === 0) contentHeaders.push('Content-Type: text/plain; charset="UTF-8"');
+
+  return [
+    ...messageHeaders,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    ...contentHeaders,
+    "",
+    shape.body.replace(/\r?\n+$/, ""),
+    `--${boundary}`,
+    part,
+    `--${boundary}--`,
+    "",
+  ].join(CRLF);
 }
