@@ -150,6 +150,28 @@ as the escape hatch, not the default.
 - **G5 — reassess**: calendar module, more accounts, sensitive-account
   path-prefix connectors if needed, home WhatsApp bridge retirement after
   probation.
+- **G6 — byte relay, both directions.** The gateway holds every account's
+  tokens, so it can move a file between two of them without the bytes
+  crossing a conversation as base64 — which at roughly 0.66 tokens per byte
+  is the difference between a routine that works and one that spends its
+  whole budget on plumbing. Inbound shipped first
+  (`drive_save_gmail_attachment`, `drive_save_whatsapp_media`); outbound is
+  `gmail_attach_drive_file` — the direct mirror, a Drive file onto a draft
+  that already exists — plus `gmail_create_draft`'s `drive_attachments` for
+  doing it at composition time. Both fetch with the Drive account and attach
+  with the mail account. Attaching to an existing draft splices the new part
+  into the stored raw message rather than rebuilding it from Gmail's parsed
+  payload: a real draft is multipart/mixed around a multipart/alternative of
+  text/plain and text/html, and a rebuild that picks one body would silently
+  throw away the other. The same phase adds in-thread
+  replies: given a parent message id the gateway reads its Message-ID and
+  References itself and derives `Re: <subject>`, because a caller that has to
+  assemble threading headers by hand will get them wrong and Gmail will
+  silently start a new thread. Attachment-bearing drafts go out over
+  `drafts.create` with `uploadType=multipart` (Draft metadata part carrying
+  `threadId`, `message/rfc822` media part) rather than base64url in a JSON
+  field. Still no send tool, in this phase or any other.
+
 
 ## Verification
 

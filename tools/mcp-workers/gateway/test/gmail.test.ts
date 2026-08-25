@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRfc822,
+  buildMimeMessage,
   decodeBase64UrlText,
   encodeHeaderValue,
   headerValue,
@@ -26,13 +26,16 @@ describe("encodeHeaderValue", () => {
   });
 });
 
-describe("buildRfc822", () => {
-  it("builds a plain-text message with optional cc/bcc", () => {
-    const msg = buildRfc822({ to: "a@b.com", subject: "Hi", body: "line1\nline2" });
+describe("buildMimeMessage without attachments", () => {
+  it("still builds exactly the plain-text message this server always sent", () => {
+    const msg = buildMimeMessage({ to: "a@b.com", subject: "Hi", body: "line1\nline2" });
     expect(msg).toContain("To: a@b.com\r\n");
+    expect(msg).toContain("Content-Type: text/plain; charset=\"UTF-8\"");
+    expect(msg).toContain("Content-Transfer-Encoding: 8bit");
     expect(msg).not.toContain("Cc:");
+    expect(msg).not.toContain("multipart/mixed");
     expect(msg).toMatch(/\r\n\r\nline1\nline2$/);
-    const withCc = buildRfc822({ to: "a@b.com", cc: "c@d.com", bcc: "e@f.com", subject: "s", body: "b" });
+    const withCc = buildMimeMessage({ to: "a@b.com", cc: "c@d.com", bcc: "e@f.com", subject: "s", body: "b" });
     expect(withCc).toContain("Cc: c@d.com\r\n");
     expect(withCc).toContain("Bcc: e@f.com\r\n");
   });
