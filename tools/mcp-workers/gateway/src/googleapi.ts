@@ -59,7 +59,9 @@ function errorMessage(status: number, body: string): string {
   return `Google API error (status ${status})`;
 }
 
-export type QueryParams = Record<string, string | number | boolean | undefined>;
+// An array value becomes a repeated query parameter, which is how Google's APIs
+// take multi-valued arguments (`metadataHeaders` on messages.get, for one).
+export type QueryParams = Record<string, string | number | boolean | string[] | undefined>;
 
 export class GoogleClient {
   constructor(
@@ -70,7 +72,12 @@ export class GoogleClient {
   private async doFetch(method: string, url: string, query?: QueryParams, init?: RequestInit): Promise<Response> {
     const u = new URL(url);
     for (const [key, value] of Object.entries(query ?? {})) {
-      if (value !== undefined && value !== "") u.searchParams.set(key, String(value));
+      if (value === undefined || value === "") continue;
+      if (Array.isArray(value)) {
+        for (const entry of value) u.searchParams.append(key, entry);
+      } else {
+        u.searchParams.set(key, String(value));
+      }
     }
     const token = await this.tokens.token();
     const response = await this.fetcher(u.toString(), {

@@ -11,8 +11,9 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { GoogleApiError } from "./googleapi";
+import { GoogleApiError, type GoogleClient } from "./googleapi";
 import type { GetClient } from "./gmail";
+import { bytesToBase64 } from "./mime";
 import { ACCOUNT_PARAM, DESTRUCTIVE, needsConfirm, READ_ONLY, run, WRITE } from "./toolutil";
 
 export const DRIVE = "https://www.googleapis.com/drive/v3";
@@ -32,6 +33,126 @@ export function exportMimeFor(mimeType: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+// Google-native files have no bytes to attach, so they have to be exported.
+// This mapping is deliberately *not* exportMimeFor's: that one serves
+// drive_read_file, where a model wants text it can read. An email attachment
+// wants the document, so a Doc becomes a PDF rather than a stripped-down
+// text/plain, and a Sheet becomes a real spreadsheet rather than CSV.
+export function attachExportFor(mimeType: string): { mimeType: string; extension: string } | undefined {
+  switch (mimeType) {
+    case "application/vnd.google-apps.document":
+    case "application/vnd.google-apps.presentation":
+    case "application/vnd.google-apps.drawing":
+      return { mimeType: "application/pdf", extension: "pdf" };
+    case "application/vnd.google-apps.spreadsheet":
+      return {
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        extension: "xlsx",
+      };
+    default:
+      return undefined;
+  }
+}
+
+const EXTENSION_FOR_MIME: Record<string, string> = {
+  "application/pdf": "pdf",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "text/plain": "txt",
+  "text/csv": "csv",
+  "text/html": "html",
+};
+
+/** Appends the export format's extension unless the name already carries it. */
+export function exportedFilename(name: string, mimeType: string): string {
+  const extension = EXTENSION_FOR_MIME[mimeType];
+  if (!extension) return name;
+  return name.toLowerCase().endsWith(`.${extension}`) ? name : `${name}.${extension}`;
+}
+
+export interface DriveAttachment {
+  filename: string;
+  mimeType: string;
+  base64: string;
+  bytes: number;
+}
+
+/**
+ * Fetches one Drive file as attachment-ready bytes, for the Gmail draft relay.
+ *
+ * The 404 rewrite is the point of this function existing. Drive answers a file
+ * id belonging to a *different* linked account with a bare "File not found",
+ * which reads as "you made the id up" when the truth is "you used the wrong
+ * credentials" — the single most likely mistake on a gateway where the mail
+ * account and the Drive account are routinely different people's. We name the
+ * account we actually used and the parameter that changes it, and we do not go
+ * looking through the other linked accounts: silently finding the file under
+ * another identity is a confused deputy, not a convenience.
+ */
+export async function fetchDriveAttachment(
+  client: GoogleClient,
+  fileId: string,
+  opts: { accountHint: string; filename?: string; exportMimeType?: string; byteCap: number },
+): Promise<DriveAttachment> {
+  let meta: { name?: string; mimeType?: string; size?: string };
+  try {
+    meta = (await client.getJson(`${DRIVE}/files/${fileId}`, {
+      fields: "id,name,mimeType,size",
+      supportsAllDrives: true,
+    })) as { name?: string; mimeType?: string; size?: string };
+  } catch (err) {
+    if (err instanceof GoogleApiError && err.status === 404) {
+      throw new GoogleApiError(
+        404,
+        `Drive file "${fileId}" was not found in ${opts.accountHint}. It may belong to another linked account — ` +
+          "pass drive_account with the label that owns it (see gateway_list_accounts).",
+      );
+    }
+    if (err instanceof GoogleApiError && err.status === 403) {
+      throw new GoogleApiError(
+        403,
+        `Drive file "${fileId}" exists but ${opts.accountHint} may not read it. Share it with that account, ` +
+          "or pass drive_account with a label that can.",
+      );
+    }
+    throw err;
+  }
+
+  const nativeExport = attachExportFor(meta.mimeType ?? "");
+  const exportMime = opts.exportMimeType ?? nativeExport?.mimeType;
+  const sourceName = opts.filename ?? meta.name ?? fileId;
+
+  if (nativeExport || (exportMime && (meta.mimeType ?? "").startsWith("application/vnd.google-apps"))) {
+    const buffer = await client.getRaw(`${DRIVE}/files/${fileId}/export`, { mimeType: exportMime! });
+    if (buffer.byteLength > opts.byteCap) {
+      throw new GoogleApiError(413, `"${sourceName}" exports to ${buffer.byteLength} bytes; cap is ${opts.byteCap}`);
+    }
+    return {
+      filename: opts.filename ?? exportedFilename(sourceName, exportMime!),
+      mimeType: exportMime!,
+      base64: bytesToBase64(buffer),
+      bytes: buffer.byteLength,
+    };
+  }
+
+  // Refuse on the declared size before spending memory on the download.
+  const declared = Number(meta.size ?? 0);
+  if (declared > opts.byteCap) {
+    throw new GoogleApiError(413, `"${sourceName}" is ${declared} bytes; cap is ${opts.byteCap}`);
+  }
+  const buffer = await client.getRaw(`${DRIVE}/files/${fileId}`, { alt: "media", supportsAllDrives: true });
+  if (buffer.byteLength > opts.byteCap) {
+    throw new GoogleApiError(413, `"${sourceName}" is ${buffer.byteLength} bytes; cap is ${opts.byteCap}`);
+  }
+  return {
+    filename: sourceName,
+    mimeType: meta.mimeType ?? "application/octet-stream",
+    base64: bytesToBase64(buffer),
+    bytes: buffer.byteLength,
+  };
 }
 
 export function bytesToText(buffer: ArrayBuffer): { text: string } | { base64: string } {

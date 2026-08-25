@@ -39,11 +39,19 @@ export interface GatewayToolContext {
 }
 
 // Audit summaries keep the arg shape without dumping full content (drafts,
-// file bodies) into the log.
+// file bodies) into the log. Attachment bytes are replaced during
+// serialization rather than truncated after it: a base64 field is both
+// useless in a log — 200 characters of an attachment tells you nothing — and
+// large enough that stringifying it just to throw it away is worth avoiding.
 export function summarizeArgs(args: unknown): string {
   let text: string;
   try {
-    text = JSON.stringify(args) ?? "{}";
+    text =
+      JSON.stringify(args, (key, value) =>
+        key === "base64" && typeof value === "string"
+          ? `<${Math.floor((value.length * 3) / 4)} bytes>`
+          : (value as unknown),
+      ) ?? "{}";
   } catch {
     text = "{}";
   }
@@ -98,14 +106,22 @@ export interface ServiceDef {
 const gmailService: ServiceDef = {
   id: "gmail",
   title: "Gmail",
-  description: "Search, read, drafts, labels, filters. No send tool exists; deletes are confirm-gated.",
+  description:
+    "Search, read, labels, filters, and drafts that can reply in-thread and carry attachments (including straight from Drive). No send tool exists; deletes are confirm-gated.",
   defaultEnabled: true,
   accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {
     registerGmailReadTools(server, (account) => ctx.googleClient("gmail", account));
   },
   registerWrite(server, ctx) {
-    registerGmailWriteTools(auditedServer(server, ctx), (account) => ctx.googleClient("gmail", account));
+    // The Drive resolver is for gmail_create_draft's server-side attachment
+    // relay. It asserts Drive's own enablement when called, so a gateway with
+    // Drive switched off still drafts — it just cannot attach from Drive.
+    registerGmailWriteTools(
+      auditedServer(server, ctx),
+      (account) => ctx.googleClient("gmail", account),
+      (account) => ctx.googleClient("drive", account),
+    );
   },
 };
 
