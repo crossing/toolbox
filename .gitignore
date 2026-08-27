@@ -15,7 +15,3 @@ node_modules/
 # Go build output. Never add a bare binary name here -- see above.
 /bin/
 
-# Python tooling scratch under tools/op-mcp (uv.lock IS tracked).
-/tools/op-mcp/.venv/
-/tools/op-mcp/src/op_mcp/__pycache__/
-/tools/op-mcp/tests/__pycache__/

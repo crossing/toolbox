@@ -69,7 +69,7 @@
           inherit (packages) safe-op op-oauth2c op-gws op-gws-onboard patch-gws-skills freeagent op-freeagent toolbox-skills;
         }
         // lib.optionalAttrs prev.stdenv.hostPlatform.isLinux {
-          inherit (packages) ibkr-cli ibgateway ibkr-local ibkr-x11 op-mcp whatsapp-bridge whatsapp-mcp-server;
+          inherit (packages) ibkr-cli ibgateway ibkr-local ibkr-x11 whatsapp-bridge whatsapp-mcp-server;
         };
     };
 }

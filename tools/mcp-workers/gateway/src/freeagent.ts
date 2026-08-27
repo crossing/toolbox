@@ -1,5 +1,5 @@
 // FreeAgent read tool surface (ported from freeagent-mcp), mirroring the
-// freeagent CLI's read commands and op-mcp's read allowlist. Responses are
+// freeagent CLI's read commands and the retired op-mcp bridge's read allowlist. Responses are
 // the raw FreeAgent JSON, same as the CLI's output contract.
 //
 // No `account` parameter here: the link-time company gate admits exactly one

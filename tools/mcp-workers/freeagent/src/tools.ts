@@ -1,4 +1,4 @@
-// Read tool surface, mirroring the freeagent CLI's read commands and op-mcp's
+// Read tool surface, mirroring the freeagent CLI's read commands and the retired op-mcp bridge's
 // read allowlist. Responses are the raw FreeAgent JSON, same as the CLI's
 // output contract.
 //
