@@ -1,6 +1,6 @@
 ---
 name: op-freeagent
-description: Run the freeagent CLI with credentials from 1Password, auto-refreshing expired tokens. Use instead of bare freeagent, which needs FREEAGENT_ACCESS_TOKEN set manually; when the op-mcp service is running, prefer its freeagent MCP tool for reads.
+description: Run the freeagent CLI with credentials from 1Password, auto-refreshing expired tokens. Use instead of bare freeagent, which needs FREEAGENT_ACCESS_TOKEN set manually; prefer the MCP gateway's freeagent_* tools first — this CLI is for attaching files, which the gateway cannot do.
 ---
 
 # op-freeagent
@@ -9,15 +9,28 @@ Wrapper around the `freeagent` CLI that supplies `FREEAGENT_ACCESS_TOKEN` from a
 1Password item and transparently refreshes it (via `op-oauth2c --refresh`) when
 FreeAgent answers 401. Tokens never touch disk.
 
-## Prefer op-mcp for reads
+## Prefer the MCP gateway
 
-When the op-mcp MCP tools are available in your session, use its `freeagent`
-tool for read operations (`<resource> list|get`) instead of this CLI: the
-running service holds tokens in memory, so reads need no 1Password
-authorization. This CLI is the fallback when the service is not running — each
-invocation then needs the desktop-app authorization. Writes differ by path:
-through op-mcp they become plans a human reviews and runs; through this CLI
-they execute directly. See the op-mcp skill.
+The hosted MCP gateway (connector "Gateway", `https://mcp.xing.works/mcp`) is the
+first choice for FreeAgent work. Its sixteen `freeagent_*` tools cover every
+command this CLI has except file attachment, they hold their own FreeAgent
+tokens so they cost no 1Password authorization, and reads and writes both
+execute directly — `freeagent_explanation_delete` takes `confirm: true`, and
+every write lands in the gateway's audit log.
+
+This CLI is the fallback for the one thing the gateway cannot do: **attaching a
+receipt or supplier invoice**. There is no gateway tool for it, and no `file`
+argument on `freeagent_bill_create` / `freeagent_explanation_create` /
+`freeagent_expense_create`. Create the record through the gateway, then attach
+through this CLI:
+
+```bash
+op-freeagent bills attach --url <bill_uri> --file <local_path>
+op-freeagent explanations attach --url <explanation_uri> --file <local_path>
+```
+
+Tracked as `work-ysf.1`; see the "Log the gaps you hit" section in the
+`freeagent` skill before filing anything new.
 
 ## Usage
 
