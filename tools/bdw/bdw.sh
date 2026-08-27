@@ -23,6 +23,7 @@ usage() {
   cat >&2 <<'EOF'
 bdw -- one Claude Code session per bead
 
+  bdw <bead-id>             attach to its session, or start it if there is none
   bdw start <bead-id>       claim the bead, open its tmux session, prime Claude
             [--dry-run]     ...or just say what that would do, changing nothing
   bdw attach <bead-id>      switch to (or attach) that bead's tmux session
@@ -34,6 +35,14 @@ bdw -- one Claude Code session per bead
 Resume is automatic: `bdw start` on a bead that already has a session resumes
 it, and falls back to the last handoff block in the bead's notes when the
 transcript is gone or lives on another host.
+
+The session runs where the bead says the work lives:
+
+  bd update <bead-id> --set-metadata dir=~/works/home/home-ops
+
+Subtasks inherit that from the nearest ancestor that sets it, so an epic can
+declare its repository once. Without it, the session runs in the directory you
+ran bdw from.
 EOF
   exit 2
 }
@@ -76,6 +85,38 @@ prime_prompt() {
   } | sed -e 's/[[:space:]]*$//'
 }
 
+# Where this bead's work lives, declared by a human rather than by bdw:
+#
+#   bd update <id> --set-metadata dir=~/works/home/home-ops
+#
+# A subtask inherits it from the nearest ancestor that sets one, so an epic can
+# name its repository once and every `<epic>.<n>` under it lands there. Empty
+# when nothing declares a directory, or when what is declared is not a directory
+# on this host -- a bead is shared between machines, a path is not.
+declared_dir() {
+  local bead=$1 dir='' parent hops=0
+  while :; do
+    dir=$(meta "$bead" dir)
+    [ -z "$dir" ] || break
+    parent=$(jq -r '.parent // ""' <<<"$bead")
+    [ -n "$parent" ] && [ "$hops" -lt 8 ] || return 0
+    hops=$((hops + 1))
+    bead=$(bead_json "$parent") || return 0
+  done
+
+  case $dir in
+    \~) dir=$HOME ;;
+    \~/*) dir=$HOME/${dir#\~/} ;;
+  esac
+
+  if [ ! -d "$dir" ]; then
+    printf 'bdw: %s declares dir %s, which is not a directory here -- using %s\n' \
+      "$(jq -r .id <<<"$1")" "$dir" "$PWD" >&2
+    return 0
+  fi
+  printf '%s' "$dir"
+}
+
 # The most recent handoff block from the notes field, or empty.
 last_handoff() {
   jq -r '.notes // ""' <<<"$1" |
@@ -110,7 +151,10 @@ cmd_start() {
   cwd=$(meta "$bead" bdw_cwd)
   host=$(meta "$bead" bdw_host)
   [ -n "$sess" ] || sess=$(tmux_name "$id")
-  [ -n "$cwd" ] && [ -d "$cwd" ] || cwd=$PWD
+  # bdw_cwd first: a recorded session can only be resumed from the directory it
+  # was started in, because that is where Claude Code files its transcripts.
+  [ -n "$cwd" ] && [ -d "$cwd" ] || cwd=$(declared_dir "$bead")
+  [ -n "$cwd" ] || cwd=$PWD
 
   # A live tmux session means the work is already open; just go there.
   if [ -z "$dry" ] && tmux has-session -t "=$sess" 2>/dev/null; then
@@ -345,5 +389,13 @@ case "${1:-}" in
   harvest) shift && cmd_harvest "$@" ;;
   hook) cmd_hook ;;
   _exec) shift && cmd_exec "$@" ;;
-  *) usage ;;
+  '' | -*) usage ;;
+  # `bdw <bead-id>` is the whole workflow in one word. start already attaches to
+  # a live session and changes nothing else, so the shortcut is start with the
+  # subcommand left off -- attach when there is something to attach to, launch
+  # when there is not. Anything that is not a bead is a typo, not a bead ID, and
+  # gets the usage text rather than "no bead matching 'stat'".
+  *)
+    if bead_json "${1:-}" >/dev/null 2>&1; then cmd_start "$@"; else usage; fi
+    ;;
 esac

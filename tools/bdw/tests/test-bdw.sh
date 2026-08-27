@@ -36,7 +36,10 @@ cat >"$tmp/bin/bd" <<EOF
 #!$bash_path
 printf '%s\n' "\$*" >>"$tmp/bd.log"
 case "\$1" in
-  show)  cat "\$BDW_TEST_BEAD" ;;
+  # Resolve by ID, so an unknown word is a miss and a parent lookup finds the
+  # parent rather than whatever bead was asked for last.
+  show)  jq -e --arg id "\$2" '[.[] | select(.id == \$id)] | select(length > 0)' \
+           "\$BDW_TEST_BEAD" ;;
   query) if [ -s "$tmp/query.json" ]; then cat "$tmp/query.json"; else printf '[]\n'; fi ;;
   note)  cat >>"$tmp/note.txt" ;;
 esac
@@ -79,14 +82,22 @@ export BDW_STATE_DIR="$tmp/state"
 export BDW_RETRY_DELAY=0  # keep the retry test instant
 
 bead() {
-  # bead <id> [extra-metadata-json]
+  # bead <id> [extra-metadata-json] [parent-id]
+  printf '[]' >"$tmp/bead.json"
+  export BDW_TEST_BEAD="$tmp/bead.json"
+  add_bead "$@"
+}
+
+add_bead() {
+  # add_bead <id> [extra-metadata-json] [parent-id] -- another bead in the same
+  # database, so a subtask can be shown its real parent.
   local meta=${2:-}
   [ -n "$meta" ] || meta='{}'
-  jq -n --arg id "$1" --argjson meta "$meta" \
-    '[{id: $id, title: "Wire the thing", status: "open",
+  jq --arg id "$1" --argjson meta "$meta" --arg parent "${3:-}" \
+    '. + [{id: $id, title: "Wire the thing", status: "open",
        description: "A description.", notes: "prior note\n## bdw handoff\ncarry this forward",
-       metadata: $meta}]' >"$tmp/bead.json"
-  export BDW_TEST_BEAD="$tmp/bead.json"
+       parent: $parent, metadata: $meta}]' "$tmp/bead.json" >"$tmp/bead.next"
+  mv "$tmp/bead.next" "$tmp/bead.json"
 }
 
 reset() {
@@ -185,6 +196,79 @@ bash "$bdw" start work-abc >/dev/null 2>&1
 check "falls back to fresh" "bdw_mode=fresh" "$BDW_STATE_DIR/bd-work-abc.launch"
 check "primes from the handoff" "carry this forward" "$BDW_STATE_DIR/bd-work-abc.prompt"
 refute "does not reuse the dead id" "bdw_session=11111111" "$tmp/bd.log"
+
+# --- the bare `bdw <bead-id>` shortcut --------------------------------------
+
+printf 'bdw <bead-id> (no session yet)\n'
+reset
+bead work-abc
+bash "$bdw" work-abc >/dev/null 2>&1
+check "shortcut starts the bead" "new-session -d -s bd-work-abc" "$tmp/tmux.log"
+check "shortcut claims the bead" "update work-abc --claim" "$tmp/bd.log"
+
+printf 'bdw <bead-id> (session already running)\n'
+: >"$tmp/tmux.log"
+: >"$tmp/bd.log"
+bash "$bdw" work-abc >/dev/null 2>&1
+refute "shortcut does not restart it" "new-session" "$tmp/tmux.log"
+check "shortcut attaches instead" "attach-session -t =bd-work-abc" "$tmp/tmux.log"
+refute "shortcut does not re-claim it" "--claim" "$tmp/bd.log"
+
+printf 'bdw <bead-id> --dry-run\n'
+reset
+bead work-abc
+bash "$bdw" work-abc --dry-run >/dev/null 2>"$tmp/err"
+check "shortcut takes start's flags" "would fresh work-abc" "$tmp/err"
+refute "dry run still changes nothing" "new-session" "$tmp/tmux.log"
+
+printf 'bdw <not-a-bead>\n'
+reset
+bead work-abc
+rc=0
+bash "$bdw" stat >/dev/null 2>"$tmp/err" || rc=$?
+[ "$rc" -eq 2 ] && ok "an unknown word is a usage error" ||
+  no "an unknown word is a usage error (got $rc)"
+check "and prints the usage" "bdw start" "$tmp/err"
+refute "and starts nothing" "new-session" "$tmp/tmux.log"
+
+# --- the directory the work happens in --------------------------------------
+
+printf 'start (bead declares a dir)\n'
+reset
+mkdir -p "$tmp/repo"
+bead work-abc "$(jq -n --arg d "$tmp/repo" '{dir: $d}')"
+bash "$bdw" start work-abc >/dev/null 2>&1
+check "starts in the declared dir" "-c $tmp/repo" "$tmp/tmux.log"
+check "records it as bdw_cwd" "--set-metadata bdw_cwd=$tmp/repo" "$tmp/bd.log"
+
+printf 'start (declared dir is ~-relative)\n'
+reset
+bead work-abc '{"dir": "~/repo"}'
+HOME=$tmp bash "$bdw" start work-abc >/dev/null 2>&1
+check "expands ~ against HOME" "-c $tmp/repo" "$tmp/tmux.log"
+
+printf 'start (declared dir does not exist here)\n'
+reset
+bead work-abc '{"dir": "/no/such/place"}'
+bash "$bdw" start work-abc >/dev/null 2>"$tmp/err"
+check "says the dir is missing" "not a directory here" "$tmp/err"
+check "falls back to the cwd" "-c $PWD" "$tmp/tmux.log"
+
+printf 'start (subtask inherits the parent'"'"'s dir)\n'
+reset
+bead work-par "$(jq -n --arg d "$tmp/repo" '{dir: $d}')"
+add_bead work-par.2 '{}' work-par
+bash "$bdw" start work-par.2 >/dev/null 2>&1
+check "inherits from the parent" "-c $tmp/repo" "$tmp/tmux.log"
+
+printf 'start (bdw_cwd wins over a declared dir)\n'
+reset
+mkdir -p "$tmp/recorded"
+bead work-abc "$(jq -n --arg d "$tmp/repo" --arg c "$tmp/recorded" --arg h "$(uname -n)" \
+  '{dir: $d, bdw_cwd: $c, bdw_tmux: "bd-work-abc", bdw_host: $h,
+    bdw_session: "11111111-1111-1111-1111-111111111111"}')"
+bash "$bdw" start work-abc >/dev/null 2>&1
+check "resumes where the transcript is" "-c $tmp/recorded" "$tmp/tmux.log"
 
 # --- harvest ---------------------------------------------------------------
 
@@ -288,6 +372,13 @@ if comp_bash=$(find_comp_bash); then
   complete_at bdw '' >"$tmp/comp.txt"
   check "completes subcommands" "attach" "$tmp/comp.txt"
   check "completes finish" "finish" "$tmp/comp.txt"
+  check "first word offers bead ids too" "work-abc" "$tmp/comp.txt"
+
+  complete_at bdw work-abc '' >"$tmp/comp.txt"
+  check "shortcut offers --dry-run" "--dry-run" "$tmp/comp.txt"
+
+  complete_at bdw start work-abc '' >"$tmp/comp.txt"
+  check "start offers --dry-run after the id" "--dry-run" "$tmp/comp.txt"
 
   complete_at bdw start '' >"$tmp/comp.txt"
   check "start offers bead ids" "work-abc" "$tmp/comp.txt"

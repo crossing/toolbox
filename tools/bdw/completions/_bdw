@@ -16,7 +16,8 @@
 #
 # The two queries are deliberately different: `start` offers anything still open,
 # while `attach` and `finish` only offer beads that already carry a session --
-# the `bdw` label is what distinguishes them.
+# the `bdw` label is what distinguishes them. The first word offers both the
+# subcommands and the open beads, because `bdw <bead-id>` is a command too.
 
 _bdw_beads() {
   local query=$1 tag=$2
@@ -70,7 +71,10 @@ _bdw() {
         'finish:harvest a bead'\''s session onto it'
         'hook:SessionEnd hook entrypoint'
       )
+      # `bdw <bead-id>` needs no subcommand at all: attach if the session is up,
+      # start it if it is not.
       _describe -t commands 'bdw command' cmds
+      _bdw_beads 'status!=closed' 'open bead'
       ;;
     args)
       case $words[1] in
@@ -91,6 +95,10 @@ _bdw() {
           ;;
         ls)
           _values 'option' '--human[indent the JSON]'
+          ;;
+        hook) ;;
+        *) # a bead ID in the first word: the shortcut, which takes start's flags
+          _values 'option' '--dry-run[print what start would do, changing nothing]'
           ;;
       esac
       ;;
