@@ -413,15 +413,24 @@ Only the first two are in the manifest. The sending credentials are deliberately
 left out until there is a send path, so nothing has to exist in 1Password before
 it is used.
 
+**The sending pair is verified working** (2026-08-27): `username` is the number
+in full international format and `password` is the outgoing password, and a live
+`POST` to `sms.cgi` returned `OK:1`. Worth recording because the control pages
+gave no way to find this out — a *Mobile* number's `editnumber.cgi` exposes no
+outgoing-password field at all (only a SIP Password, under Outgoing → Calls,
+whose value can be learned solely by pressing **Generate Password** — which
+rotates it and would break the SIP2SIM registration). The password is set out of
+band and simply works; do not go looking for it in the UI.
+
 ## Phases
 
-1. **Receive and observe.** ✅ Built. Hook route, `SmsInbox` DO, `messages` with `shape`,
+1. **Receive and observe.** ✅ Built and **deployed 2026-08-27**. Hook route, `SmsInbox` DO, `messages` with `shape`,
    `senders`, concatenation, the retention alarm, and `/manage/sms` showing
    arrivals and the census. Verifiable end to end by texting the number — no MCP
    involvement at all, which makes the first failure easy to localise. The
    corpus starts accumulating here, and everything in phase 3 depends on it, so
    this ships first even though it exposes nothing.
-2. **Read.** ✅ Built. `sms_list_messages`, `sms_get_thread`, `sms_status`, behind a
+2. **Read.** ✅ Built and **deployed 2026-08-27**; the `sms` toggle is on. `sms_list_messages`, `sms_get_thread`, `sms_status`, behind a
    new catalog toggle defaulting to off. The soft rule lands in the tool
    descriptions with the first write tool, and read tools begin labelling bodies
    as untrusted external content.
@@ -440,14 +449,6 @@ backwards.
 
 ## Open questions
 
-- **Outgoing password for phase 4.** The SMS API wants "the corresponding
-  outgoing password for the username as set in the control pages", but a
-  *Mobile* number's page exposes no such field — `editnumber.cgi` offers only a
-  SIP Password under Outgoing → Calls, and its SMS section is inbound-only
-  (`SMS Inbound`, `Private`). Either the SIP password doubles as it, or the
-  field is VoIP-only. Ask A&A rather than probing: the sole way to learn the SIP
-  password from the page is **Generate Password**, which rotates it and would
-  break the SIP2SIM registration. Not blocking — phases 1-3 never send.
 - **Does AAISP retry a failed POST?** Undocumented. Until it is known, the hook
   must be fast, must return 200 for anything it has stored, and must never
   return 200 for something it dropped.
