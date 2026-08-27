@@ -1,6 +1,6 @@
 ---
 name: op-gws
-description: Run gws (Google Workspace CLI) with credentials from 1Password, supporting multiple Google accounts. Use instead of bare gws whenever Workspace data is needed; when the op-mcp service is running, prefer its gws MCP tool for reads.
+description: Run gws (Google Workspace CLI) with credentials from 1Password, supporting multiple Google accounts. Use instead of bare gws whenever Workspace data is needed; prefer the MCP gateway's gmail_*/drive_* tools first, and reach for this CLI for everything the gateway does not carry.
 ---
 
 # op-gws
@@ -9,14 +9,41 @@ Wrapper around `gws` that mints a Google access token from a 1Password item and 
 `gws` with `GOOGLE_WORKSPACE_CLI_TOKEN` set. One item per Google account; tokens never
 touch disk, and `gws`'s own on-disk credential store stays empty.
 
-## Prefer op-mcp for reads
+## Prefer the MCP gateway
 
-When the op-mcp MCP tools are available in your session, use its `gws` tool for
-read operations instead of this CLI: the running service holds tokens in memory,
-so reads need no 1Password authorization. This CLI is the fallback when the
-service is not running — each invocation then needs the desktop-app
-authorization. Writes differ by path: through op-mcp they become plans a human
-reviews and runs; through this CLI they execute directly. See the op-mcp skill.
+The hosted MCP gateway (connector "Gateway", `https://mcp.xing.works/mcp`) is the
+first choice for Google Workspace work. Its `gmail_*` and `drive_*` tools hold
+their own upstream tokens, so they cost no 1Password authorization at all, and
+reads and writes both execute directly — destructive tools take `confirm: true`
+and every write lands in the gateway's audit log. Each tool takes an optional
+`account`; `gateway_list_accounts` names the linked accounts and the per-service
+default.
+
+This CLI is the fallback for what the gateway does not carry:
+
+- Services with no gateway tools at all: `calendar`, `docs`, `sheets`, `slides`,
+  `keep`, `tasks`, `people`, `chat`, `forms`, `meet`, `admin-reports`.
+- Gmail beyond the gateway's catalogue: sending (the gateway only drafts),
+  trashing or deleting messages, thread-level modification, settings (send-as,
+  forwarding, vacation), and `history`/`watch`.
+- Drive permissions and sharing, revisions, and copy.
+- Raw API access — `gws schema`, `--page-all`, parameters no tool exposes.
+
+Both paths reach the same mailboxes; the gateway's Google link and this CLI's
+1Password items are separate credentials for the same accounts.
+
+## Log the gaps you hit
+
+When a task drops to this CLI because the gateway has no tool for it, record it —
+that list is what drives gateway parity work. Read `bd show work-ysf` first and
+only file a new child if the gap is not already one of its children:
+
+```bash
+bd create "gateway: <what is missing>" --parent work-ysf -p 2 -l gateway,mcp \
+  -d "<the task, and the CLI command used instead>"
+```
+
+Never stop a task to file one: run the CLI, finish the work, then log it.
 
 ## Usage
 
