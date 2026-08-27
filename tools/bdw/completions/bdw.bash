@@ -10,14 +10,21 @@ _bdw() {
   cur=${COMP_WORDS[COMP_CWORD]}
   cmd=${COMP_WORDS[1]}
 
+  # The first word can be a subcommand or, for the `bdw <bead-id>` shortcut, a
+  # bead ID; both are offered.
   if [ "$COMP_CWORD" -eq 1 ]; then
-    mapfile -t COMPREPLY < <(compgen -W "start attach ls finish hook" -- "$cur")
+    mapfile -t COMPREPLY < <(compgen \
+      -W "start attach ls finish hook $(_bdw_bead_ids 'status!=closed')" -- "$cur")
     return
   fi
 
   case $cmd in
     start)
-      mapfile -t COMPREPLY < <(compgen -W "$(_bdw_bead_ids 'status!=closed')" -- "$cur")
+      if [ "$COMP_CWORD" -eq 2 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "$(_bdw_bead_ids 'status!=closed')" -- "$cur")
+      else
+        mapfile -t COMPREPLY < <(compgen -W "--dry-run" -- "$cur")
+      fi
       ;;
     attach)
       mapfile -t COMPREPLY < <(compgen -W "$(_bdw_bead_ids 'label=bdw')" -- "$cur")
@@ -31,6 +38,10 @@ _bdw() {
       ;;
     ls)
       mapfile -t COMPREPLY < <(compgen -W "--human" -- "$cur")
+      ;;
+    hook) ;;
+    *) # a bead ID in the first word: the shortcut, which takes start's flags
+      mapfile -t COMPREPLY < <(compgen -W "--dry-run" -- "$cur")
       ;;
   esac
 }
