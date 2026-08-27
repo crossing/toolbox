@@ -9,6 +9,7 @@ mkToolTest {
   tests = [
     ../../tools/ibkr-local/tests/test-order-entry.sh
     ../../tools/ibkr-local/tests/test-read-only-data.sh
+    ../../tools/ibkr-local/tests/test-bars.sh
     ../../tools/ibkr-local/tests/test-ibc-config-policy.sh
     ../../tools/ibkr-local/tests/test-flex-fetch.sh
     ../../tools/ibkr-local/tests/test-flex-routing.sh

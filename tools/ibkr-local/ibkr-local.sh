@@ -32,6 +32,7 @@ Commands:
   positions                JSON positions with market value and P&L fields
   balances                 JSON account summary
   executions               JSON order executions
+  bars SYMBOL              JSON historical OHLCV bars for one symbol (not account-scoped)
   flex                     JSON Flex history: raw statement XML chunks (default) or parsed rows
   order-preview buy|sell   What-if order preview only; --submit is blocked
   order-prepare buy|sell   Preview and create a short-lived guarded order ticket
@@ -44,6 +45,7 @@ Commands:
 Examples:
   ibkr positions --profile main-paper --group isa
   ibkr balances --profile main-live --account U1234567
+  ibkr bars META --profile main-live --bar-size '5 mins' --duration '1 D' --all-hours
   ibkr flex --profile main-live --flex-query nav-daily --json
   ibkr flex --kind trades --profile main-live --flex-query tax-activity --account U1234567 --from 2025-04-06 --to 2026-04-05
   ibkr order-preview buy AAPL 1 --profile main-paper --limit 100 --json
@@ -631,6 +633,19 @@ main() {
     executions)
       parse_common "$@"; require_config
       run_ibkr_json "$profile" "$group" "$account" "$raw" 1 orders executions "${remaining[@]}"
+      ;;
+    bars)
+      parse_common "$@"; require_config
+      set -- "${remaining[@]}"
+      safe_args "$@"
+      [[ $# -ge 1 ]] || die "bars requires a symbol"
+      # Bars describe an instrument, not an account. --account and --group cannot narrow the
+      # answer, so accepting them would silently imply a scoping that never happened; and the
+      # payload carries no account field, so account filtering is skipped rather than run as a
+      # no-op that would drop a row if upstream ever added one.
+      [[ -z "$account" ]] || die "bars is not account-scoped; drop --account"
+      [[ -z "$group" ]] || die "bars is not account-scoped; drop --group"
+      run_ibkr_json "$profile" "" "" 1 0 bars "$@"
       ;;
     flex)
       parse_common "$@"; require_config
