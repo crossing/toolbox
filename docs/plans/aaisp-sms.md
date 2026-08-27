@@ -6,8 +6,23 @@ messages look like, and exposes read tools plus a human-released send path.
 
 **Phases 1 and 2 are built and not yet deployed** — `gateway/src/smsstore.ts`,
 `smsinbox.ts`, `smshook.ts`, `sms.ts`, `manage-sms.ts`. What remains before the
-first message can land is provisioning the number and setting two secrets.
-Phase 3 waits on a corpus rather than on code; phase 4 waits on phase 3.
+first message can land is pointing the number's `SMS Inbound` at the hook and
+setting two secrets. Phase 3 waits on a corpus rather than on code; phase 4
+waits on phase 3.
+
+The number is **+447441148085**, a SIP2SIM *Mobile* on the A&A account
+(installed 2026-08-20) — the same number the WhatsApp bridge is paired to. Two
+things its control page settles that this plan had listed as open:
+
+- **Deliverability is fine.** A&A state on the number's own page that "SMS on
+  our mobile number range is known to work with the major carriers and SMS
+  services", so the 01/02/03-range refusal problem does not apply and the
+  SIP2SIM fallback is already what we have.
+- **`SMS Inbound` is a space-separated list, and it is not empty** — it
+  currently reads `xor@jecity.net`, so texts email today. The hook URL is
+  therefore *appended*, not substituted, and email delivery survives as an
+  out-of-band check on whether the hook missed anything. Worth keeping through
+  at least the first weeks rather than tidying away.
 
 ## Scope
 
@@ -388,10 +403,10 @@ Two things follow that are not SMS work:
 Added to `secrets.manifest.json` under `gateway`:
 
 ```
-SMS_HOOK_SECRET     op://Private/AAISP/sms_hook_secret     ← phases 1-2
-SMS_OWN_NUMBERS     op://Private/AAISP/sms_own_numbers     ← phases 1-2 (comma-separated)
-AAISP_SMS_USERNAME  op://Private/AAISP/sms_username        ← phase 4
-AAISP_SMS_PASSWORD  op://Private/AAISP/sms_password        ← phase 4
+SMS_HOOK_SECRET     op://Private/mtfswc7ijkmyslaykcxc2gkf4e/sms_hook_secret     ← phases 1-2
+SMS_OWN_NUMBERS     op://Private/mtfswc7ijkmyslaykcxc2gkf4e/sms_own_numbers     ← phases 1-2 (comma-separated)
+AAISP_SMS_USERNAME  op://Private/mtfswc7ijkmyslaykcxc2gkf4e/sms_username        ← phase 4
+AAISP_SMS_PASSWORD  op://Private/mtfswc7ijkmyslaykcxc2gkf4e/sms_password        ← phase 4
 ```
 
 Only the first two are in the manifest. The sending credentials are deliberately
@@ -425,13 +440,14 @@ backwards.
 
 ## Open questions
 
-- **Which number?** A VoIP number, a SIP2SIM SIM, or both — this decides what
-  goes in `SMS_OWN_NUMBERS` and which control page gets the hook URL.
-- **Will OTP senders deliver to it?** Banks and aggregators often refuse SMS to
-  non-mobile (01/02/03) ranges. Test with the services that matter before
-  building much; the fallback is A&A
-  [SIP2SIM](https://support.aa.net.uk/SIP2SIM_and_SMS), a real mobile number
-  whose SMS still routes to HTTP, at higher cost.
+- **Outgoing password for phase 4.** The SMS API wants "the corresponding
+  outgoing password for the username as set in the control pages", but a
+  *Mobile* number's page exposes no such field — `editnumber.cgi` offers only a
+  SIP Password under Outgoing → Calls, and its SMS section is inbound-only
+  (`SMS Inbound`, `Private`). Either the SIP password doubles as it, or the
+  field is VoIP-only. Ask A&A rather than probing: the sole way to learn the SIP
+  password from the page is **Generate Password**, which rotates it and would
+  break the SIP2SIM registration. Not blocking — phases 1-3 never send.
 - **Does AAISP retry a failed POST?** Undocumented. Until it is known, the hook
   must be fast, must return 200 for anything it has stored, and must never
   return 200 for something it dropped.
