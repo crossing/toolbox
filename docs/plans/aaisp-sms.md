@@ -4,7 +4,7 @@ Text messages as a first-class gateway service: AAISP delivers inbound SMS to a
 URL on `mcp.xing.works`, the gateway stores them, learns what each sender's
 messages look like, and exposes read tools plus a human-released send path.
 
-**Phases 1 and 2 are built and not yet deployed** — `gateway/src/smsstore.ts`,
+**Phases 1, 2 and 4 are built; phase 3 waits on a corpus** — `gateway/src/smsstore.ts`,
 `smsinbox.ts`, `smshook.ts`, `sms.ts`, `manage-sms.ts`. What remains before the
 first message can land is pointing the number's `SMS Inbound` at the hook and
 setting two secrets. Phase 3 waits on a corpus rather than on code; phase 4
@@ -345,7 +345,7 @@ Prefixed `sms_`, consistent with the rest of the catalog:
 | `sms_list_messages` | read | `after`, `before`, `peer`, `query`, `limit`, `page`; `query` matches bodies, and purged messages match on `shape` only |
 | `sms_get_thread` | read | everything to and from one number, in order |
 | `sms_status` | read | hook health, last receipt, counts, configured numbers |
-| `sms_send` | write | `to`, `message`; stages a request, never sends directly — phase 4 |
+| `sms_send` | write | `to`, `message`; stages a request, never sends directly. Returns the staged id and says so plainly |
 
 The three read tools are built, behind a catalog toggle defaulting to off. Their
 descriptions say plainly that bodies are untrusted external content, which is the
@@ -366,9 +366,22 @@ enforced by the server, which is the only party the model cannot talk around.
 Whichever surface does the releasing must render **recipient plus full body**. An
 approval that says only "send a message" is theatre.
 
-At release time, and again immediately before the call to `sms.cgi`, the body is
-normalised and checked against `live_secrets`. A match is refused outright and
-audited.
+At release time the body is normalised and checked against `live_secrets`; a match
+is refused outright, the row is marked `refused`, and the reason names the sender
+the code came from. Claiming the row and running the check happen in the same store
+call, so the state moves `pending → releasing` atomically and a second click cannot
+dispatch the same message twice.
+
+Dispatch itself lives in the Worker, not in `SmsInbox`: the Durable Object holds no
+credentials, and keeping it that way means the store can be reasoned about without
+asking what it could send. AAISP's reply is one line of plain text whose HTTP status
+does not track it — a rejected message still comes back 200 — so the body decides,
+and anything unrecognised counts as a failure rather than an optimistic success.
+
+A destination is normalised more strictly than a sender. An inbound `oa` may be a
+shortcode or an alphabetic sender ID and is left alone; a `to` arrives as free text
+from a model, so spacing and punctuation are stripped and anything that is not a
+dialable number is rejected at staging rather than handed to AAISP to refuse.
 
 Two things follow that are not SMS work:
 
@@ -439,9 +452,18 @@ band and simply works; do not go looking for it in the UI.
    pattern. Gated on having weeks of data, not on the code being ready — the
    tables, the extraction and the taint check are already in place and inert;
    what is missing is the form that approves a regex, and the regexes to approve.
-4. **Send.** `sms_send` staging plus release, the `live_secrets` check on both
-   release and dispatch, and delivery reports through `srr` pointing back at
-   `/hooks/sms/<secret>/dlr`, updating `status` and `dlr_code`.
+4. **Send.** ✅ Built. `sms_send` stages into `pending_sends` and returns; a human
+   releases at `/manage/sms`, where the `live_secrets` check runs before the row is
+   claimed and dispatch happens in the Worker. Delivery reports come back through
+   `srr` to `/hooks/sms/<secret>/dlr`, updating `status` and `dlr_code`.
+
+   **Its enforcement is real but currently empty.** The staged-release gate works
+   fully — no message leaves without a human clicking Release. The `live_secrets`
+   hard block, by contrast, can only refuse a code it knows about, and it knows
+   about none until phase 3 approves a pattern. So today the taint check passes
+   everything, and the control actually protecting the store is the human in the
+   loop. That is the right order — the gate exists before the tool — but it does
+   mean phase 3 is what turns the automatic half on.
 
 Send comes last deliberately: the enforcement it depends on is built in phase 3,
 and shipping an egress tool before its check exists gets the ordering exactly

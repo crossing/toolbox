@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS parts (
   PRIMARY KEY (oa, ref, seq)
 );
 
+CREATE TABLE IF NOT EXISTS pending_sends (
+  id TEXT PRIMARY KEY,
+  peer TEXT NOT NULL,
+  body TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  decided_at TEXT,
+  message_id TEXT,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS pending_sends_state ON pending_sends (state, requested_at);
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -172,6 +185,38 @@ export interface SenderPatch {
   retentionDays?: number | null;
 }
 
+/**
+ * A send waits here until a human releases it. `releasing` exists because
+ * dispatch happens in the Worker — the Durable Object holds no credentials —
+ * so there is a window between "approved" and "handed to AAISP" that must not
+ * be re-enterable by a second click.
+ */
+export type SendState = "pending" | "releasing" | "sent" | "failed" | "cancelled" | "refused";
+
+export interface PendingSend {
+  id: string;
+  peer: string;
+  body: string;
+  requestedBy: string;
+  requestedAt: string;
+  state: SendState;
+  decidedAt: string | null;
+  messageId: string | null;
+  error: string | null;
+}
+
+/** What a release attempt hands back to the Worker that must dispatch it. */
+export type ReleaseTicket =
+  | { ok: true; id: string; peer: string; body: string }
+  | { ok: false; reason: string; taint?: TaintHit };
+
+export interface SendOutcome {
+  ok: boolean;
+  /** AAISP's reply line, kept verbatim for the audit trail. */
+  detail?: string;
+  ownNumber?: string;
+}
+
 export interface MessageFilter {
   peer?: string;
   after?: string;
@@ -197,6 +242,12 @@ export interface SmsInboxApi {
   addPattern(oa: string, pattern: string, ttlSeconds: number, samples: number): Promise<void>;
   deletePattern(oa: string, pattern: string): Promise<void>;
   checkTaint(payload: string): Promise<TaintHit | null>;
+  stageSend(peer: string, body: string, requestedBy: string): Promise<PendingSend>;
+  listSends(limit?: number): Promise<PendingSend[]>;
+  beginRelease(id: string): Promise<ReleaseTicket>;
+  completeSend(id: string, outcome: SendOutcome): Promise<void>;
+  cancelSend(id: string): Promise<void>;
+  recordDlr(id: string, code: number): Promise<boolean>;
   status(): Promise<SmsStatus>;
   retentionPreview(): Promise<RetentionRow[]>;
   purgeNow(): Promise<{ bodies: number; secrets: number; flushed: number }>;
@@ -223,6 +274,23 @@ export function normalizePeer(oa: string): string {
   // shortcode, which must not acquire one.
   if (/^\d{7,}$/.test(t)) return `+${t}`;
   return t;
+}
+
+/**
+ * Destinations are stricter than senders. An inbound `oa` may legitimately be a
+ * shortcode or an alphabetic sender ID, and normalizePeer leaves those alone —
+ * but you cannot text a sender ID back, and `to` arrives as free text from a
+ * model, so "+44 7700 900456" and "07700-900456" have to land on the same row
+ * as the number they obviously are. Anything that is not a dialable number is
+ * rejected here rather than handed to AAISP to refuse.
+ */
+export function normalizeDestination(raw: string): string {
+  const stripped = raw.replace(/[\s().-]/g, "");
+  const peer = normalizePeer(stripped);
+  if (!/^\+\d{7,15}$/.test(peer)) {
+    throw new Error(`not a dialable number: ${raw.slice(0, 40)}`);
+  }
+  return peer;
 }
 
 export function senderClass(peer: string): ShapeClass {
@@ -473,6 +541,162 @@ export class SmsStore {
     return null;
   }
 
+  // -- sends ----------------------------------------------------------------
+
+  /**
+   * Stage a send. Nothing here talks to AAISP: `sms_send` costs money, reaches
+   * a stranger's phone, and is precisely the tool an injection wants, so the
+   * model's reach ends at this row. A human releases it from /manage/sms.
+   *
+   * Client-side approval prompts were the alternative and are not enough — on
+   * a remote MCP the prompt belongs to the client, and every client offers
+   * some form of "allow for this chat". Staging is enforced by the server,
+   * which is the only party the model cannot talk around.
+   */
+  stageSend(id: string, peer: string, body: string, requestedBy: string, nowMs: number): PendingSend {
+    const row = {
+      id,
+      peer: normalizeDestination(peer),
+      body,
+      requestedBy,
+      requestedAt: new Date(nowMs).toISOString(),
+      state: "pending" as SendState,
+      decidedAt: null,
+      messageId: null,
+      error: null,
+    };
+    this.sql.exec(
+      `INSERT INTO pending_sends (id, peer, body, requested_by, requested_at, state)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+      row.id,
+      row.peer,
+      row.body,
+      row.requestedBy,
+      row.requestedAt,
+    );
+    return row;
+  }
+
+  listSends(limit = 50): PendingSend[] {
+    return this.sql
+      .exec(
+        `SELECT id, peer, body, requested_by, requested_at, state, decided_at, message_id, error
+           FROM pending_sends ORDER BY requested_at DESC LIMIT ?`,
+        limit,
+      )
+      .toArray()
+      .map(toPendingSend);
+  }
+
+  getSend(id: string): PendingSend | null {
+    const rows = this.sql
+      .exec(
+        `SELECT id, peer, body, requested_by, requested_at, state, decided_at, message_id, error
+           FROM pending_sends WHERE id = ?`,
+        id,
+      )
+      .toArray();
+    return rows.length === 0 ? null : toPendingSend(rows[0]!);
+  }
+
+  /**
+   * Claim a pending send for dispatch. The taint check runs here and again
+   * immediately before the call to sms.cgi, because this is the point where a
+   * human has said yes and the body is about to leave the building.
+   *
+   * The state moves to `releasing` in the same call that reads it, so a second
+   * click cannot dispatch the same row twice.
+   */
+  beginRelease(id: string, nowMs: number): ReleaseTicket {
+    const send = this.getSend(id);
+    if (!send) return { ok: false, reason: "no such send" };
+    if (send.state !== "pending") return { ok: false, reason: `send is already ${send.state}` };
+
+    const taint = this.checkTaint(send.body, nowMs);
+    if (taint) {
+      this.markSend(id, "refused", nowMs, {
+        error: `payload carries a code received from ${taint.oa} at ${taint.messageId.slice(0, 8)}`,
+      });
+      return { ok: false, reason: "the message carries a recently received code", taint };
+    }
+
+    this.markSend(id, "releasing", nowMs, {});
+    return { ok: true, id, peer: send.peer, body: send.body };
+  }
+
+  /**
+   * Record what AAISP said. A successful send becomes a real outbound row in
+   * `messages`, so a thread reads as a conversation rather than as half of one.
+   */
+  async completeSend(id: string, outcome: SendOutcome, nowMs: number): Promise<void> {
+    const send = this.getSend(id);
+    if (!send) return;
+    if (!outcome.ok) {
+      this.markSend(id, "failed", nowMs, { error: outcome.detail ?? "send failed" });
+      return;
+    }
+    const stamp = new Date(nowMs).toISOString();
+    const messageId = await this.digest(`out|${send.peer}|${stamp}|${send.body}`);
+    this.sql.exec(
+      `INSERT INTO messages (id, direction, peer, own_number, body, shape, timestamp, parts, incomplete, status)
+       VALUES (?, 'out', ?, ?, ?, ?, ?, 1, 0, 'sent')
+       ON CONFLICT(id) DO NOTHING`,
+      messageId,
+      send.peer,
+      outcome.ownNumber ?? "",
+      send.body,
+      computeShape(send.body),
+      stamp,
+    );
+    this.markSend(id, "sent", nowMs, { messageId, error: outcome.detail ?? null });
+  }
+
+  cancelSend(id: string, nowMs: number): void {
+    this.sql.exec(
+      "UPDATE pending_sends SET state = 'cancelled', decided_at = ? WHERE id = ? AND state = 'pending'",
+      new Date(nowMs).toISOString(),
+      id,
+    );
+  }
+
+  /**
+   * A delivery report from AAISP. Correlated by the pending-send id carried in
+   * the `srr` URL, because nothing else in their report identifies which of
+   * our messages it describes.
+   */
+  recordDlr(id: string, code: number): boolean {
+    const send = this.getSend(id);
+    if (!send?.messageId) return false;
+    const status = code === 1 ? "delivered" : code === 8 ? "accepted" : "undelivered";
+    this.sql.exec(
+      "UPDATE messages SET status = ?, dlr_code = ? WHERE id = ?",
+      status,
+      code,
+      send.messageId,
+    );
+    return true;
+  }
+
+  private markSend(
+    id: string,
+    state: SendState,
+    nowMs: number,
+    patch: { messageId?: string | null; error?: string | null },
+  ): void {
+    this.sql.exec(
+      `UPDATE pending_sends
+          SET state = ?, decided_at = ?,
+              message_id = COALESCE(?, message_id),
+              error = ?
+        WHERE id = ?`,
+      state,
+      new Date(nowMs).toISOString(),
+      patch.messageId ?? null,
+      patch.error ?? null,
+      id,
+    );
+  }
+
   addPattern(oa: string, pattern: string, ttlSeconds: number, samples: number, nowMs: number): void {
     // Compiling here means an unusable pattern is rejected at approval time
     // rather than discovered on the receive path.
@@ -718,6 +942,20 @@ export class SmsStore {
       value,
     );
   }
+}
+
+function toPendingSend(row: Record<string, unknown>): PendingSend {
+  return {
+    id: row.id as string,
+    peer: row.peer as string,
+    body: row.body as string,
+    requestedBy: row.requested_by as string,
+    requestedAt: row.requested_at as string,
+    state: row.state as SendState,
+    decidedAt: (row.decided_at as string | null) ?? null,
+    messageId: (row.message_id as string | null) ?? null,
+    error: (row.error as string | null) ?? null,
+  };
 }
 
 function toMessage(row: Record<string, unknown>): StoredMessage {

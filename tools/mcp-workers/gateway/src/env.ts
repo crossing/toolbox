@@ -27,6 +27,11 @@ export interface Env {
   // credential: 32 random characters, typed once into their control page.
   SMS_HOOK_SECRET: string;
   SMS_OWN_NUMBERS: string; // comma-separated; a delivery to anything else is refused
+  // Sending credentials. Absent until phase 4 is provisioned, so both are
+  // optional: a gateway with no way to send should stage requests and say so
+  // plainly, not fail to boot.
+  AAISP_SMS_USERNAME?: string; // the number in full international format
+  AAISP_SMS_PASSWORD?: string; // the outgoing password; the control pages never show it
 }
 
 // One vault per identity; the DO id is derived from the normalized email.

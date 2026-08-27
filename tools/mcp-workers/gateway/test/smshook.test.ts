@@ -26,6 +26,7 @@ function fakeEnv(overrides: Partial<Env> = {}): { env: Env; store: SmsStore } {
   const store = new SmsStore(sql, digest);
   const stub = {
     receive: (fields: Parameters<SmsStore["recordInbound"]>[0]) => store.recordInbound(fields, Date.now()),
+    recordDlr: (id: string, code: number) => store.recordDlr(id, code),
   };
   const env = {
     SMS_HOOK_SECRET: SECRET,
@@ -147,5 +148,50 @@ describe("field validation", () => {
     const { env } = fakeEnv();
     const request = new Request(`https://mcp.test/hooks/sms/${SECRET}`, { method: "DELETE" });
     expect((await call(env, request))?.status).toBe(405);
+  });
+});
+
+describe("delivery reports", () => {
+  it("applies a report to the message its send produced", async () => {
+    const { env, store } = fakeEnv();
+    store.stageSend("send-1", "+447700900456", "ping", "xor@jecity.net", Date.now());
+    store.beginRelease("send-1", Date.now());
+    await store.completeSend("send-1", { ok: true, detail: "OK:1" }, Date.now());
+
+    const url = new URL(`https://mcp.test/hooks/sms/${SECRET}/dlr?id=send-1&code=1`);
+    const res = await handleSmsHook(new Request(url, { method: "GET" }), env, url);
+
+    expect(res?.status).toBe(200);
+    expect(store.getThread("+447700900456")[0]).toMatchObject({ status: "delivered", direction: "out" });
+  });
+
+  it("answers 200 for a report about something it cannot identify, rather than inviting a retry", async () => {
+    const { env } = fakeEnv();
+    const url = new URL(`https://mcp.test/hooks/sms/${SECRET}/dlr?id=nope&code=2`);
+    const res = await handleSmsHook(new Request(url, { method: "GET" }), env, url);
+    expect(res?.status).toBe(200);
+  });
+
+  it("hides the report route behind the same credential as the receive route", async () => {
+    const { env } = fakeEnv();
+    const url = new URL("https://mcp.test/hooks/sms/wrong-secret/dlr?id=send-1&code=1");
+    const res = await handleSmsHook(new Request(url, { method: "GET" }), env, url);
+    expect(res?.status).toBe(404);
+  });
+
+  it("does not treat an unknown suffix as a delivery", async () => {
+    const { env, store } = fakeEnv();
+    const url = new URL(`https://mcp.test/hooks/sms/${SECRET}/anything`);
+    const res = await handleSmsHook(
+      new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ oa: "447700900123", da: "+441234567890", ud: "sneaky", scts: "" }).toString(),
+      }),
+      env,
+      url,
+    );
+    expect(res?.status).toBe(404);
+    expect(store.listMessages({ limit: 10 })).toHaveLength(0);
   });
 });

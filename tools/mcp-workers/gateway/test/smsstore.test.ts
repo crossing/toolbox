@@ -281,3 +281,87 @@ describe("review input", () => {
     expect(shapes).toHaveLength(2);
   });
 });
+
+describe("staged sends", () => {
+  it("stages without sending, and a release hands the Worker what to dispatch", async () => {
+    const s = store();
+    const staged = s.stageSend("send-1", "07700 900456", "meet at six", "xor@jecity.net", NOW);
+    expect(staged.state).toBe("pending");
+    // Normalised on the way in, so the dispatch and the thread agree on the peer.
+    expect(staged.peer).toBe("+447700900456");
+
+    const ticket = s.beginRelease("send-1", NOW);
+    expect(ticket).toMatchObject({ ok: true, peer: "+447700900456", body: "meet at six" });
+    expect(s.getSend("send-1")?.state).toBe("releasing");
+  });
+
+  it("refuses to release a body carrying a code that arrived recently", async () => {
+    const s = store();
+    s.addPattern("BANKID", "code is (?<secret>\\d+)", 900, 1, NOW);
+    await s.recordInbound(inbound({ oa: "BANKID", ud: "Your code is 449182" }), NOW);
+
+    // Spaced apart, which is the lazy evasion the normaliser is there to cover.
+    s.stageSend("send-2", "+447700900456", "the code is 449 182", "xor@jecity.net", NOW);
+    const ticket = s.beginRelease("send-2", NOW);
+
+    expect(ticket.ok).toBe(false);
+    const send = s.getSend("send-2");
+    expect(send?.state).toBe("refused");
+    // A refusal is audited rather than silent — it is either an injection or a
+    // bug, and both are worth knowing about.
+    expect(send?.error).toContain("BANKID");
+  });
+
+  it("releases the same message only once", async () => {
+    const s = store();
+    s.stageSend("send-3", "+447700900456", "hello", "xor@jecity.net", NOW);
+    expect(s.beginRelease("send-3", NOW).ok).toBe(true);
+    const second = s.beginRelease("send-3", NOW);
+    expect(second).toMatchObject({ ok: false });
+    if (!second.ok) expect(second.reason).toContain("releasing");
+  });
+
+  it("a sent message becomes a real outbound row, so a thread reads as a conversation", async () => {
+    const s = store();
+    await s.recordInbound(inbound({ oa: "447700900456", ud: "you there?" }), NOW);
+    s.stageSend("send-4", "+447700900456", "on my way", "xor@jecity.net", NOW);
+    s.beginRelease("send-4", NOW);
+    await s.completeSend("send-4", { ok: true, detail: "OK:1", ownNumber: "+447441148085" }, NOW);
+
+    const thread = s.getThread("+447700900456");
+    expect(thread.map((m) => m.direction)).toEqual(["in", "out"]);
+    expect(thread[1]).toMatchObject({ body: "on my way", status: "sent" });
+    expect(s.getSend("send-4")?.state).toBe("sent");
+  });
+
+  it("keeps a failed send out of the message history", async () => {
+    const s = store();
+    s.stageSend("send-5", "+447700900456", "nope", "xor@jecity.net", NOW);
+    s.beginRelease("send-5", NOW);
+    await s.completeSend("send-5", { ok: false, detail: "ERR: no credit" }, NOW);
+
+    expect(s.getSend("send-5")).toMatchObject({ state: "failed", error: "ERR: no credit" });
+    expect(s.getThread("+447700900456")).toHaveLength(0);
+  });
+
+  it("cancelling only bites while the send is still pending", async () => {
+    const s = store();
+    s.stageSend("send-6", "+447700900456", "hi", "xor@jecity.net", NOW);
+    s.beginRelease("send-6", NOW);
+    s.cancelSend("send-6", NOW);
+    // Already claimed for dispatch, so a late cancel must not rewrite it.
+    expect(s.getSend("send-6")?.state).toBe("releasing");
+  });
+
+  it("applies a delivery report to the message the send produced", async () => {
+    const s = store();
+    s.stageSend("send-7", "+447700900456", "ping", "xor@jecity.net", NOW);
+    s.beginRelease("send-7", NOW);
+    await s.completeSend("send-7", { ok: true, detail: "OK:1" }, NOW);
+
+    expect(s.recordDlr("send-7", 1)).toBe(true);
+    expect(s.getThread("+447700900456")[0]).toMatchObject({ status: "delivered" });
+    // A report for something we never sent is not an error worth retrying.
+    expect(s.recordDlr("send-nonexistent", 1)).toBe(false);
+  });
+});

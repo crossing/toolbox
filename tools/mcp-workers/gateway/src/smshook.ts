@@ -94,12 +94,25 @@ export async function handleSmsHook(request: Request, env: Env, url: URL): Promi
   if (!url.pathname.startsWith(HOOK_PREFIX)) return null;
 
   const rest = url.pathname.slice(HOOK_PREFIX.length);
-  const [given] = rest.split("/", 1);
+  const given = rest.split("/")[0] ?? "";
   // A wrong secret and a nonexistent route answer identically: this endpoint
   // should look like nothing to anyone who has not been told the path.
-  if (!(await secretMatches(given ?? "", env.SMS_HOOK_SECRET ?? ""))) {
+  if (!(await secretMatches(given, env.SMS_HOOK_SECRET ?? ""))) {
     return new Response("not found", { status: 404 });
   }
+
+  // Delivery reports come back to the same credential on a `/dlr` suffix,
+  // carrying the pending-send id we put in the `srr` URL. AAISP fetches this
+  // with GET, and a report about a message we cannot identify is not an error
+  // worth retrying — it is answered 200 and dropped.
+  const suffix = (rest ?? "").slice((given ?? "").length);
+  if (suffix === "/dlr") {
+    const id = url.searchParams.get("id") ?? "";
+    const code = Number.parseInt(url.searchParams.get("code") ?? "", 10);
+    if (id && !Number.isNaN(code)) await inboxFor(env).recordDlr(id, code);
+    return new Response("OK", { status: 200, headers: { "content-type": "text/plain" } });
+  }
+  if (suffix !== "") return new Response("not found", { status: 404 });
 
   // Configured as a POST target; AAISP switches to GET if the URL is given to
   // them ending in `?` or `&`, so both are accepted rather than one working

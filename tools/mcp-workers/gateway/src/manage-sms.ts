@@ -16,8 +16,10 @@ import { escapeHtml } from "@toolbox/mcp-shared";
 import type { Env } from "./env";
 import { notice, page, pill } from "./html";
 import { inboxFor } from "./sms";
+import { dispatchSms, dlrUrl, smsCredentials } from "./smssend";
 import {
   RETENTION_DEFAULTS,
+  type PendingSend,
   type RetentionRow,
   type SenderRow,
   type SenderStatus,
@@ -128,12 +130,50 @@ function renderSenderDetail(
 </section>`;
 }
 
+/**
+ * The release surface. It renders recipient and full body deliberately: an
+ * approval that says only "send a message" is theatre, and the whole point of
+ * staging is that a human sees exactly what is about to leave.
+ */
+function sendRows(sends: PendingSend[], nowMs: number): string {
+  if (sends.length === 0) {
+    return `<tr><td colspan="5" class="muted">Nothing queued.</td></tr>`;
+  }
+  return sends
+    .map((send) => {
+      const actions =
+        send.state === "pending"
+          ? `<form method="post" action="/manage/sms/release" class="inline">
+               <input type="hidden" name="id" value="${escapeHtml(send.id)}">
+               <button type="submit">Release</button>
+             </form>
+             <form method="post" action="/manage/sms/cancel" class="inline">
+               <input type="hidden" name="id" value="${escapeHtml(send.id)}">
+               <button type="submit">Cancel</button>
+             </form>`
+          : `<span class="muted">${escapeHtml(ago(send.decidedAt, nowMs))}</span>`;
+      const tone =
+        send.state === "sent" ? "ok" : send.state === "pending" ? "warn" : send.state === "releasing" ? "warn" : "err";
+      return `<tr>
+        <td class="mono nowrap">${escapeHtml(send.peer)}</td>
+        <td>${escapeHtml(send.body)}${
+          send.error ? `<div class="muted">${escapeHtml(send.error)}</div>` : ""
+        }</td>
+        <td class="nowrap">${pill(send.state, tone)}</td>
+        <td class="nowrap muted">${escapeHtml(send.requestedBy)}<br>${escapeHtml(ago(send.requestedAt, nowMs))}</td>
+        <td class="nowrap">${actions}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
 function renderPage(
   env: Env,
   status: SmsStatus,
   senders: SenderRow[],
   messages: StoredMessage[],
   preview: RetentionRow[],
+  sends: PendingSend[],
   message: string,
   revealedHookUrl: string | null,
   nowMs: number,
@@ -143,6 +183,7 @@ function renderPage(
     .map((n) => n.trim())
     .filter((n) => n.length > 0);
   const live = status.lastReceipt !== null;
+  const sendable = smsCredentials(env) !== null;
 
   const hookCard = revealedHookUrl
     ? `<p class="hint">Paste this into the number's inbound-message target in the AAISP control pages.
@@ -209,6 +250,18 @@ function renderPage(
 </section>
 
 <section class="card">
+  <h2>Queued sends</h2>
+  <p class="hint">Nothing here has been sent. <code>sms_send</code> stages a request and stops;
+    a message leaves only when released below. Client-side approval was the alternative and decays
+    the moment someone clicks "allow for this chat" — this one cannot be talked around.
+    ${sendable ? "" : '<strong>Sending is not configured on this Worker, so Release will fail.</strong>'}</p>
+  <div class="scroll"><table>
+    <thead><tr><th>To</th><th>Message</th><th>State</th><th>Asked by</th><th></th></tr></thead>
+    <tbody>${sendRows(sends, nowMs)}</tbody>
+  </table></div>
+</section>
+
+<section class="card">
   <h2>Retention</h2>
   <p class="hint">Bodies are dropped on a daily alarm; the masked shape is always kept. Review the
     policy here rather than the messages — a per-message queue is one nobody reads.</p>
@@ -240,15 +293,16 @@ export async function handleSmsManage(
       const shapes = await inbox.shapesFor(sender, 40);
       return page("gateway — SMS", renderSenderDetail(sender, shapes), { section: "sms", who });
     }
-    const [status, senders, messages, preview] = await Promise.all([
+    const [status, senders, messages, preview, sends] = await Promise.all([
       inbox.status(),
       inbox.listSenders(),
       inbox.listMessages({ limit: 25 }),
       inbox.retentionPreview(),
+      inbox.listSends(25),
     ]);
     return page(
       "gateway — SMS",
-      renderPage(env, status, senders, messages, preview, message, revealed, Date.now()),
+      renderPage(env, status, senders, messages, preview, sends, message, revealed, Date.now()),
       { section: "sms", who },
     );
   };
@@ -280,6 +334,34 @@ export async function handleSmsManage(
       retentionDays: days,
     });
     return redirectBack(`saved ${oa}`);
+  }
+
+  if (url.pathname === "/manage/sms/release" && request.method === "POST") {
+    const form = await request.formData();
+    const id = String(form.get("id") ?? "");
+    if (!id) return new Response("missing id", { status: 400 });
+    const inbox = inboxFor(env);
+
+    // Claiming the row and checking taint happen together inside the store, so
+    // a second click cannot dispatch the same message twice.
+    const ticket = await inbox.beginRelease(id);
+    if (!ticket.ok) return redirectBack(`not released — ${ticket.reason}`);
+
+    const result = await dispatchSms(env, ticket.peer, ticket.body, dlrUrl(env, url.origin, id));
+    await inbox.completeSend(id, {
+      ok: result.ok,
+      detail: result.detail,
+      ownNumber: smsCredentials(env)?.username,
+    });
+    return redirectBack(result.ok ? `sent to ${ticket.peer} — ${result.detail}` : `send failed — ${result.detail}`);
+  }
+
+  if (url.pathname === "/manage/sms/cancel" && request.method === "POST") {
+    const form = await request.formData();
+    const id = String(form.get("id") ?? "");
+    if (!id) return new Response("missing id", { status: 400 });
+    await inboxFor(env).cancelSend(id);
+    return redirectBack("cancelled");
   }
 
   if (url.pathname === "/manage/sms/purge" && request.method === "POST") {
