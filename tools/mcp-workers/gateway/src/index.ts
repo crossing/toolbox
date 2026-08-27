@@ -45,11 +45,14 @@ import {
   SERVICES,
   type GatewayToolContext,
 } from "./registry";
+import { inboxFor } from "./sms";
+import { handleSmsHook } from "./smshook";
 import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
 import { bridgeFor } from "./whatsapp";
 import type { VaultBlob } from "./manage";
 
 export { UserVault } from "./vault";
+export { SmsInbox } from "./smsinbox";
 export type { Env } from "./env";
 
 export type GatewayProps = OwnerProps;
@@ -134,6 +137,10 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
       whatsappBridge: async () => {
         await assertEnabled("whatsapp");
         return bridgeFor(this.env);
+      },
+      smsInbox: async () => {
+        await assertEnabled("sms");
+        return inboxFor(this.env);
       },
       listAccounts: async () => vault.listAccounts(),
       audit: async (tool, summary, status) =>
@@ -245,6 +252,11 @@ const authHandler = {
   async fetch(request: Request, rawEnv: unknown, _ctx: ExecutionContext): Promise<Response> {
     const env = rawEnv as Env;
     const url = new URL(request.url);
+    // Before anything else, and deliberately outside the OAuth surface: AAISP
+    // posts here with no credential of its own, so the path carries the secret
+    // and a mismatch is indistinguishable from a route that does not exist.
+    const hook = await handleSmsHook(request, env, url);
+    if (hook) return hook;
     if (url.pathname === "/authorize") return handleAuthorize(request, env, url);
     if (url.pathname === "/callback" && request.method === "GET") {
       const state = url.searchParams.get("state") ?? "";

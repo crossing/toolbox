@@ -10,6 +10,7 @@
 
 import { escapeHtml } from "@toolbox/mcp-shared";
 import { page, pill } from "./html";
+import { handleSmsManage } from "./manage-sms";
 import { handleWhatsappManage } from "./manage-whatsapp";
 import { encryptJson, decryptJson, importVaultKey, randomToken, signToken, verifyToken } from "./crypto";
 import { vaultFor, type Env } from "./env";
@@ -520,6 +521,10 @@ export async function handleManage(request: Request, env: Env, url: URL): Promis
 
   if (url.pathname === "/manage/whatsapp" || url.pathname.startsWith("/manage/whatsapp/")) {
     return handleWhatsappManage(request, env, url, email);
+  }
+
+  if (url.pathname === "/manage/sms" || url.pathname.startsWith("/manage/sms/")) {
+    return handleSmsManage(request, env, url, email);
   }
 
   if (url.pathname === "/manage" && request.method === "GET") {

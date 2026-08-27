@@ -15,12 +15,17 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["GatewayMCP", "UserVault"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["SmsInbox"]
     }
   ],
   "durable_objects": {
     "bindings": [
       { "name": "GATEWAY_MCP", "class_name": "GatewayMCP" },
       { "name": "USER_VAULT", "class_name": "UserVault" },
+      { "name": "SMS_INBOX", "class_name": "SmsInbox" },
       // Cross-script: the WhatsApp bridge object is defined and migrated by
       // the whatsapp-bridge Worker, so gateway deploys never evict a live
       // WhatsApp session. Deploy that Worker before this one.

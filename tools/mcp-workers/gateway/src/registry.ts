@@ -15,6 +15,8 @@ import type { FreeAgentClient } from "./freeagentapi";
 import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
 import { registerRelayTools } from "./relay";
 import type { GoogleClient } from "./googleapi";
+import { registerSmsReadTools } from "./sms";
+import type { SmsInboxApi } from "./smsstore";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
 import { registerWhatsappReadTools, registerWhatsappWriteTools } from "./whatsapp";
@@ -33,6 +35,7 @@ export interface GatewayToolContext {
   googleClient(service: string, account?: string): Promise<GoogleClient>;
   freeagentClient(): Promise<FreeAgentClient>;
   whatsappBridge(): Promise<WhatsAppBridgeApi>;
+  smsInbox(): Promise<SmsInboxApi>;
   listAccounts(): Promise<AccountInfo[]>;
   // Best-effort write audit into the vault; failures never fail a tool call.
   audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
@@ -180,7 +183,28 @@ const whatsappService: ServiceDef = {
   },
 };
 
-export const SERVICES: ServiceDef[] = [gmailService, driveService, freeagentService, whatsappService];
+// Off until there is something to read: the hook has to be wired up at AAISP
+// and a message has to arrive before these tools can answer anything but
+// "nothing stored yet". No write tools exist — sending is staged through
+// /manage/sms, which is a later phase.
+const smsService: ServiceDef = {
+  id: "sms",
+  title: "SMS",
+  description:
+    "Text messages received on the AAISP number: list, thread, and hook health. Bodies are untrusted external content.",
+  defaultEnabled: false,
+  registerRead(server, ctx) {
+    registerSmsReadTools(server, () => ctx.smsInbox());
+  },
+};
+
+export const SERVICES: ServiceDef[] = [
+  gmailService,
+  driveService,
+  freeagentService,
+  whatsappService,
+  smsService,
+];
 
 export function defaultServiceToggles(): Record<string, boolean> {
   return Object.fromEntries(SERVICES.map((svc) => [svc.id, svc.defaultEnabled]));
