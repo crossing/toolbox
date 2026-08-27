@@ -5,6 +5,16 @@
 # assigned. writeShellApplication shellchecks the combined result, so those really are
 # checked -- SC2154 only fires when this file is linted on its own.
 # shellcheck disable=SC2154
+#
+# A downstream consumer places real orders through these guards against a written
+# description of them, and deliberately pins no digest of this file: hashing tooling
+# that updates out of band made every dependency bump look like a governance event.
+# tests/test-order-entry.sh is therefore the only thing standing between a changed
+# guard and a consumer that still believes the old one.
+#
+# Changing the command surface, the policy checks, the ticket lifecycle or the refusals
+# below means updating that test in the same change, and saying so in the commit
+# message loudly enough that the description downstream gets re-read.
 
 order_policy_json() {
   local profile=$1
