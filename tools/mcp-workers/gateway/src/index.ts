@@ -154,6 +154,14 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
 
     registerGatewayTools(this.server, ctx);
 
+    // Read once, at connect: the tool list a client sees is fixed for the life
+    // of its session. That makes the two toggle directions behave differently,
+    // which /manage now says out loud — disabling bites immediately, because
+    // assertEnabled runs inside every handler, while enabling needs a new
+    // conversation, because there is no handler yet to run it. Registering
+    // every service unconditionally would make them symmetric at the cost of
+    // putting disabled tools in every client's list; the asymmetry is the
+    // better trade, so it is documented rather than removed.
     const config = await vault.getCatalogConfig(defaultServiceToggles());
     for (const svc of SERVICES) {
       if (!config.services[svc.id]) continue;

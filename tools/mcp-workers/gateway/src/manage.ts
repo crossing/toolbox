@@ -222,10 +222,12 @@ function renderManagePage(
 
   return `<section class="card">
   <h2>Services</h2>
-  <p class="hint">What the connector offers. New conversations see a change immediately; an open
-  one picks it up when it next calls a tool. <strong>Account</strong> is which linked account the
-  service resolves to when a tool is called without one — Gmail and Drive share a single Google
-  link but need not share an account.</p>
+  <p class="hint">What the connector offers. <strong>Disabling takes effect immediately</strong>,
+  including in conversations already open — the check runs on every tool call. <strong>Enabling
+  needs a new conversation</strong>: the tool list is fixed when a client connects, so a service
+  switched on now will not appear until the next one. <strong>Account</strong> is which linked
+  account the service resolves to when a tool is called without one — Gmail and Drive share a
+  single Google link but need not share an account.</p>
   <div class="scroll"><table>
     <thead><tr><th>Service</th><th>Status</th><th>Account</th><th></th></tr></thead>
     <tbody>${serviceRows}</tbody>
