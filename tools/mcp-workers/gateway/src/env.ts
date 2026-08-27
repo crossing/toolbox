@@ -32,6 +32,7 @@ export interface Env {
   // plainly, not fail to boot.
   AAISP_SMS_USERNAME?: string; // the number in full international format
   AAISP_SMS_PASSWORD?: string; // the outgoing password; the control pages never show it
+  PUBLIC_ORIGIN?: string; // wrangler var, not a secret: this Worker's own origin
 }
 
 // One vault per identity; the DO id is derived from the normalized email.

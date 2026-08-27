@@ -345,53 +345,71 @@ Prefixed `sms_`, consistent with the rest of the catalog:
 | `sms_list_messages` | read | `after`, `before`, `peer`, `query`, `limit`, `page`; `query` matches bodies, and purged messages match on `shape` only |
 | `sms_get_thread` | read | everything to and from one number, in order |
 | `sms_status` | read | hook health, last receipt, counts, configured numbers |
-| `sms_send` | write | `to`, `message`; stages a request, never sends directly. Returns the staged id and says so plainly |
+| `sms_send` | write | `to`, `message`; sends immediately. Marked `destructive`; every attempt is logged |
 
 The three read tools are built, behind a catalog toggle defaulting to off. Their
 descriptions say plainly that bodies are untrusted external content, which is the
 read-side half of the soft rule; the write-side half lands with `sms_send`.
 
-## Sends are staged, not sent
+## Sends are immediate, logged, and marked destructive
 
-`sms_send` costs money, reaches a stranger's phone, and is the tool an injection
-wants. It writes a row to `pending_sends` and returns "queued — release at
-`/manage/sms`". A human releases it there.
+`sms_send` sends. It is annotated `destructive`, sits behind the gateway's own
+authentication, and every attempt — sent, failed or refused — lands in a log at
+`/manage/sms` showing recipient and full body.
 
-Client-side approval prompts were the obvious alternative and are not enough: on
-a remote MCP the prompt belongs to the client, and every client offers some form
-of "allow for this chat" — the button anyone clicks after the fifth prompt. So
-the guarantee decays exactly as the attack becomes worth mounting. Staging is
-enforced by the server, which is the only party the model cannot talk around.
+An earlier draft staged sends for human release, and that was built before being
+replaced on 2026-08-27. The reason for the change: staging every send is a real
+tax on a low-volume personal line, and the interface is already authenticated.
+The reason it is worth writing down anyway is that **authentication is not what
+the staging gate defended against.** The threat is prompt injection — anyone who
+knows the number can text instructions into a store a model reads, and if that
+model can send, the attacker is steering an already-authenticated session
+without ever authenticating. Client-side approval prompts do not close that
+either: on a remote MCP the prompt belongs to the client, and every client offers
+some form of "allow for this chat".
 
-Whichever surface does the releasing must render **recipient plus full body**. An
-approval that says only "send a message" is theatre.
+So what actually stands between an injected instruction and a message leaving is:
 
-At release time the body is normalised and checked against `live_secrets`; a match
-is refused outright, the row is marked `refused`, and the reason names the sender
-the code came from. Claiming the row and running the check happen in the same store
-call, so the state moves `pending → releasing` atomically and a second click cannot
-dispatch the same message twice.
+- The soft rule in the tool description, which covers the agent trying to be
+  helpful and not the one that has been argued into it.
+- The `live_secrets` check in `beginSend`, which refuses a body carrying a code
+  that arrived recently — **inert until phase 3 approves a pattern**.
+- The log, which is read after the fact rather than before.
 
-Dispatch itself lives in the Worker, not in `SmsInbox`: the Durable Object holds no
-credentials, and keeping it that way means the store can be reasoned about without
-asking what it could send. AAISP's reply is one line of plain text whose HTTP status
-does not track it — a rejected message still comes back 200 — so the body decides,
-and anything unrecognised counts as a failure rather than an optimistic success.
+That is a deliberately thinner defence than the staged design, chosen knowing
+what it gives up. The thing that would restore it without the tax is a
+classifier at the write chokepoint, tracked separately.
 
-A destination is normalised more strictly than a sender. An inbound `oa` may be a
-shortcode or an alphabetic sender ID and is left alone; a `to` arrives as free text
-from a model, so spacing and punctuation are stripped and anything that is not a
-dialable number is rejected at staging rather than handed to AAISP to refuse.
-
-Two things follow that are not SMS work:
+Two things that follow and are not SMS work:
 
 - **`whatsapp_send_message` ships today without a gate**, and by this reasoning
-  it should be staged too. That is a change to live behaviour and does not need
-  to wait for any phase here.
+  it should carry the same soft rule and the same taint check.
 - The WhatsApp bridge is a separate Worker, so its send path cannot read
-  `live_secrets` directly. A service binding exposing a single internal
-  "is this payload tainted" check on `gateway-mcp` is the clean answer; the
-  alternative, replicating the table, will drift.
+  `live_secrets` directly. A service binding exposing a single internal "is this
+  payload tainted" check on `gateway-mcp` is the clean answer; replicating the
+  table will drift.
+
+## How a send is put together
+
+`beginSend` writes the row, normalises the destination, and runs the taint check
+in one call — the row must exist before AAISP is reached, so a send that dies
+mid-flight leaves evidence rather than nothing. Dispatch then happens in the
+Worker, because `SmsInbox` holds no credentials and keeping it that way means the
+store can be reasoned about without asking what it could send.
+
+AAISP's reply is one line of plain text whose HTTP status does not track it — a
+rejected message still comes back 200 — so the body decides, and anything
+unrecognised counts as a failure rather than an optimistic success.
+
+A destination is normalised more strictly than a sender. An inbound `oa` may be a
+shortcode or an alphabetic sender ID and is left alone; a `to` arrives as free
+text from a model, so spacing and punctuation are stripped and anything that is
+not dialable is rejected before the row is opened.
+
+Delivery reports come back to `/hooks/sms/<secret>/dlr` carrying the send id,
+since nothing in AAISP's report identifies which message it describes. The URL is
+built from `PUBLIC_ORIGIN`, a wrangler var rather than a secret, because a tool
+call — unlike a page request — has no `Request` to read an origin from.
 
 ## Management page
 
@@ -452,22 +470,19 @@ band and simply works; do not go looking for it in the UI.
    pattern. Gated on having weeks of data, not on the code being ready — the
    tables, the extraction and the taint check are already in place and inert;
    what is missing is the form that approves a regex, and the regexes to approve.
-4. **Send.** ✅ Built. `sms_send` stages into `pending_sends` and returns; a human
-   releases at `/manage/sms`, where the `live_secrets` check runs before the row is
-   claimed and dispatch happens in the Worker. Delivery reports come back through
+4. **Send.** ✅ Built. `sms_send` dispatches immediately, marked `destructive`; the
+   `live_secrets` check runs in `beginSend` before anything reaches AAISP, and every
+   attempt is logged at `/manage/sms`. Delivery reports come back through
    `srr` to `/hooks/sms/<secret>/dlr`, updating `status` and `dlr_code`.
 
-   **Its enforcement is real but currently empty.** The staged-release gate works
-   fully — no message leaves without a human clicking Release. The `live_secrets`
-   hard block, by contrast, can only refuse a code it knows about, and it knows
-   about none until phase 3 approves a pattern. So today the taint check passes
-   everything, and the control actually protecting the store is the human in the
-   loop. That is the right order — the gate exists before the tool — but it does
-   mean phase 3 is what turns the automatic half on.
+   **Its enforcement is currently empty.** The `live_secrets` block can only
+   refuse a code it knows about, and it knows none until phase 3 approves a
+   pattern. Today the taint check passes everything, so what protects the store
+   is the soft rule and the log. Phase 3 is what turns the automatic half on.
 
-Send comes last deliberately: the enforcement it depends on is built in phase 3,
-and shipping an egress tool before its check exists gets the ordering exactly
-backwards.
+Send was built last deliberately. It now ships ahead of the phase-3 enforcement it
+was meant to wait for — a decision taken with the trade-off understood, not an
+oversight; see the send section.
 
 ## Open questions
 

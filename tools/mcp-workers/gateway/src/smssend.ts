@@ -40,7 +40,7 @@ export function smsCredentials(env: Env): { username: string; password: string }
  * the credential for both.
  */
 export function dlrUrl(env: Env, origin: string, sendId: string): string | null {
-  if (!env.SMS_HOOK_SECRET) return null;
+  if (!env.SMS_HOOK_SECRET || !origin) return null;
   return `${origin}/hooks/sms/${env.SMS_HOOK_SECRET}/dlr?id=${encodeURIComponent(sendId)}&code=%code`;
 }
 

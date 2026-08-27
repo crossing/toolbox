@@ -17,9 +17,9 @@ import {
   type MessageFilter,
   type RecordResult,
   type RetentionRow,
-  type PendingSend,
-  type ReleaseTicket,
   type SendOutcome,
+  type SendRecord,
+  type SendTicket,
   type SenderPatch,
   type SenderRow,
   type ShapeRow,
@@ -89,26 +89,18 @@ export class SmsInbox extends DurableObject<unknown> {
     return this.store.checkTaint(payload, Date.now());
   }
 
-  /** Sends are staged here and dispatched by the Worker, which is the only
-   *  side holding AAISP credentials. */
-  stageSend(peer: string, body: string, requestedBy: string): PendingSend {
-    return this.store.stageSend(crypto.randomUUID(), peer, body, requestedBy, Date.now());
+  /** Opened here, dispatched by the Worker — the only side holding AAISP
+   *  credentials. */
+  beginSend(peer: string, body: string, requestedBy: string): SendTicket {
+    return this.store.beginSend(crypto.randomUUID(), peer, body, requestedBy, Date.now());
   }
 
-  listSends(limit?: number): PendingSend[] {
+  listSends(limit?: number): SendRecord[] {
     return this.store.listSends(limit);
-  }
-
-  beginRelease(id: string): ReleaseTicket {
-    return this.store.beginRelease(id, Date.now());
   }
 
   async completeSend(id: string, outcome: SendOutcome): Promise<void> {
     await this.store.completeSend(id, outcome, Date.now());
-  }
-
-  cancelSend(id: string): void {
-    this.store.cancelSend(id, Date.now());
   }
 
   recordDlr(id: string, code: number): boolean {

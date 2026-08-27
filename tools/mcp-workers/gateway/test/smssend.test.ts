@@ -88,3 +88,11 @@ describe("dispatchSms", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe("dlrUrl without a configured origin", () => {
+  it("returns null rather than a URL relative to nothing", () => {
+    // PUBLIC_ORIGIN is a wrangler var; if it is ever dropped, a send should
+    // still go out — it just loses its delivery report.
+    expect(dlrUrl(env(), "", "send-1")).toBeNull();
+  });
+});

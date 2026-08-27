@@ -154,8 +154,7 @@ describe("field validation", () => {
 describe("delivery reports", () => {
   it("applies a report to the message its send produced", async () => {
     const { env, store } = fakeEnv();
-    store.stageSend("send-1", "+447700900456", "ping", "xor@jecity.net", Date.now());
-    store.beginRelease("send-1", Date.now());
+    store.beginSend("send-1", "+447700900456", "ping", "xor@jecity.net", Date.now());
     await store.completeSend("send-1", { ok: true, detail: "OK:1" }, Date.now());
 
     const url = new URL(`https://mcp.test/hooks/sms/${SECRET}/dlr?id=send-1&code=1`);

@@ -16,10 +16,10 @@ import { escapeHtml } from "@toolbox/mcp-shared";
 import type { Env } from "./env";
 import { notice, page, pill } from "./html";
 import { inboxFor } from "./sms";
-import { dispatchSms, dlrUrl, smsCredentials } from "./smssend";
+import { smsCredentials } from "./smssend";
 import {
   RETENTION_DEFAULTS,
-  type PendingSend,
+  type SendRecord,
   type RetentionRow,
   type SenderRow,
   type SenderStatus,
@@ -131,29 +131,17 @@ function renderSenderDetail(
 }
 
 /**
- * The release surface. It renders recipient and full body deliberately: an
- * approval that says only "send a message" is theatre, and the whole point of
- * staging is that a human sees exactly what is about to leave.
+ * The send log. Every attempt appears here with recipient and full body —
+ * `sms_send` dispatches immediately, so this is not an approval queue but the
+ * record a human reads afterwards to see what the gateway actually sent.
  */
-function sendRows(sends: PendingSend[], nowMs: number): string {
+function sendRows(sends: SendRecord[], nowMs: number): string {
   if (sends.length === 0) {
-    return `<tr><td colspan="5" class="muted">Nothing queued.</td></tr>`;
+    return `<tr><td colspan="4" class="muted">Nothing sent yet.</td></tr>`;
   }
   return sends
     .map((send) => {
-      const actions =
-        send.state === "pending"
-          ? `<form method="post" action="/manage/sms/release" class="inline">
-               <input type="hidden" name="id" value="${escapeHtml(send.id)}">
-               <button type="submit">Release</button>
-             </form>
-             <form method="post" action="/manage/sms/cancel" class="inline">
-               <input type="hidden" name="id" value="${escapeHtml(send.id)}">
-               <button type="submit">Cancel</button>
-             </form>`
-          : `<span class="muted">${escapeHtml(ago(send.decidedAt, nowMs))}</span>`;
-      const tone =
-        send.state === "sent" ? "ok" : send.state === "pending" ? "warn" : send.state === "releasing" ? "warn" : "err";
+      const tone = send.state === "sent" ? "ok" : send.state === "sending" ? "warn" : "err";
       return `<tr>
         <td class="mono nowrap">${escapeHtml(send.peer)}</td>
         <td>${escapeHtml(send.body)}${
@@ -161,7 +149,6 @@ function sendRows(sends: PendingSend[], nowMs: number): string {
         }</td>
         <td class="nowrap">${pill(send.state, tone)}</td>
         <td class="nowrap muted">${escapeHtml(send.requestedBy)}<br>${escapeHtml(ago(send.requestedAt, nowMs))}</td>
-        <td class="nowrap">${actions}</td>
       </tr>`;
     })
     .join("");
@@ -173,7 +160,7 @@ function renderPage(
   senders: SenderRow[],
   messages: StoredMessage[],
   preview: RetentionRow[],
-  sends: PendingSend[],
+  sends: SendRecord[],
   message: string,
   revealedHookUrl: string | null,
   nowMs: number,
@@ -250,13 +237,14 @@ function renderPage(
 </section>
 
 <section class="card">
-  <h2>Queued sends</h2>
-  <p class="hint">Nothing here has been sent. <code>sms_send</code> stages a request and stops;
-    a message leaves only when released below. Client-side approval was the alternative and decays
-    the moment someone clicks "allow for this chat" — this one cannot be talked around.
-    ${sendable ? "" : '<strong>Sending is not configured on this Worker, so Release will fail.</strong>'}</p>
+  <h2>Sent</h2>
+  <p class="hint">Every <code>sms_send</code> attempt, whether it left or not. Sends are immediate and
+    cost money, so this is a record rather than an approval queue — read it to see what the gateway
+    actually did. A body carrying a code that arrived recently is refused before dispatch and appears
+    here as <code>refused</code>.
+    ${sendable ? "" : '<strong>Sending is not configured on this Worker: AAISP_SMS_USERNAME/PASSWORD are unset.</strong>'}</p>
   <div class="scroll"><table>
-    <thead><tr><th>To</th><th>Message</th><th>State</th><th>Asked by</th><th></th></tr></thead>
+    <thead><tr><th>To</th><th>Message</th><th>State</th><th>Asked by</th></tr></thead>
     <tbody>${sendRows(sends, nowMs)}</tbody>
   </table></div>
 </section>
@@ -334,34 +322,6 @@ export async function handleSmsManage(
       retentionDays: days,
     });
     return redirectBack(`saved ${oa}`);
-  }
-
-  if (url.pathname === "/manage/sms/release" && request.method === "POST") {
-    const form = await request.formData();
-    const id = String(form.get("id") ?? "");
-    if (!id) return new Response("missing id", { status: 400 });
-    const inbox = inboxFor(env);
-
-    // Claiming the row and checking taint happen together inside the store, so
-    // a second click cannot dispatch the same message twice.
-    const ticket = await inbox.beginRelease(id);
-    if (!ticket.ok) return redirectBack(`not released — ${ticket.reason}`);
-
-    const result = await dispatchSms(env, ticket.peer, ticket.body, dlrUrl(env, url.origin, id));
-    await inbox.completeSend(id, {
-      ok: result.ok,
-      detail: result.detail,
-      ownNumber: smsCredentials(env)?.username,
-    });
-    return redirectBack(result.ok ? `sent to ${ticket.peer} — ${result.detail}` : `send failed — ${result.detail}`);
-  }
-
-  if (url.pathname === "/manage/sms/cancel" && request.method === "POST") {
-    const form = await request.formData();
-    const id = String(form.get("id") ?? "");
-    if (!id) return new Response("missing id", { status: 400 });
-    await inboxFor(env).cancelSend(id);
-    return redirectBack("cancelled");
   }
 
   if (url.pathname === "/manage/sms/purge" && request.method === "POST") {

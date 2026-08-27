@@ -47,6 +47,7 @@ import {
 } from "./registry";
 import { inboxFor } from "./sms";
 import { handleSmsHook } from "./smshook";
+import { dispatchSms, dlrUrl } from "./smssend";
 import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
 import { bridgeFor } from "./whatsapp";
 import type { VaultBlob } from "./manage";
@@ -142,6 +143,10 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
         await assertEnabled("sms");
         return inboxFor(this.env);
       },
+      // The delivery-report URL carries the send id, which exists only after
+      // the store has opened the row — so it is built per call, not once.
+      sendSms: async (sendId, peer, body) =>
+        dispatchSms(this.env, peer, body, dlrUrl(this.env, this.env.PUBLIC_ORIGIN ?? "", sendId)),
       listAccounts: async () => vault.listAccounts(),
       audit: async (tool, summary, status) =>
         vault.appendAudit({ ts: Date.now(), tool, summary, status }),
