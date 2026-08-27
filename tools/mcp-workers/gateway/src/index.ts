@@ -45,11 +45,15 @@ import {
   SERVICES,
   type GatewayToolContext,
 } from "./registry";
+import { inboxFor } from "./sms";
+import { handleSmsHook } from "./smshook";
+import { dispatchSms, dlrUrl } from "./smssend";
 import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
 import { bridgeFor } from "./whatsapp";
 import type { VaultBlob } from "./manage";
 
 export { UserVault } from "./vault";
+export { SmsInbox } from "./smsinbox";
 export type { Env } from "./env";
 
 export type GatewayProps = OwnerProps;
@@ -135,6 +139,14 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
         await assertEnabled("whatsapp");
         return bridgeFor(this.env);
       },
+      smsInbox: async () => {
+        await assertEnabled("sms");
+        return inboxFor(this.env);
+      },
+      // The delivery-report URL carries the send id, which exists only after
+      // the store has opened the row — so it is built per call, not once.
+      sendSms: async (sendId, peer, body) =>
+        dispatchSms(this.env, peer, body, dlrUrl(this.env, this.env.PUBLIC_ORIGIN ?? "", sendId)),
       listAccounts: async () => vault.listAccounts(),
       audit: async (tool, summary, status) =>
         vault.appendAudit({ ts: Date.now(), tool, summary, status }),
@@ -142,6 +154,14 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
 
     registerGatewayTools(this.server, ctx);
 
+    // Read once, at connect: the tool list a client sees is fixed for the life
+    // of its session. That makes the two toggle directions behave differently,
+    // which /manage now says out loud — disabling bites immediately, because
+    // assertEnabled runs inside every handler, while enabling needs a new
+    // conversation, because there is no handler yet to run it. Registering
+    // every service unconditionally would make them symmetric at the cost of
+    // putting disabled tools in every client's list; the asymmetry is the
+    // better trade, so it is documented rather than removed.
     const config = await vault.getCatalogConfig(defaultServiceToggles());
     for (const svc of SERVICES) {
       if (!config.services[svc.id]) continue;
@@ -245,6 +265,11 @@ const authHandler = {
   async fetch(request: Request, rawEnv: unknown, _ctx: ExecutionContext): Promise<Response> {
     const env = rawEnv as Env;
     const url = new URL(request.url);
+    // Before anything else, and deliberately outside the OAuth surface: AAISP
+    // posts here with no credential of its own, so the path carries the secret
+    // and a mismatch is indistinguishable from a route that does not exist.
+    const hook = await handleSmsHook(request, env, url);
+    if (hook) return hook;
     if (url.pathname === "/authorize") return handleAuthorize(request, env, url);
     if (url.pathname === "/callback" && request.method === "GET") {
       const state = url.searchParams.get("state") ?? "";

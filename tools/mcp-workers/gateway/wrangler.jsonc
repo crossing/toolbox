@@ -7,6 +7,9 @@
   // Workers Domains API (see freeagent/wrangler.jsonc for the rationale).
   "workers_dev": false,
   "compatibility_flags": ["nodejs_compat"],
+  // Where this Worker is reachable, so a delivery-report URL can be built from
+  // a tool call — which, unlike a page request, has no Request to read it from.
+  "vars": { "PUBLIC_ORIGIN": "https://mcp.xing.works" },
   "alias": {
     // Optional peer of the agents package; only its AI-chat path needs it.
     "ai": "../shared/src/ai-stub.ts"
@@ -15,12 +18,17 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["GatewayMCP", "UserVault"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["SmsInbox"]
     }
   ],
   "durable_objects": {
     "bindings": [
       { "name": "GATEWAY_MCP", "class_name": "GatewayMCP" },
       { "name": "USER_VAULT", "class_name": "UserVault" },
+      { "name": "SMS_INBOX", "class_name": "SmsInbox" },
       // Cross-script: the WhatsApp bridge object is defined and migrated by
       // the whatsapp-bridge Worker, so gateway deploys never evict a live
       // WhatsApp session. Deploy that Worker before this one.
