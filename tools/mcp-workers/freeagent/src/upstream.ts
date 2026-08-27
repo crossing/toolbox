@@ -1,6 +1,6 @@
 // FreeAgent upstream OAuth. FreeAgent publishes no discovery document, so the
 // endpoints are hardcoded, and client authentication is client_secret_basic
-// (mirrors tools/op-mcp/src/op_mcp/oauth.py). Errors are sanitized: only the
+// (mirroring the refresh flow the retired op-mcp bridge used). Errors are sanitized: only the
 // OAuth error/error_description fields surface, never a raw response body
 // that could echo a credential.
 

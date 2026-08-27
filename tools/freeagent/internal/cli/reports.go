@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Read-only accounting reports. These never mutate; op-mcp's read allowlist
+// Read-only accounting reports. These never mutate; a read-only allowlist
 // names each command explicitly.
 
 func reportURL(path string, params url.Values) string {

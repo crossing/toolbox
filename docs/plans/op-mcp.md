@@ -1,3 +1,10 @@
+> **Retired 2026-08-27.** op-mcp has been removed from this repo, from home-ops,
+> and from the agent MCP registrations. The hosted MCP gateway
+> (`https://mcp.xing.works/mcp`, `tools/mcp-workers/gateway`) replaced it: it holds
+> its own upstream tokens, so no 1Password authorization is needed per call, and it
+> reaches the same Google and FreeAgent accounts. This plan is kept for the design
+> rationale only — nothing in it is live.
+
 # Plan: op-mcp — a presence-scoped MCP service for the 1Password-backed tools
 
 Design agreed in discussion; nothing here is implemented yet. Working name `op-mcp`

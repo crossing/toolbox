@@ -4,7 +4,7 @@
 # message-DB path / bridge API URL come from WHATSAPP_STATE_DIR (shared with
 # whatsapp-bridge) or WHATSAPP_DB_PATH / WHATSAPP_API_URL.
 #
-# uv2nix and friends are threaded in from the flake (precedent: tools/op-mcp).
+# uv2nix and friends are threaded in from the flake.
 { lib
 , callPackage
 , writeShellApplication
