@@ -4,6 +4,7 @@
 # ~/.agents/skills, so consumers can install the skills as one package.
 let
   tools = [
+    { name = "bdw"; skill = ../../tools/bdw/SKILL.md; }
     { name = "safe-op"; skill = ../../tools/safe-op/SKILL.md; }
     { name = "op-oauth2c"; skill = ../../tools/op-oauth2c/SKILL.md; }
     { name = "op-gws"; skill = ../../tools/op-gws/SKILL.md; }

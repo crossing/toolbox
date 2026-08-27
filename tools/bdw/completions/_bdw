@@ -1,0 +1,100 @@
+#compdef bdw
+
+# Typing `work-ysf.6` by hand is exactly what bdw exists to avoid, so the
+# candidates come from beads itself and are shown the way `bd list` shows them:
+# the ID, then the title.
+#
+# Two things make this more than a plain `_describe`:
+#
+#   * matching happens *here*, against the ID and the title together, and the
+#     candidates are added with `compadd -U` so zsh does not then re-filter them
+#     against the typed word. Typing `market` therefore finds
+#     `work-i3f  Continuous market-data capture`, which ID-prefix matching never
+#     would.
+#   * the menu style below turns on zsh's own menu selection for bdw only, which
+#     is what makes the list navigable with the arrow keys.
+#
+# The two queries are deliberately different: `start` offers anything still open,
+# while `attach` and `finish` only offer beads that already carry a session --
+# the `bdw` label is what distinguishes them.
+
+_bdw_beads() {
+  local query=$1 tag=$2
+  local -a rows ids display
+  local row id title
+  local -i width=0
+
+  rows=(${(f)"$(bd query "$query" --json 2>/dev/null |
+    jq -r --arg p "$PREFIX$SUFFIX" '
+      .[]
+      | select(
+          $p == ""
+          or (((.id + " " + .title) | ascii_downcase) | contains($p | ascii_downcase))
+        )
+      | "\(.id)\t\(.title | gsub("[\r\n]+"; " "))"' 2>/dev/null)"})
+
+  (( ${#rows} )) || return 1
+
+  for row in $rows; do
+    id=${row%%$'\t'*}
+    (( ${#id} > width )) && width=${#id}
+  done
+
+  for row in $rows; do
+    id=${row%%$'\t'*}
+    title=${row#*$'\t'}
+    ids+=($id)
+    display+=("${(r:$width:)id}  $title")
+  done
+
+  _description -V beads expl "$tag"
+  compadd "${expl[@]}" -U -Q -d display -a ids
+}
+
+_bdw() {
+  # Arrow-key menu selection, scoped to bdw's own completions so it cannot change
+  # how anything else in the shell completes. `interactive` means typing inside
+  # the menu re-runs the completion, which re-runs the title match above.
+  # Override it with a `zstyle ':completion:*:*:bdw:*' menu no` of your own.
+  zstyle ':completion:*:*:bdw:*' menu yes select interactive
+
+  local curcontext="$curcontext" state
+  _arguments -C '1: :->cmd' '*:: :->args' && return
+
+  case $state in
+    cmd)
+      local -a cmds=(
+        'start:claim a bead and open its session'
+        'attach:switch to a bead'\''s tmux session'
+        'ls:list beads with a bdw session'
+        'finish:harvest a bead'\''s session onto it'
+        'hook:SessionEnd hook entrypoint'
+      )
+      _describe -t commands 'bdw command' cmds
+      ;;
+    args)
+      case $words[1] in
+        start)
+          _arguments \
+            '--dry-run[print what start would do, changing nothing]' \
+            '*: :{_bdw_beads "status!=closed" "open bead"}'
+          ;;
+        attach)
+          _bdw_beads 'label=bdw' 'bead with a session'
+          ;;
+        finish)
+          if (( CURRENT == 2 )); then
+            _bdw_beads 'label=bdw' 'bead with a session'
+          else
+            _values 'option' '--close[close the bead after harvesting]'
+          fi
+          ;;
+        ls)
+          _values 'option' '--human[indent the JSON]'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_bdw "$@"
