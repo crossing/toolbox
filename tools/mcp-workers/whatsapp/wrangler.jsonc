@@ -1,7 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Not to be confused with tools/whatsapp-bridge, the local Go bridge this
-  // one mirrors. That stack keeps running; this is the cloud second device.
+  // Started life as the cloud second device beside tools/whatsapp-bridge, the
+  // local Go bridge it mirrors; that stack was retired 2026-09-16 and this is
+  // now the only WhatsApp linked device.
   "name": "whatsapp-bridge",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",

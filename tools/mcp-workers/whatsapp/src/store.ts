@@ -1,6 +1,7 @@
-// The message store: a faithful mirror of the local Go bridge's SQLite schema
-// (tools/whatsapp-bridge/main.go), so the same queries answer the same way and
-// the one-off history import is a straight row copy.
+// The message store: a faithful mirror of the retired local Go bridge's SQLite
+// schema (tools/whatsapp-bridge/main.go before 2026-09-16, a whatsmeow fork of
+// lharries/whatsapp-mcp), so the same queries answer the same way and the
+// one-off history import was a straight row copy.
 //
 // Deliberate differences from the Go schema, all additive:
 //   - timestamps are ISO-8601 UTC ("2026-08-20T22:32:04.000Z") so that lexical
@@ -203,7 +204,7 @@ export class Store {
     return { chats: chats ?? 0, messages: messages ?? 0 };
   }
 
-  // --- reads, mirroring tools/whatsapp-mcp-server ---------------------------
+  // --- reads, mirroring the retired local whatsapp-mcp-server ---------------
 
   searchContacts(query: string, limit = 50, page = 0): ContactRow[] {
     const like = likePattern(query, (escaped) => `%${escaped}%`);

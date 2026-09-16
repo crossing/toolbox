@@ -2,11 +2,11 @@
 """One-off import of the local WhatsApp bridge's messages.db into the cloud
 bridge's Durable Object store.
 
-The local Go bridge (tools/whatsapp-bridge) and the cloud one are separate
-linked devices with separate histories; this copies what the local one has
-already seen so the cloud store does not start empty. It is idempotent — rows
-upsert on (id, chat_jid) — so re-running after a few more local messages is
-fine.
+The local Go bridge (tools/whatsapp-bridge, retired 2026-09-16) and the cloud
+one were separate linked devices with separate histories; this copied what the
+local one had already seen so the cloud store did not start empty. Kept because
+it is idempotent — rows upsert on (id, chat_jid) — and still imports any
+messages.db in that schema, e.g. one recovered from the trash.
 
 Auth: a short-lived code issued by the "Issue import code" button on
 https://mcp.xing.works/manage/whatsapp. Nothing here needs a Cloudflare or
