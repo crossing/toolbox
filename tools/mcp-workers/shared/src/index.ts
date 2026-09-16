@@ -13,5 +13,7 @@ export {
   escapeHtml,
   type ApprovalPageOptions,
 } from "./approval";
-// Types only — the gateway ↔ WhatsApp bridge Durable Object contract (G4).
+// The gateway ↔ WhatsApp bridge Durable Object contract (G4): types, plus the
+// one number both sides must agree on.
 export type * from "./whatsapp-api";
+export { WHATSAPP_SEND_BYTE_CAP } from "./whatsapp-api";

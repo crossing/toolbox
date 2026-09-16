@@ -22,6 +22,8 @@
 // rather than a file: `gmail_attach_drive_file` is the direct inverse of
 // drive_save_gmail_attachment — a Drive file onto a draft that already exists —
 // and `gmail_create_draft`'s `drive_attachments` does it at composition time.
+// Likewise `whatsapp_send_drive_file` in whatsapp.ts is the inverse of
+// drive_save_whatsapp_media: a Drive file out over the bridge.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";

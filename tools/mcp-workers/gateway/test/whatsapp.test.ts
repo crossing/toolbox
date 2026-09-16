@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
+import { GoogleApiError } from "../src/googleapi";
 import { registerWhatsappReadTools, registerWhatsappWriteTools } from "../src/whatsapp";
 
 const PNG_PIXEL =
@@ -70,10 +71,45 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
   };
 }
 
-async function connect(bridge: WhatsAppBridgeApi, { write = true } = {}) {
+interface DriveCall {
+  url: string;
+  query?: unknown;
+}
+
+interface FakeDriveOptions {
+  meta?: { name?: string; mimeType?: string; size?: string };
+  bytes?: Uint8Array;
+  error?: GoogleApiError;
+}
+
+const PDF_BYTES = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52, 10]);
+const PDF_B64 = Buffer.from(PDF_BYTES).toString("base64");
+
+/** Just enough of GoogleClient for fetchDriveAttachment: metadata, then bytes. */
+function fakeDrive(opts: FakeDriveOptions = {}) {
+  const calls: DriveCall[] = [];
+  const client = {
+    async getJson(url: string, query?: unknown) {
+      calls.push({ url, query });
+      if (opts.error) throw opts.error;
+      return opts.meta ?? { name: "contract.pdf", mimeType: "application/pdf", size: String(PDF_BYTES.byteLength) };
+    },
+    async getRaw(url: string, query?: unknown) {
+      calls.push({ url, query });
+      const bytes = opts.bytes ?? PDF_BYTES;
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    },
+  };
+  return { calls, client };
+}
+
+async function connect(
+  bridge: WhatsAppBridgeApi,
+  { write = true, drive = fakeDrive().client }: { write?: boolean; drive?: ReturnType<typeof fakeDrive>["client"] } = {},
+) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerWhatsappReadTools(server, async () => bridge);
-  if (write) registerWhatsappWriteTools(server, async () => bridge);
+  if (write) registerWhatsappWriteTools(server, async () => bridge, (async () => drive) as never);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: "test", version: "0.0.0" });
@@ -97,6 +133,7 @@ describe("whatsapp tool registration", () => {
       "whatsapp_list_chats",
       "whatsapp_list_messages",
       "whatsapp_search_contacts",
+      "whatsapp_send_drive_file",
       "whatsapp_send_file",
       "whatsapp_send_message",
       "whatsapp_sync_now",
@@ -108,6 +145,26 @@ describe("whatsapp tool registration", () => {
     }
     expect(tools.find((t) => t.name === "whatsapp_send_message")?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((t) => t.name === "whatsapp_send_file")?.annotations?.destructiveHint).toBe(true);
+    expect(tools.find((t) => t.name === "whatsapp_send_drive_file")?.annotations?.destructiveHint).toBe(true);
+  });
+
+  it("makes confirm mandatory in the Drive relay's published schema", async () => {
+    const client = await connect(fakeBridge());
+    const { tools } = await client.listTools();
+    const schema = tools.find((t) => t.name === "whatsapp_send_drive_file")!.inputSchema as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual([
+      "caption",
+      "confirm",
+      "drive_account",
+      "file_id",
+      "filename",
+      "media_type",
+      "recipient",
+    ]);
+    expect(schema.required!.sort()).toEqual(["confirm", "file_id", "recipient"]);
   });
 
   it("registers no write tools for a read-only grant", async () => {
@@ -193,5 +250,153 @@ describe("whatsapp tool registration", () => {
     const result = await client.callTool({ name: "whatsapp_list_chats", arguments: { limit: 5000 } });
     expect(result.isError).toBe(true);
     expect(called).toBe(false);
+  });
+});
+
+// The outbound twin of drive_save_whatsapp_media: the gateway fetches the file
+// from Drive and hands the bridge the same base64 whatsapp_send_file would
+// have been given, so the bridge's send path — and its encryption fix — is
+// shared rather than duplicated.
+describe("whatsapp_send_drive_file", () => {
+  type SendArgs = [string, string, string, string | undefined, string | undefined];
+
+  function sendingBridge(result: { ok: boolean; messageId?: string; detail?: string } = { ok: true, messageId: "SENT9" }) {
+    const sends: SendArgs[] = [];
+    const bridge = fakeBridge({
+      sendFile: async (recipient, filename, base64, mediaType, caption) => {
+        sends.push([recipient, filename, base64, mediaType, caption]);
+        return result;
+      },
+    });
+    return { sends, bridge };
+  }
+
+  it("refuses without confirm, touching neither Drive nor the bridge", async () => {
+    const { sends, bridge } = sendingBridge();
+    const drive = fakeDrive();
+    const client = await connect(bridge, { drive: drive.client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "FILE1", recipient: "447700900111", confirm: false },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("confirm");
+    expect(drive.calls).toEqual([]);
+    expect(sends).toEqual([]);
+  });
+
+  it("relays a binary file through the bridge's send path and reports what went", async () => {
+    const { sends, bridge } = sendingBridge();
+    const drive = fakeDrive();
+    const client = await connect(bridge, { drive: drive.client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "FILE1", recipient: "447700900111", caption: "signed copy", confirm: true },
+    });
+    expect(result.isError).toBeFalsy();
+    // Metadata first, then alt=media — never an export for a plain PDF.
+    expect(drive.calls.map((c) => c.url)).toEqual([
+      "https://www.googleapis.com/drive/v3/files/FILE1",
+      "https://www.googleapis.com/drive/v3/files/FILE1",
+    ]);
+    expect(drive.calls[1]!.query).toMatchObject({ alt: "media" });
+    expect(sends).toEqual([["447700900111", "contract.pdf", PDF_B64, undefined, "signed copy"]]);
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<string, unknown>;
+    expect(body).toEqual({
+      ok: true,
+      messageId: "SENT9",
+      filename: "contract.pdf",
+      size: PDF_BYTES.byteLength,
+      mimeType: "application/pdf",
+    });
+  });
+
+  it("honours a caller's filename and media_type", async () => {
+    const { sends, bridge } = sendingBridge();
+    const client = await connect(bridge, { drive: fakeDrive().client });
+    await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: {
+        file_id: "FILE1",
+        recipient: "447700900111",
+        filename: "2026-09-16 contract.pdf",
+        media_type: "document",
+        confirm: true,
+      },
+    });
+    expect(sends).toEqual([["447700900111", "2026-09-16 contract.pdf", PDF_B64, "document", undefined]]);
+  });
+
+  it("exports a Google Doc to PDF and names it so the bridge picks the right mime type", async () => {
+    const { sends, bridge } = sendingBridge();
+    const drive = fakeDrive({ meta: { name: "Sale Pack", mimeType: "application/vnd.google-apps.document" } });
+    const client = await connect(bridge, { drive: drive.client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "DOC1", recipient: "447700900111", filename: "Sale Pack", confirm: true },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(drive.calls[1]).toMatchObject({
+      url: "https://www.googleapis.com/drive/v3/files/DOC1/export",
+      query: { mimeType: "application/pdf" },
+    });
+    expect(sends[0]![1]).toBe("Sale Pack.pdf");
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, filename: "Sale Pack.pdf", mimeType: "application/pdf" });
+  });
+
+  it("refuses a file over the 5 MB send cap on its declared size, before downloading", async () => {
+    const { sends, bridge } = sendingBridge();
+    const drive = fakeDrive({ meta: { name: "video.mp4", mimeType: "video/mp4", size: String(6 * 1024 * 1024) } });
+    const client = await connect(bridge, { drive: drive.client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "BIG1", recipient: "447700900111", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain(`cap is ${5 * 1024 * 1024}`);
+    // Only the metadata call happened.
+    expect(drive.calls).toHaveLength(1);
+    expect(sends).toEqual([]);
+  });
+
+  it("names the Drive account when the file id is not found there", async () => {
+    const { sends, bridge } = sendingBridge();
+    const drive = fakeDrive({ error: new GoogleApiError(404, "File not found") });
+    const client = await connect(bridge, { drive: drive.client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "NOPE", recipient: "447700900111", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("the default Drive account");
+    expect(sends).toEqual([]);
+  });
+
+  it("surfaces a bridge refusal as an error result that still says what was fetched", async () => {
+    const { bridge } = sendingBridge({ ok: false, detail: "no device is paired" });
+    const client = await connect(bridge, { drive: fakeDrive().client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "FILE1", recipient: "447700900111", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: false, detail: "no device is paired", filename: "contract.pdf" });
+  });
+
+  it("keeps what the bridge said when the DO call itself throws", async () => {
+    const bridge = fakeBridge({
+      sendFile: async () => {
+        throw new Error("Durable Object reset");
+      },
+    });
+    const client = await connect(bridge, { drive: fakeDrive().client });
+    const result = await client.callTool({
+      name: "whatsapp_send_drive_file",
+      arguments: { file_id: "FILE1", recipient: "447700900111", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("Durable Object reset");
   });
 });

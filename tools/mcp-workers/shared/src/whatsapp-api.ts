@@ -154,6 +154,13 @@ export interface ImportCode {
   expiresAt: number;
 }
 
+/**
+ * Outgoing files: the bridge refuses anything larger, whether the bytes came
+ * inline over MCP or were fetched server-side from Drive. One constant so the
+ * gateway can refuse *before* downloading rather than after.
+ */
+export const WHATSAPP_SEND_BYTE_CAP = 5 * 1024 * 1024;
+
 export interface SendResult {
   ok: boolean;
   messageId?: string;

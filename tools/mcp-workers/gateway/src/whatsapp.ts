@@ -9,8 +9,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
+import { WHATSAPP_SEND_BYTE_CAP } from "@toolbox/mcp-shared";
+import { exportedFilename, fetchDriveAttachment, type DriveAttachment } from "./drive";
 import type { Env } from "./env";
+import type { GetClient } from "./gmail";
 import {
+  ACCOUNT_PARAM,
   asError,
   asMedia,
   asResult,
@@ -244,7 +248,14 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
   );
 }
 
-export function registerWhatsappWriteTools(server: McpServer, bridge: () => Promise<WhatsAppBridgeApi>): void {
+// `getDriveClient` serves whatsapp_send_drive_file's server-side relay. It
+// asserts Drive's own enablement when called, so a gateway with Drive switched
+// off keeps every other WhatsApp write and only that one tool fails closed.
+export function registerWhatsappWriteTools(
+  server: McpServer,
+  bridge: () => Promise<WhatsAppBridgeApi>,
+  getDriveClient: GetClient,
+): void {
   server.registerTool(
     "whatsapp_send_message",
     {
@@ -264,7 +275,7 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
     "whatsapp_send_file",
     {
       description:
-        "Send a file over WhatsApp: image, video, audio or document. Provide the bytes as base64, up to about 5 MB. Audio must already be Ogg/Opus — nothing here transcodes.",
+        "Send a file over WhatsApp with its bytes pasted inline as base64 — for small payloads only (a few KB you already hold), since the whole file has to be reproduced in the call. For anything that lives in Drive use whatsapp_send_drive_file instead, which relays it server-side. Image, video, audio or document, up to about 5 MB. Audio must already be Ogg/Opus — nothing here transcodes.",
       inputSchema: {
         recipient: JID_OR_PHONE,
         filename: z.string().describe("File name shown to the recipient"),
@@ -283,6 +294,52 @@ export function registerWhatsappWriteTools(server: McpServer, bridge: () => Prom
     async ({ recipient, filename, base64, media_type, caption, confirm }) => {
       if (confirm !== true) return needsConfirm();
       return bridgeRunChecked(async () => (await bridge()).sendFile(recipient, filename, base64, media_type, caption));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_send_drive_file",
+    {
+      description:
+        "Send a file that already lives in Google Drive over WhatsApp, without the bytes passing through this conversation — the gateway fetches it with the Drive account's credentials and hands it to the bridge. This is the preferred way to send a Drive file; whatsapp_send_file is for small inline payloads only. Google Docs/Slides/Drawings are exported as PDF and Sheets as xlsx on the way out. Same 5 MB cap as whatsapp_send_file; larger files are refused with their size. Find file_id with drive_search. Sending is not reversible, so confirm must be true.",
+      inputSchema: {
+        file_id: z.string().describe("Drive file id, from drive_search"),
+        recipient: JID_OR_PHONE,
+        filename: z.string().optional().describe("Name shown to the recipient; defaults to the Drive file's name"),
+        caption: z.string().optional().describe("Caption for image and video sends"),
+        media_type: z
+          .enum(["image", "video", "audio", "document"])
+          .optional()
+          .describe("How WhatsApp should present it; inferred from the filename when omitted"),
+        confirm: z.boolean().describe("Must be true: sending a file is not reversible"),
+        drive_account: ACCOUNT_PARAM,
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ file_id, recipient, filename, caption, media_type, confirm, drive_account }) => {
+      if (confirm !== true) return needsConfirm();
+      let fetched: DriveAttachment;
+      try {
+        const drive = await getDriveClient(drive_account);
+        fetched = await fetchDriveAttachment(drive, file_id, {
+          accountHint: drive_account ? `the "${drive_account}" Drive account` : "the default Drive account",
+          filename,
+          // Refused on Drive's declared size, before any bytes are downloaded.
+          byteCap: WHATSAPP_SEND_BYTE_CAP,
+        });
+      } catch (err) {
+        return asError(err);
+      }
+      // The bridge picks the WhatsApp mime type from the extension, so an
+      // exported Doc keeps its .pdf even when the caller chose the name.
+      const name = exportedFilename(fetched.filename, fetched.mimeType);
+      try {
+        const sent = await (await bridge()).sendFile(recipient, name, fetched.base64, media_type, caption);
+        const body = asResult({ ...sent, filename: name, size: fetched.bytes, mimeType: fetched.mimeType });
+        return sent.ok ? body : { ...body, isError: true };
+      } catch (err) {
+        return asError(asBridgeError(err));
+      }
     },
   );
 

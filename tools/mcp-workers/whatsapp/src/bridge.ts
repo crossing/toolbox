@@ -32,6 +32,7 @@ import type {
   SyncResult,
   WhatsAppBridgeApi,
 } from "@toolbox/mcp-shared";
+import { WHATSAPP_SEND_BYTE_CAP } from "@toolbox/mcp-shared";
 import { Curve, fetchLatestWaWebVersion, generateMessageIDV2, MEDIA_PATH_MAP, proto } from "baileys";
 import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
@@ -97,7 +98,7 @@ const IMAGE_INLINE_CAP = 2 * 1024 * 1024;
 const FILE_INLINE_CAP = 32 * 1024;
 
 /** Outgoing files: base64 in an MCP call, so the limit is about the request. */
-const MAX_SEND_BYTES = 5 * 1024 * 1024;
+const MAX_SEND_BYTES = WHATSAPP_SEND_BYTE_CAP;
 
 export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsAppBridgeApi {
   private sql: SqlStorage;

@@ -30,7 +30,7 @@ const CRLF = "\r\n";
 export const GMAIL_MESSAGE_BYTE_CAP = 25 * 1024 * 1024;
 /** Source bytes that fit under the cap once base64 has added its third. */
 export const TOTAL_ATTACHMENT_BYTE_CAP = 18 * 1024 * 1024;
-/** Mirrors whatsapp_send_file, for callers pasting bytes inline. */
+/** Mirrors WHATSAPP_SEND_BYTE_CAP (whatsapp_send_file), for callers pasting bytes inline. */
 export const INLINE_ATTACHMENT_BYTE_CAP = 5 * 1024 * 1024;
 /** Bounds worst-case Worker memory for one draft. */
 export const MAX_ATTACHMENTS = 10;

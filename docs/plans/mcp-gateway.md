@@ -159,7 +159,9 @@ as the escape hatch, not the default.
   `gmail_attach_drive_file` — the direct mirror, a Drive file onto a draft
   that already exists — plus `gmail_create_draft`'s `drive_attachments` for
   doing it at composition time. Both fetch with the Drive account and attach
-  with the mail account. Attaching to an existing draft splices the new part
+  with the mail account. `whatsapp_send_drive_file` closes the square: a Drive
+  file out over the bridge, the inverse of `drive_save_whatsapp_media`, under
+  the same 5 MB cap and confirm gate as `whatsapp_send_file`. Attaching to an existing draft splices the new part
   into the stored raw message rather than rebuilding it from Gmail's parsed
   payload: a real draft is multipart/mixed around a multipart/alternative of
   text/plain and text/html, and a rebuild that picks one body would silently

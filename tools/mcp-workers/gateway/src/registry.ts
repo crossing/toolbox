@@ -175,13 +175,21 @@ const whatsappService: ServiceDef = {
   id: "whatsapp",
   title: "WhatsApp",
   description:
-    "Chats, messages, contacts and media from the cloud bridge (a second linked device); file sends are confirm-gated.",
+    "Chats, messages, contacts and media from the cloud bridge (a second linked device); file sends are confirm-gated, and a Drive file can be sent without its bytes crossing the conversation.",
   defaultEnabled: false,
   registerRead(server, ctx) {
     registerWhatsappReadTools(server, () => ctx.whatsappBridge());
   },
   registerWrite(server, ctx) {
-    registerWhatsappWriteTools(auditedServer(server, ctx), () => ctx.whatsappBridge());
+    // The Drive resolver is for whatsapp_send_drive_file's server-side relay,
+    // the outbound twin of drive_save_whatsapp_media. It asserts Drive's own
+    // enablement when called, so with Drive switched off the other sends
+    // keep working and only that tool fails closed.
+    registerWhatsappWriteTools(
+      auditedServer(server, ctx),
+      () => ctx.whatsappBridge(),
+      (account) => ctx.googleClient("drive", account),
+    );
   },
 };
 
