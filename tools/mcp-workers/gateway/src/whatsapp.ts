@@ -3,8 +3,9 @@
 // All the machinery lives in the bridge Durable Object, which belongs to a
 // different Worker script (`whatsapp-bridge`) so a gateway deploy never evicts
 // a live WhatsApp session. This module is a thin, typed client over the
-// cross-script DO binding plus the MCP tool surface, mirroring the local
-// tools/whatsapp-mcp-server tool-for-tool.
+// cross-script DO binding plus the MCP tool surface. The tool set was lifted
+// tool-for-tool from the local whatsapp-mcp-server this replaced (retired
+// 2026-09-16, lharries/whatsapp-mcp fork; see git history for the Go bridge).
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
