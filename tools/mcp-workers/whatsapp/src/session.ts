@@ -103,14 +103,53 @@ function memCache(): CacheStore {
 export type LogSink = (level: "info" | "warn" | "error", message: string) => void;
 
 /**
+ * Serialize a value Baileys handed the logger into a log line.
+ *
+ * The trap this exists to avoid: Baileys reports failures as
+ * `logger.error({ jid, err }, 'Failed to encrypt for recipient')`, where `err`
+ * is an `Error`. `JSON.stringify` only serialises an Error's *enumerable* own
+ * properties. On workerd a Node `RangeError` exposes `code` and `name` as
+ * enumerable but leaves `message` and `stack` non-enumerable, so a plain
+ * `JSON.stringify({ jid, err })` collapses to
+ * `{"jid":"…","err":{"code":"ERR_OUT_OF_RANGE","name":"RangeError"}}` — the one
+ * field that says *what* went out of range is dropped before it is ever logged,
+ * which is exactly why the encryption failure could not be diagnosed from the
+ * bridge log. The replacer below expands any Error (top-level or nested) into
+ * its name, message, code, stack and Boom `output`, so the message survives.
+ */
+export function serializeLogValue(obj: unknown): string {
+  const replacer = (_key: string, value: unknown): unknown => {
+    if (value instanceof Error) {
+      const err = value as Error & { code?: unknown; output?: unknown };
+      return {
+        name: err.name,
+        message: err.message,
+        ...(err.code !== undefined ? { code: err.code } : {}),
+        ...(err.output !== undefined ? { output: err.output } : {}),
+        stack: err.stack,
+      };
+    }
+    return value;
+  };
+  return JSON.stringify(obj, replacer) ?? String(obj);
+}
+
+/**
  * Baileys gates hot paths on `logger.level` (it only serialises XML when the
  * level is "trace"/"debug"), so the normal level is "warn" and that is a real
  * saving. Verbose mode exists for one job: telling whether a stanza we are
  * waiting for — a pairing confirmation, say — ever arrived at all.
  */
 function makeLogger(sink: LogSink, verbose: boolean): ILogger {
-  const format = (obj: unknown, msg?: string): string =>
-    msg ? `${msg} ${typeof obj === "object" ? JSON.stringify(obj)?.slice(0, 300) : String(obj)}` : String(obj);
+  // An Error handed straight in, or nested in an object, is expanded to keep
+  // its message and stack (see serializeLogValue). Errors get a wider budget
+  // than a routine line because the message plus the first stack frames is what
+  // makes a failure diagnosable; the bridge's own log ring caps what it keeps.
+  const format = (obj: unknown, msg?: string): string => {
+    if (obj instanceof Error) obj = { err: obj };
+    const body = typeof obj === "object" && obj !== null ? serializeLogValue(obj).slice(0, 1500) : String(obj);
+    return msg ? `${msg} ${body}` : body;
+  };
   const logger: ILogger = {
     level: verbose ? "debug" : "warn",
     child: () => logger,

@@ -2,7 +2,48 @@
 // ones it would be convenient for it to follow.
 
 import { describe, expect, it } from "vitest";
-import { ConnectionWaiters, deviceBrowser, isFatalDisconnect, DisconnectReason } from "../src/session";
+import { ConnectionWaiters, deviceBrowser, isFatalDisconnect, DisconnectReason, serializeLogValue } from "../src/session";
+
+describe("serializeLogValue", () => {
+  // The bug this guards: Baileys logs `{ jid, err }` where err is an Error, and
+  // a bare JSON.stringify drops the Error's non-enumerable message and stack.
+  // On workerd a Node Buffer RangeError leaves only `code`/`name` enumerable, so
+  // the encryption failure logged as just {"code":"ERR_OUT_OF_RANGE"} with the
+  // one useful field — the message — gone. The serializer must keep it.
+  it("keeps an Error's message, name and stack when nested in an object", () => {
+    const err = new RangeError('The value of "byteLength" is out of range');
+    const out = serializeLogValue({ jid: "447747642038@s.whatsapp.net", err });
+    const parsed = JSON.parse(out);
+    expect(parsed.jid).toBe("447747642038@s.whatsapp.net");
+    expect(parsed.err.name).toBe("RangeError");
+    expect(parsed.err.message).toBe('The value of "byteLength" is out of range');
+    expect(typeof parsed.err.stack).toBe("string");
+  });
+
+  it("keeps a Node system error's code alongside its message", () => {
+    // Reproduces the production shape: a real ERR_OUT_OF_RANGE from a Buffer op.
+    let err: unknown;
+    try {
+      Buffer.alloc(4).readUIntBE(0, 8);
+    } catch (e) {
+      err = e;
+    }
+    const parsed = JSON.parse(serializeLogValue({ err }));
+    expect(parsed.err.code).toBe("ERR_OUT_OF_RANGE");
+    // The message is the whole point — a bare JSON.stringify would omit it.
+    expect(parsed.err.message).toMatch(/out of range/);
+  });
+
+  it("expands a Boom error's output so the status code survives", () => {
+    const boom = Object.assign(new Error("All encryptions failed"), {
+      isBoom: true,
+      output: { statusCode: 500 },
+    });
+    const parsed = JSON.parse(serializeLogValue({ err: boom }));
+    expect(parsed.err.message).toBe("All encryptions failed");
+    expect(parsed.err.output.statusCode).toBe(500);
+  });
+});
 
 describe("deviceBrowser", () => {
   it("puts the device name where WhatsApp reads it", () => {

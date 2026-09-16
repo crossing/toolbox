@@ -333,7 +333,12 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
   // The console method carries the level, so warnings and errors are filterable
   // as such instead of by grepping a prefix.
   private log(level: "info" | "warn" | "error", message: string, fields: Record<string, unknown> = {}): void {
-    const entry = { service: "whatsapp-bridge", level, msg: message.slice(0, 300), ...fields };
+    // Errors keep more of the line: a serialised Error carries its message and
+    // the first stack frames, and a 300-char cap would clip a RangeError back
+    // to just its code+name — the exact loss that hid the "All encryptions
+    // failed" cause. Routine lines stay tight.
+    const cap = level === "error" ? 1500 : 300;
+    const entry = { service: "whatsapp-bridge", level, msg: message.slice(0, cap), ...fields };
     if (level === "error") console.error(entry);
     else if (level === "warn") console.warn(entry);
     else console.log(entry);
@@ -342,7 +347,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
     // Logs without an API token, and /manage/whatsapp has to be able to show
     // the last few minutes without one; it also outlives the three-day
     // retention window for the handful of lines anyone comes back to.
-    const line = `${new Date().toISOString()} ${level}: ${message.slice(0, 300)}`;
+    const line = `${new Date().toISOString()} ${level}: ${message.slice(0, cap)}`;
     const lines = [line, ...this.getMeta<string[]>("log", [])].slice(0, this.isVerbose() ? 250 : 40);
     this.setMeta("log", lines);
   }
