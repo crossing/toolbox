@@ -16,6 +16,7 @@ import type {
   BridgeCycle,
   BridgeStatus,
   ChatRow,
+  CreateGroupResult,
   ContactRow,
   ImportCode,
   ImportRequest,
@@ -36,8 +37,9 @@ import { WHATSAPP_SEND_BYTE_CAP } from "@toolbox/mcp-shared";
 import { Curve, fetchLatestWaWebVersion, generateMessageIDV2, MEDIA_PATH_MAP, proto } from "baileys";
 import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
+import { createGroupOnSocket, prepareGroupRequest, type PreparedGroupRequest } from "./groups";
 import { encryptForUpload, fetchAndDecrypt, MediaError, uploadEncrypted } from "./media";
-import { chatNameFor, kindFromFilename, mimeFromFilename, toJid, toStoredMessage } from "./normalize";
+import { chatNameFor, isoFromSeconds, kindFromFilename, mimeFromFilename, toJid, toStoredMessage } from "./normalize";
 import { deviceBrowser, DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
 import { Store } from "./store";
 
@@ -937,6 +939,58 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       }
       this.log("info", `sent a ${kind} to ${jid}`);
       return { ok: true, messageId };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      return { ok: false, detail };
+    } finally {
+      this.setConnection("closing");
+      await session?.close();
+      this.setConnection("idle");
+      this.busy = false;
+    }
+  }
+
+  // Same on-demand connection as a send: open, act, close. The group is filed
+  // in the chat store here rather than left to the `w:gp2 create` notification
+  // WhatsApp sends afterwards, because this socket is usually closed before that
+  // arrives and the caller's very next move is to list the chat or write to it.
+  async createGroup(subject: string, participants: string[]): Promise<CreateGroupResult> {
+    if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
+    if (this.inProgress) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+
+    let request: PreparedGroupRequest;
+    try {
+      request = prepareGroupRequest(subject, participants, this.auth.state.creds.me?.id ?? null);
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    }
+
+    this.beginOperation();
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setConnection("connecting");
+      session = await this.openSession(counters);
+      await session.waitForOpen(60_000);
+      this.setConnection("open");
+      this.setMeta("lastConnectedAt", Date.now());
+      const { creation, ...created } = await createGroupOnSocket(session.sock, request);
+      // Dated, so a group nobody has written to yet still sorts to the top of
+      // whatsapp_list_chats instead of sinking below every dated chat.
+      this.store.upsertChat({
+        jid: created.groupJid!,
+        name: created.subject ?? request.subject,
+        lastMessageTime: creation ? isoFromSeconds(creation) : new Date().toISOString(),
+      });
+      const notAdded = created.participants?.filter((p) => p.status !== "added").length ?? 0;
+      this.log("info", `created group ${created.groupJid}`, {
+        event: "group-created",
+        jid: created.groupJid,
+        requested: request.participants.length,
+        notAdded,
+      });
+      return created;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.setMeta("lastError", detail);

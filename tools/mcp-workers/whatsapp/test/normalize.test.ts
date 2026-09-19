@@ -60,6 +60,65 @@ describe("toStoredMessage", () => {
     expect(row!.chatJid).toBe("120363000000000000@g.us");
   });
 
+  it("files a LID-addressed group message under the sender's phone number when WhatsApp gives one", () => {
+    const row = toStoredMessage(
+      message({
+        key: {
+          remoteJid: "120363000000000000@g.us",
+          fromMe: false,
+          id: "G2",
+          participant: "199900000000001:2@lid",
+          participantAlt: "447700900222:2@s.whatsapp.net",
+        } as never,
+        pushName: "Bea",
+        message: { conversation: "from a lid group" },
+      }),
+      ME,
+    );
+    expect(row!.sender).toBe("447700900222@s.whatsapp.net");
+    expect(row!.senderName).toBe("Bea");
+    expect(row!.chatJid).toBe("120363000000000000@g.us");
+  });
+
+  it("keeps the LID as the group sender when that is all WhatsApp sent", () => {
+    const row = toStoredMessage(
+      message({
+        key: { remoteJid: "120363000000000000@g.us", fromMe: false, id: "G3", participant: "199900000000001:2@lid" },
+        message: { conversation: "lid only" },
+      }),
+      ME,
+    );
+    expect(row!.sender).toBe("199900000000001@lid");
+  });
+
+  it("never files a group message under the group itself when the participant sits on the message", () => {
+    const row = toStoredMessage(
+      message({
+        key: { remoteJid: "120363000000000000@g.us", fromMe: false, id: "G4" },
+        participant: "447700900333@s.whatsapp.net",
+        message: { conversation: "participant outside the key" },
+      }),
+      ME,
+    );
+    expect(row!.sender).toBe("447700900333@s.whatsapp.net");
+  });
+
+  it("files our own send to a group under the group, from us", () => {
+    const row = toStoredMessage(
+      message({
+        key: { remoteJid: "120363000000000000@g.us", fromMe: true, id: "G5" },
+        message: { conversation: "hello group" },
+      }),
+      ME,
+    );
+    expect(row).toMatchObject({
+      chatJid: "120363000000000000@g.us",
+      sender: "447700900000@s.whatsapp.net",
+      isFromMe: true,
+      content: "hello group",
+    });
+  });
+
   it("carries media descriptors and the caption", () => {
     const row = toStoredMessage(
       message({

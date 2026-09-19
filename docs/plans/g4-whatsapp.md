@@ -42,6 +42,7 @@ on demand, which is why the first send in a while takes a few seconds.
 | `whatsapp/src/bridge.ts` | the Durable Object: cycles, pairing, RPC surface |
 | `whatsapp/src/store.ts` | chats/messages schema and the nine read queries |
 | `whatsapp/src/normalize.ts` | `WAMessage` → row |
+| `whatsapp/src/groups.ts` | group creation: request validation, the create stanza, reading the per-participant reply |
 | `whatsapp/src/media.ts` | fetch/verify/decrypt and encrypt/upload, WebCrypto only |
 | `whatsapp/src/ws-shim.ts` | node-`ws` API over workerd's outbound WebSocket |
 | `whatsapp/src/pbkdf2.ts` | PBKDF2-HMAC-SHA256, for the iteration count workerd refuses |
@@ -112,6 +113,27 @@ on demand, which is why the first send in a while takes a few seconds.
   file to `os.tmpdir()` and uploads it with `node:https`; the bridge encrypts
   in memory, POSTs to a host from `refreshMediaConn`, and calls `relayMessage`
   with a proto it builds itself.
+- **Group creation bypasses `groupCreate`.** Baileys' helper runs the reply
+  through `extractGroupMetadata`, which keeps each participant's JID and admin
+  flag and drops the `error` attribute — so a member WhatsApp refused to add
+  (403, their privacy settings) is indistinguishable from one it added.
+  `groups.ts` sends the identical stanza with `sock.query` and reads the reply
+  itself. A refusal is a per-participant status, never a failed call: the group
+  exists by then, and the caller needs its JID and its invite link. The
+  per-person `add_request` code in a 403 is deliberately not surfaced; the
+  group's ordinary `chat.whatsapp.com` link is, and only when someone needs it.
+- **A created group is filed by the bridge, not by WhatsApp's notification.**
+  The `w:gp2 create` notification that would produce `chats.upsert` usually
+  arrives after the on-demand socket has closed, so `createGroup` writes the
+  chat row itself, dated with the group's creation time so it lists first.
+- **Group senders are filed by phone number.** New groups are LID-addressed:
+  `key.participant` is an opaque `…@lid` and the number is in
+  `key.participantAlt`. `normalize.ts` prefers the number, because every sender
+  query in the store keys on it; the LID is kept only when it is all there is.
+- **A national-format number is refused for group members.** `toJid` strips
+  non-digits and appends the server, so `07700 900111` would become a valid JID
+  for a stranger. A send to a stranger is a nuisance; adding one to a group is
+  not recoverable, so `prepareGroupRequest` rejects a leading 0 or a `(0)`.
 - **Timestamps are ISO-8601 UTC.** The Go bridge writes `time.Time` with a
   local offset, which does not sort correctly across offsets; the importer
   converts.
@@ -161,7 +183,8 @@ account-wide** (3-day retention):
 | B3 store + read tools | done; nine tools plus `whatsapp_bridge_status` |
 | B4 media | download done (WebCrypto, integrity-checked); R2 offload not built |
 | B5 history import | done; ran against production |
-| B6 send | text and files done; audio must arrive pre-encoded |
+| B6 send | text and files done, to people and to `…@g.us`; audio must arrive pre-encoded |
+| B8 groups | `whatsapp_create_group` built and unit-tested 2026-09-19; **not yet exercised against a live socket** |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
 Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the
@@ -180,8 +203,18 @@ pairing is what turned up the `creds.registered` trap above.
   bucket and a signed `/media/:token` route on the gateway are the shape if it
   is wanted.
 - **Group metadata.** `cachedGroupMetadata` is unset, so group sends pay a
-  metadata query. Groups are named from `chats.upsert`; a group we have never
-  seen named appears as its JID.
+  metadata query. Groups are named from `chats.upsert`, `groups.upsert` and
+  `groups.update` (renames), and a group the bridge created is named at
+  creation; a group we have never seen named appears as its JID.
+- **Group administration beyond creation.** Adding or removing members later,
+  renaming, leaving, and revoking the invite link are all in Baileys and none
+  are exposed. Creation was the one thing that could not be done from a chat;
+  the rest is a few taps on the phone and each is another outward-facing tool
+  to gate.
+- **Sending the invite for you.** When a direct add is refused the tool returns
+  the invite link and stops. Messaging someone who has just declined to be
+  added is a decision, so it is left to a separate, explicit
+  `whatsapp_send_message`.
 - **Member tags.** WhatsApp's per-group self-assigned label ("Share your role,
   title or how you're known in this group", 30 characters, shown under your
   name to everyone in that group) cannot be set from here. Baileys 7.0.0-rc14

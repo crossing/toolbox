@@ -63,6 +63,22 @@ export function mediaKindOf(message: WAMessage): string | null {
   return (type && MEDIA_KINDS[type]) ?? null;
 }
 
+/**
+ * Who wrote a group message, as a phone-number JID whenever WhatsApp told us
+ * one. Groups are increasingly LID-addressed: `key.participant` is then an
+ * opaque `…@lid`, and Baileys puts the number in `key.participantAlt`
+ * (Utils/decode-wa-message.js). Filing the LID would record *a* sender while
+ * losing the one the rest of the store knows them by — `sender_phone_number`
+ * filters, contact search and get_contact_chats all key on the number. The LID
+ * is kept only when it is all there is.
+ */
+function groupSenderOf(message: WAMessage): string | null {
+  const participant = message.key?.participant || message.participant || null;
+  const alt = (message.key as { participantAlt?: string | null } | undefined)?.participantAlt || null;
+  if (participant?.endsWith("@lid") && alt?.endsWith("@s.whatsapp.net")) return alt;
+  return participant ?? alt;
+}
+
 export function toStoredMessage(message: WAMessage, meId: string | null): StoredMessage | null {
   const chatJid = message.key?.remoteJid;
   const id = message.key?.id;
@@ -78,7 +94,7 @@ export function toStoredMessage(message: WAMessage, meId: string | null): Stored
   // end of the chat, or us. Mirrors the Go bridge's sender column.
   const sender = fromMe
     ? jidNormalizedUser(meId ?? "") || (meId ?? "")
-    : jidNormalizedUser(message.key?.participant ?? message.participant ?? chatJid);
+    : jidNormalizedUser(groupSenderOf(message) ?? chatJid);
 
   const fileLength =
     media?.fileLength == null

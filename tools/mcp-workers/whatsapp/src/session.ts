@@ -346,6 +346,13 @@ export class Session {
 
     this.sock.ev.on("chats.upsert", (chats) => this.reportChats(chats));
     this.sock.ev.on("chats.update", (chats) => this.reportChats(chats));
+    // A group's subject arrives on its own events, not on chats.*: a rename is
+    // `groups.update`, and being added to a group is `groups.upsert`. Without
+    // these a renamed group keeps its old name for good.
+    const reportGroups = (groups: { id?: string | null; subject?: string | null }[]) =>
+      this.reportChats(groups.filter((group) => Boolean(group.subject)).map((group) => ({ id: group.id, name: group.subject })));
+    this.sock.ev.on("groups.upsert", reportGroups);
+    this.sock.ev.on("groups.update", reportGroups);
     this.sock.ev.on("messaging-history.set", ({ chats, messages }) => {
       this.reportChats(chats ?? []);
       if (messages?.length) handlers.onMessages(messages, "history");

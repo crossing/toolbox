@@ -65,6 +65,7 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
     }),
     sendMessage: async () => ({ ok: true, messageId: "SENT1" }),
     sendFile: async () => ({ ok: false, detail: "not supported yet" }),
+    createGroup: async () => ({ ok: false, detail: "not used in this test" }),
     issueImportCode: notImplemented as never,
     importRows: notImplemented as never,
     ...overrides,
@@ -124,6 +125,7 @@ describe("whatsapp tool registration", () => {
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
       "whatsapp_bridge_status",
+      "whatsapp_create_group",
       "whatsapp_download_media",
       "whatsapp_get_chat",
       "whatsapp_get_contact_chats",
@@ -140,12 +142,16 @@ describe("whatsapp tool registration", () => {
     ]);
     const reads = tools.filter((tool) => tool.name.startsWith("whatsapp_") && !tool.name.includes("send"));
     for (const tool of reads) {
-      if (tool.name === "whatsapp_sync_now") continue;
+      if (tool.name === "whatsapp_sync_now" || tool.name === "whatsapp_create_group") continue;
       expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
     }
     expect(tools.find((t) => t.name === "whatsapp_send_message")?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((t) => t.name === "whatsapp_send_file")?.annotations?.destructiveHint).toBe(true);
     expect(tools.find((t) => t.name === "whatsapp_send_drive_file")?.annotations?.destructiveHint).toBe(true);
+    expect(tools.find((t) => t.name === "whatsapp_create_group")?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
   });
 
   it("makes confirm mandatory in the Drive relay's published schema", async () => {
@@ -172,6 +178,7 @@ describe("whatsapp tool registration", () => {
     const { tools } = await client.listTools();
     expect(tools.some((tool) => tool.name.includes("send"))).toBe(false);
     expect(tools.some((tool) => tool.name === "whatsapp_sync_now")).toBe(false);
+    expect(tools.some((tool) => tool.name === "whatsapp_create_group")).toBe(false);
   });
 
   it("never puts the pairing code in a tool result", async () => {
@@ -240,6 +247,39 @@ describe("whatsapp tool registration", () => {
     });
     expect(seen).toEqual(["447700900111|hello"]);
     expect(JSON.stringify(result.content)).toContain("SENT1");
+  });
+
+  it("keeps what the bridge said when a text send throws across the DO boundary", async () => {
+    const client = await connect(
+      fakeBridge({
+        sendMessage: async () => {
+          throw new Error("Durable Object reset");
+        },
+      }),
+    );
+    const result = await client.callTool({
+      name: "whatsapp_send_message",
+      arguments: { recipient: "447700900111", message: "hello" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("Durable Object reset");
+  });
+
+  it("passes a group JID through to the bridge untouched", async () => {
+    const seen: string[] = [];
+    const client = await connect(
+      fakeBridge({
+        sendMessage: async (recipient) => {
+          seen.push(recipient);
+          return { ok: true, messageId: "SENT2" };
+        },
+      }),
+    );
+    await client.callTool({
+      name: "whatsapp_send_message",
+      arguments: { recipient: "120363000000000001@g.us", message: "hello group" },
+    });
+    expect(seen).toEqual(["120363000000000001@g.us"]);
   });
 
   it("rejects an out-of-range limit before it reaches the bridge", async () => {
@@ -395,6 +435,157 @@ describe("whatsapp_send_drive_file", () => {
     const result = await client.callTool({
       name: "whatsapp_send_drive_file",
       arguments: { file_id: "FILE1", recipient: "447700900111", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("Durable Object reset");
+  });
+});
+
+// Creating a group adds people to something and notifies them, so it sits
+// behind the same confirm gate as the file sends — and because WhatsApp answers
+// per participant, a partial result is a success that has to be read, not an
+// error.
+describe("whatsapp_create_group", () => {
+  const GROUP = "120363000000000001@g.us";
+
+  function creatingBridge(result?: Awaited<ReturnType<WhatsAppBridgeApi["createGroup"]>>) {
+    const calls: [string, string[]][] = [];
+    const bridge = fakeBridge({
+      createGroup: async (subject, participants) => {
+        calls.push([subject, participants]);
+        return (
+          result ?? {
+            ok: true,
+            groupJid: GROUP,
+            subject,
+            participants: participants.map((requested) => ({
+              requested,
+              jid: `${requested}@s.whatsapp.net`,
+              status: "added" as const,
+              code: 200,
+            })),
+            inviteLink: null,
+          }
+        );
+      },
+    });
+    return { calls, bridge };
+  }
+
+  it("makes subject, participants and confirm mandatory in the published schema", async () => {
+    const client = await connect(fakeBridge());
+    const { tools } = await client.listTools();
+    const schema = tools.find((t) => t.name === "whatsapp_create_group")!.inputSchema as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual(["confirm", "participants", "subject"]);
+    expect(schema.required!.sort()).toEqual(["confirm", "participants", "subject"]);
+  });
+
+  it("refuses without confirm: true, and never reaches the bridge", async () => {
+    const { calls, bridge } = creatingBridge();
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111"], confirm: false },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("confirm");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses when confirm is left out altogether", async () => {
+    const { calls, bridge } = creatingBridge();
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111"] },
+    });
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an empty participant list before it reaches the bridge", async () => {
+    const { calls, bridge } = creatingBridge();
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: [], confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("passes the request through and returns the group JID and per-participant results", async () => {
+    const { calls, bridge } = creatingBridge();
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111", "447700900222"], confirm: true },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(calls).toEqual([["Roof repair", ["447700900111", "447700900222"]]]);
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, groupJid: GROUP, subject: "Roof repair", inviteLink: null });
+    expect(body.participants).toHaveLength(2);
+  });
+
+  it("reports a refused direct add as a success carrying the invite link, not as an error", async () => {
+    const { bridge } = creatingBridge({
+      ok: true,
+      groupJid: GROUP,
+      subject: "Roof repair",
+      participants: [
+        { requested: "447700900111", jid: "447700900111@s.whatsapp.net", status: "added", code: 200 },
+        {
+          requested: "447700900222",
+          jid: "447700900222@s.whatsapp.net",
+          status: "invite_required",
+          code: 403,
+          detail: "their privacy settings do not allow being added directly — send them the invite link",
+        },
+      ],
+      inviteLink: "https://chat.whatsapp.com/AbCdEfGh",
+    });
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111", "447700900222"], confirm: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as {
+      inviteLink: string;
+      participants: { status: string; code: number }[];
+    };
+    expect(body.inviteLink).toBe("https://chat.whatsapp.com/AbCdEfGh");
+    expect(body.participants.map((p) => [p.status, p.code])).toEqual([
+      ["added", 200],
+      ["invite_required", 403],
+    ]);
+  });
+
+  it("surfaces a bridge refusal as an error result", async () => {
+    const { bridge } = creatingBridge({ ok: false, detail: "no device is paired" });
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111"], confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("no device is paired");
+  });
+
+  it("keeps what the bridge said when the DO call itself throws", async () => {
+    const bridge = fakeBridge({
+      createGroup: async () => {
+        throw new Error("Durable Object reset");
+      },
+    });
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_create_group",
+      arguments: { subject: "Roof repair", participants: ["447700900111"], confirm: true },
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("Durable Object reset");

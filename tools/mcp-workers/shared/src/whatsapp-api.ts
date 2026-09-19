@@ -167,6 +167,43 @@ export interface SendResult {
   detail?: string;
 }
 
+/**
+ * What became of one requested member. Creating a group is not all-or-nothing:
+ * WhatsApp builds the group and then answers per participant, so a member whose
+ * privacy settings forbid being added by a non-contact is reported here rather
+ * than failing the call.
+ */
+export interface GroupParticipantResult {
+  /** The participant exactly as the caller gave it. */
+  requested: string;
+  /** The JID that was sent to WhatsApp for it. */
+  jid: string;
+  /**
+   * `added` — in the group. `invite_required` — WhatsApp refused the direct add
+   * (403) and the person has to join by invite. `failed` — any other refusal;
+   * `code` says which. `unknown` — the reply did not mention this participant.
+   */
+  status: "added" | "invite_required" | "failed" | "unknown";
+  /** WhatsApp's per-participant status code; 200 when added, null when unknown. */
+  code: number | null;
+  detail?: string;
+}
+
+export interface CreateGroupResult {
+  ok: boolean;
+  /** The new group's JID (…@g.us); usable as a recipient straight away. */
+  groupJid?: string;
+  subject?: string;
+  participants?: GroupParticipantResult[];
+  /**
+   * https://chat.whatsapp.com/… — fetched only when someone could not be added
+   * directly, so it can be sent to them by hand. Null when nobody needed it.
+   */
+  inviteLink?: string | null;
+  /** Set when the group exists but something after creation went wrong. */
+  detail?: string;
+}
+
 export interface PreflightResult {
   ok: boolean;
   steps: { name: string; ms: number; detail: string }[];
@@ -220,6 +257,13 @@ export interface WhatsAppBridgeApi {
     mediaType?: string,
     caption?: string,
   ): Promise<SendResult>;
+
+  /**
+   * Create a WhatsApp group with this account as its admin. `participants` are
+   * phone numbers in international format or user JIDs. The group is filed in
+   * the chat store, so it lists and accepts sends immediately.
+   */
+  createGroup(subject: string, participants: string[]): Promise<CreateGroupResult>;
 
   /** Mint a short, human-typable code authorising history imports for a while. */
   issueImportCode(): Promise<ImportCode>;

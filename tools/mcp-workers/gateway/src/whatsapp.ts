@@ -58,12 +58,17 @@ async function bridgeRun(fn: () => Promise<unknown>) {
   }
 }
 
+// runChecked catches for itself, so a throw has to be translated *inside* the
+// callback: wrapping the call in a try/catch here never fires, and the bridge's
+// own words were being flattened to "unexpected error" for every checked tool.
 async function bridgeRunChecked(fn: () => Promise<{ ok: boolean; detail?: string | null }>) {
-  try {
-    return await runChecked(fn);
-  } catch (err) {
-    return asError(asBridgeError(err));
-  }
+  return runChecked(async () => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw asBridgeError(err);
+    }
+  });
 }
 
 const JID_OR_PHONE = z
@@ -341,6 +346,32 @@ export function registerWhatsappWriteTools(
       } catch (err) {
         return asError(asBridgeError(err));
       }
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_create_group",
+    {
+      description:
+        "Create a WhatsApp group with this account as its admin. Returns groupJid (…@g.us), which works as a recipient for whatsapp_send_message straight away and shows up in whatsapp_list_chats. Creation is not all-or-nothing: each participant comes back with a status — added, invite_required (WhatsApp refused the direct add with 403 because of that person's privacy settings), failed (any other refusal, with WhatsApp's code) or unknown. When anyone could not be added, inviteLink carries the group's chat.whatsapp.com link so it can be sent to them by hand; this tool never sends it for you. Participants are phone numbers in international format (447700900111, no leading 0) or user JIDs, at most 32. Everyone added is notified and a group cannot be un-created, so confirm must be true.",
+      inputSchema: {
+        subject: z.string().min(1).max(100).describe("The group's name, up to 100 characters"),
+        participants: z
+          .array(
+            z
+              .string()
+              .describe("A phone number in international format (447700900111) or a user JID (…@s.whatsapp.net)"),
+          )
+          .min(1)
+          .max(32)
+          .describe("Who to add, besides this account"),
+        confirm: z.boolean().describe("Must be true: creating a group notifies everyone added and cannot be undone"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ subject, participants, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).createGroup(subject, participants));
     },
   );
 
