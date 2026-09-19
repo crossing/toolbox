@@ -443,18 +443,33 @@ export async function groupInfoOnSocket(
 }
 
 /**
+ * The WhatsApp error code carried by a thrown error, if any. Baileys raises a
+ * stanza-level error as `new Boom(text, { data: code })`, so the code is in
+ * `data` and `output.statusCode` is Boom's default 500; connection-level
+ * failures do use `output.statusCode`. Seen live 2026-09-19: the metadata of a
+ * group already left answers "forbidden" with data 403.
+ */
+export function stanzaErrorCode(err: unknown): number | undefined {
+  const boom = err as { data?: unknown; output?: { statusCode?: number } } | null;
+  const data = typeof boom?.data === "number" ? boom.data : undefined;
+  if (data !== undefined && Number.isFinite(data)) return data;
+  return boom?.output?.statusCode;
+}
+
+/**
  * Is this account still in the group? Used before deleting a group chat with
  * `leave_first`, where the bridge's own "left" flag cannot be trusted to be
  * complete — a group left from the phone never told the bridge. WhatsApp
  * answers a metadata query from a non-member with 403/404 (or a 401
- * not-authorized); anything else is a real failure and is rethrown.
+ * not-authorized), carried in the Boom's `data`; anything else is a real
+ * failure and is rethrown.
  */
 export async function isMember(sock: Pick<GroupInfoSocket, "groupMetadata">, groupJid: string, me: Me): Promise<boolean> {
   try {
     const meta = await sock.groupMetadata(groupJid);
     return meta.participants.some((member) => isMe(member, me));
   } catch (err) {
-    const code = (err as { output?: { statusCode?: number } })?.output?.statusCode;
+    const code = stanzaErrorCode(err);
     if (code === 401 || code === 403 || code === 404) return false;
     throw err;
   }

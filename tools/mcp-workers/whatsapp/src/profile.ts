@@ -17,6 +17,7 @@
 import { jidDecode, jidNormalizedUser } from "baileys";
 import type { ProfileResult } from "@toolbox/mcp-shared";
 import { toJid } from "./normalize";
+import { stanzaErrorCode } from "./groups";
 
 /** Picture lookups have no server-side deadline; one that never answers must not hold the socket. */
 const PICTURE_TIMEOUT_MS = 10_000;
@@ -71,19 +72,19 @@ export function prepareProfileTarget(jidOrPhone: string): ProfileTarget {
 }
 
 function reason(err: unknown): string {
-  const code = (err as { output?: { statusCode?: number } })?.output?.statusCode;
+  const code = stanzaErrorCode(err);
   const message = err instanceof Error ? err.message : String(err);
   return code ? `${message} (${code})` : message;
 }
 
 /** WhatsApp's way of saying "there is one, and you may not see it". */
 function isPrivacyRefusal(err: unknown): boolean {
-  const code = (err as { output?: { statusCode?: number } })?.output?.statusCode;
+  const code = stanzaErrorCode(err);
   return code === 401 || code === 403;
 }
 
 function isNotFound(err: unknown): boolean {
-  const code = (err as { output?: { statusCode?: number } })?.output?.statusCode;
+  const code = stanzaErrorCode(err);
   const message = err instanceof Error ? err.message : "";
   return code === 404 || /item-not-found/.test(message);
 }

@@ -491,6 +491,10 @@ describe("isMember", () => {
 
   it("reads WhatsApp's refusal to a non-member as 'not a member', and lets any other failure through", async () => {
     for (const code of [401, 403, 404]) expect(await isMember(sockFor(boom(code)), GROUP, { id: ME })).toBe(false);
+    // The shape Baileys actually throws for a stanza error: code in `data`, statusCode 500.
+    const stanza = (code: number) => Object.assign(new Error("forbidden"), { data: code, output: { statusCode: 500 } });
+    for (const code of [401, 403, 404]) expect(await isMember(sockFor(stanza(code)), GROUP, { id: ME })).toBe(false);
+    await expect(isMember(sockFor(stanza(500)), GROUP, { id: ME })).rejects.toThrow("forbidden");
     await expect(isMember(sockFor(boom(500)), GROUP, { id: ME })).rejects.toThrow("refused");
     await expect(isMember(sockFor(new Error("timed out")), GROUP, { id: ME })).rejects.toThrow("timed out");
   });
