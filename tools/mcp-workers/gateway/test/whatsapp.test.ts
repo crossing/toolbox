@@ -26,6 +26,7 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
       pendingQr: { issuedAt: Date.now(), expiresAt: Date.now() + 50_000 },
       deviceName: "Xing's Assistant",
       connection: "idle",
+      appStateProblem: null,
       autoSync: true,
       verbose: false,
       lastConnectedAt: null,
@@ -50,7 +51,9 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
     setUseLatestVersion: notImplemented as never,
     searchContacts: async (query) => [{ jid: `${query}@s.whatsapp.net`, phoneNumber: query, name: "Ada" }],
     listMessages: async () => [],
-    listChats: async () => [{ jid: "a@s.whatsapp.net", name: "Ada", lastMessageTime: null }],
+    listChats: async () => [
+      { jid: "a@s.whatsapp.net", name: "Ada", lastMessageTime: null, archived: false, leftAt: null, deletedAt: null },
+    ],
     getChat: async () => null,
     getDirectChatByContact: async () => null,
     getContactChats: async () => [],
@@ -66,6 +69,15 @@ function fakeBridge(overrides: Partial<WhatsAppBridgeApi> = {}): WhatsAppBridgeA
     sendMessage: async () => ({ ok: true, messageId: "SENT1" }),
     sendFile: async () => ({ ok: false, detail: "not supported yet" }),
     createGroup: async () => ({ ok: false, detail: "not used in this test" }),
+    leaveGroup: notImplemented as never,
+    archiveChat: notImplemented as never,
+    deleteChat: notImplemented as never,
+    revokeMessage: notImplemented as never,
+    groupInfo: notImplemented as never,
+    getProfile: notImplemented as never,
+    groupUpdateParticipants: notImplemented as never,
+    groupUpdateSubject: notImplemented as never,
+    groupRevokeInvite: notImplemented as never,
     issueImportCode: notImplemented as never,
     importRows: notImplemented as never,
     ...overrides,
@@ -118,32 +130,58 @@ async function connect(
   return client;
 }
 
+/** The tools that change something on WhatsApp beyond sending a message. */
+const MUTATING = [
+  "whatsapp_create_group",
+  "whatsapp_leave_group",
+  "whatsapp_archive_chat",
+  "whatsapp_delete_chat",
+  "whatsapp_revoke_message",
+  "whatsapp_group_update_participants",
+  "whatsapp_group_update_subject",
+  "whatsapp_group_revoke_invite",
+];
+
 describe("whatsapp tool registration", () => {
-  it("publishes the nine ported tools plus status, and marks reads read-only", async () => {
+  it("publishes the ported tools, status, and the lifecycle set, and marks reads read-only", async () => {
     const client = await connect(fakeBridge());
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "whatsapp_archive_chat",
       "whatsapp_bridge_status",
       "whatsapp_create_group",
+      "whatsapp_delete_chat",
       "whatsapp_download_media",
       "whatsapp_get_chat",
       "whatsapp_get_contact_chats",
       "whatsapp_get_direct_chat_by_contact",
       "whatsapp_get_last_interaction",
       "whatsapp_get_message_context",
+      "whatsapp_get_profile",
+      "whatsapp_group_info",
+      "whatsapp_group_revoke_invite",
+      "whatsapp_group_update_participants",
+      "whatsapp_group_update_subject",
+      "whatsapp_leave_group",
       "whatsapp_list_chats",
       "whatsapp_list_messages",
+      "whatsapp_revoke_message",
       "whatsapp_search_contacts",
       "whatsapp_send_drive_file",
       "whatsapp_send_file",
       "whatsapp_send_message",
       "whatsapp_sync_now",
     ]);
-    const reads = tools.filter((tool) => tool.name.startsWith("whatsapp_") && !tool.name.includes("send"));
-    for (const tool of reads) {
-      if (tool.name === "whatsapp_sync_now" || tool.name === "whatsapp_create_group") continue;
-      expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+    // Everything that changes something on WhatsApp is destructive and cannot
+    // be called without `confirm`; everything else is read-only.
+    for (const tool of tools) {
+      if (MUTATING.includes(tool.name)) {
+        expect(tool.annotations, tool.name).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+        expect((tool.inputSchema as { required?: string[] }).required, tool.name).toContain("confirm");
+      } else if (!tool.name.includes("send") && tool.name !== "whatsapp_sync_now") {
+        expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      }
     }
     expect(tools.find((t) => t.name === "whatsapp_send_message")?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((t) => t.name === "whatsapp_send_file")?.annotations?.destructiveHint).toBe(true);
@@ -589,5 +627,258 @@ describe("whatsapp_create_group", () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("Durable Object reset");
+  });
+});
+
+// Leave, archive, delete, revoke and group admin. The gateway's whole job for
+// these is the confirm gate and passing the bridge's words through intact, so
+// each mutating tool is put through the same three questions.
+describe("chat and group lifecycle tools", () => {
+  const GROUP = "120363000000000001@g.us";
+  const ADA = "447700900111@s.whatsapp.net";
+
+  interface Case {
+    tool: string;
+    method: keyof WhatsAppBridgeApi;
+    args: Record<string, unknown>;
+    /** What the bridge method should have been called with. */
+    passed: unknown[];
+    result: { ok: true } & Record<string, unknown>;
+  }
+
+  const CASES: Case[] = [
+    {
+      tool: "whatsapp_leave_group",
+      method: "leaveGroup",
+      args: { group_jid: GROUP },
+      passed: [GROUP],
+      result: { ok: true, groupJid: GROUP, leftAt: "2026-09-19T12:00:00.000Z" },
+    },
+    {
+      tool: "whatsapp_archive_chat",
+      method: "archiveChat",
+      args: { chat_jid: ADA, archive: true },
+      passed: [ADA, true],
+      result: { ok: true, chatJid: ADA, archived: true },
+    },
+    {
+      tool: "whatsapp_delete_chat",
+      method: "deleteChat",
+      args: { chat_jid: GROUP, leave_first: true },
+      passed: [GROUP, true],
+      result: { ok: true, chatJid: GROUP, left: true, deletedAt: "2026-09-19T12:00:00.000Z", messagesKept: 14 },
+    },
+    {
+      tool: "whatsapp_revoke_message",
+      method: "revokeMessage",
+      args: { chat_jid: ADA, message_id: "3EB0AAAA" },
+      passed: [ADA, "3EB0AAAA"],
+      result: { ok: true, chatJid: ADA, messageId: "3EB0AAAA", revokedAt: "2026-09-19T12:00:00.000Z" },
+    },
+    {
+      tool: "whatsapp_group_update_participants",
+      method: "groupUpdateParticipants",
+      args: { group_jid: GROUP, participants: ["447700900111"], action: "remove" },
+      passed: [GROUP, ["447700900111"], "remove"],
+      result: {
+        ok: true,
+        groupJid: GROUP,
+        action: "remove",
+        participants: [{ requested: "447700900111", jid: ADA, status: "removed", code: 200 }],
+        inviteLink: null,
+      },
+    },
+    {
+      tool: "whatsapp_group_update_subject",
+      method: "groupUpdateSubject",
+      args: { group_jid: GROUP, subject: "Roof repair — phase 2" },
+      passed: [GROUP, "Roof repair — phase 2"],
+      result: { ok: true, groupJid: GROUP, subject: "Roof repair — phase 2" },
+    },
+    {
+      tool: "whatsapp_group_revoke_invite",
+      method: "groupRevokeInvite",
+      args: { group_jid: GROUP },
+      passed: [GROUP],
+      result: { ok: true, groupJid: GROUP, inviteLink: "https://chat.whatsapp.com/NewCode" },
+    },
+  ];
+
+  function recording(method: keyof WhatsAppBridgeApi, result: unknown) {
+    const calls: unknown[][] = [];
+    const bridge = fakeBridge({
+      [method]: async (...args: unknown[]) => {
+        calls.push(args);
+        if (result instanceof Error) throw result;
+        return result;
+      },
+    } as Partial<WhatsAppBridgeApi>);
+    return { calls, bridge };
+  }
+
+  for (const c of CASES) {
+    describe(c.tool, () => {
+      it("refuses without confirm: true, and never reaches the bridge", async () => {
+        const { calls, bridge } = recording(c.method, c.result);
+        const client = await connect(bridge);
+        for (const confirm of [false, undefined]) {
+          const result = await client.callTool({
+            name: c.tool,
+            arguments: { ...c.args, ...(confirm === undefined ? {} : { confirm }) },
+          });
+          expect(result.isError, String(confirm)).toBe(true);
+        }
+        expect(calls).toEqual([]);
+      });
+
+      it("passes the request through and returns what the bridge said", async () => {
+        const { calls, bridge } = recording(c.method, c.result);
+        const client = await connect(bridge);
+        const result = await client.callTool({ name: c.tool, arguments: { ...c.args, confirm: true } });
+        expect(result.isError).toBeFalsy();
+        expect(calls).toEqual([c.passed]);
+        expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toEqual(c.result);
+      });
+
+      it("surfaces a refusal, and a throw across the DO boundary, in the bridge's own words", async () => {
+        const refused = recording(c.method, { ok: false, detail: "the bridge is busy — try again in a moment" });
+        let result = await (await connect(refused.bridge)).callTool({ name: c.tool, arguments: { ...c.args, confirm: true } });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("the bridge is busy");
+
+        const thrown = recording(c.method, new Error("Durable Object reset"));
+        result = await (await connect(thrown.bridge)).callTool({ name: c.tool, arguments: { ...c.args, confirm: true } });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("Durable Object reset");
+      });
+
+      it("is not registered for a read-only grant", async () => {
+        const client = await connect(fakeBridge(), { write: false });
+        const { tools } = await client.listTools();
+        expect(tools.map((t) => t.name)).not.toContain(c.tool);
+      });
+    });
+  }
+
+  it("says in the delete tool's own description that the bridge keeps the messages", async () => {
+    const client = await connect(fakeBridge());
+    const { tools } = await client.listTools();
+    const description = tools.find((t) => t.name === "whatsapp_delete_chat")!.description!;
+    expect(description).toMatch(/BRIDGE'S OWN COPY IS KEPT/);
+    expect(description).toMatch(/whatsapp_list_messages/);
+  });
+
+  it("reports an app-state refusal from archive as an error carrying the explanation", async () => {
+    const { bridge } = recording("archiveChat", { ok: false, detail: "this device holds no app-state sync key: …" });
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_archive_chat",
+      arguments: { chat_jid: ADA, archive: true, confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("no app-state sync key");
+  });
+
+  it("rejects an unknown participants action before it reaches the bridge", async () => {
+    const { calls, bridge } = recording("groupUpdateParticipants", { ok: true });
+    const client = await connect(bridge);
+    const result = await client.callTool({
+      name: "whatsapp_group_update_participants",
+      arguments: { group_jid: GROUP, participants: ["447700900111"], action: "ban", confirm: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("shows lifecycle flags on listed chats and revoked / undecryptable on listed messages", async () => {
+    const bridge = fakeBridge({
+      listChats: async () => [
+        { jid: GROUP, name: "Roof repair", lastMessageTime: null, archived: true, leftAt: "2026-09-19T12:00:00.000Z", deletedAt: null },
+      ],
+      listMessages: async () => [
+        {
+          id: "M1", chatJid: GROUP, chatName: "Roof repair", sender: ADA, senderName: "Ada", content: "sorry, wrong group",
+          timestamp: "2026-09-19T11:00:00.000Z", isFromMe: false, mediaType: null, filename: null,
+          revoked: true, revokedAt: "2026-09-19T11:01:00.000Z", undecryptable: false, decryptError: null,
+        },
+      ],
+    });
+    const client = await connect(bridge);
+    const chats = await client.callTool({ name: "whatsapp_list_chats", arguments: {} });
+    expect(JSON.parse((chats.content as { text: string }[])[0]!.text).chats[0]).toMatchObject({
+      archived: true,
+      leftAt: "2026-09-19T12:00:00.000Z",
+    });
+    const messages = await client.callTool({ name: "whatsapp_list_messages", arguments: { chat_jid: GROUP } });
+    expect(JSON.parse((messages.content as { text: string }[])[0]!.text).messages[0]).toMatchObject({
+      revoked: true,
+      content: "sorry, wrong group",
+    });
+  });
+});
+
+describe("whatsapp_group_info and whatsapp_get_profile", () => {
+  const GROUP = "120363000000000001@g.us";
+
+  it("are read-only, need no confirm, and are there for a read-only grant", async () => {
+    const client = await connect(fakeBridge(), { write: false });
+    const { tools } = await client.listTools();
+    for (const name of ["whatsapp_group_info", "whatsapp_get_profile"]) {
+      const tool = tools.find((t) => t.name === name)!;
+      expect(tool.annotations?.readOnlyHint, name).toBe(true);
+      expect(Object.keys((tool.inputSchema as { properties: object }).properties), name).not.toContain("confirm");
+    }
+  });
+
+  it("returns group info as the bridge gave it", async () => {
+    const info = {
+      ok: true,
+      groupJid: GROUP,
+      subject: "Roof repair",
+      participants: [
+        { jid: "199900000000001@lid", phoneNumber: "447700900111@s.whatsapp.net", lid: "199900000000001@lid", admin: null, isMe: false, name: "Ada" },
+      ],
+      admins: [],
+      iAmAdmin: false,
+      inviteLink: null,
+    };
+    const calls: string[] = [];
+    const client = await connect(
+      fakeBridge({
+        groupInfo: async (jid) => {
+          calls.push(jid);
+          return info as never;
+        },
+      }),
+    );
+    const result = await client.callTool({ name: "whatsapp_group_info", arguments: { group_jid: GROUP } });
+    expect(result.isError).toBeFalsy();
+    expect(calls).toEqual([GROUP]);
+    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toEqual(info);
+  });
+
+  it("returns a business profile, and a refusal as an error", async () => {
+    const profile = {
+      ok: true,
+      requested: "447700900111",
+      jid: "447700900111@s.whatsapp.net",
+      exists: true,
+      isBusiness: true,
+      business: { description: "Lettings", category: "Estate agent", website: ["https://example.test"], email: null, address: null, hours: null },
+    };
+    const calls: string[] = [];
+    const bridge = fakeBridge({
+      getProfile: async (who) => {
+        calls.push(who);
+        return who.startsWith("0") ? { ok: false, detail: "national-format 0" } : (profile as never);
+      },
+    });
+    const client = await connect(bridge);
+    const ok = await client.callTool({ name: "whatsapp_get_profile", arguments: { jid_or_phone: "447700900111" } });
+    expect(ok.isError).toBeFalsy();
+    expect(JSON.parse((ok.content as { text: string }[])[0]!.text).business.website).toEqual(["https://example.test"]);
+    const refused = await client.callTool({ name: "whatsapp_get_profile", arguments: { jid_or_phone: "07700900111" } });
+    expect(refused.isError).toBe(true);
+    expect(calls).toEqual(["447700900111", "07700900111"]);
   });
 });

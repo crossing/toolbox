@@ -40,9 +40,11 @@ on demand, which is why the first send in a while takes a few seconds.
 | `whatsapp/src/auth.ts` | Baileys `AuthenticationState` over DO SQLite |
 | `whatsapp/src/session.ts` | one connection: config, waiters, clean shutdown |
 | `whatsapp/src/bridge.ts` | the Durable Object: cycles, pairing, RPC surface |
-| `whatsapp/src/store.ts` | chats/messages schema and the nine read queries |
-| `whatsapp/src/normalize.ts` | `WAMessage` → row |
-| `whatsapp/src/groups.ts` | group creation: request validation, the create stanza, reading the per-participant reply |
+| `whatsapp/src/store.ts` | chats/messages schema, its additive migrations, the nine read queries, and the lifecycle flags |
+| `whatsapp/src/normalize.ts` | `WAMessage` → row; inbound revokes; undecryptable placeholders; rebuilding our own sends for a retry |
+| `whatsapp/src/groups.ts` | groups: request validation, the create / participants / leave stanzas and their per-item replies, group info |
+| `whatsapp/src/chatops.ts` | archive, delete-chat (app-state patches) and revoke; the message range they carry |
+| `whatsapp/src/profile.ts` | live, unstored profile lookup; every field fails soft |
 | `whatsapp/src/media.ts` | fetch/verify/decrypt and encrypt/upload, WebCrypto only |
 | `whatsapp/src/ws-shim.ts` | node-`ws` API over workerd's outbound WebSocket |
 | `whatsapp/src/pbkdf2.ts` | PBKDF2-HMAC-SHA256, for the iteration count workerd refuses |
@@ -134,6 +136,122 @@ on demand, which is why the first send in a while takes a few seconds.
   non-digits and appends the server, so `07700 900111` would become a valid JID
   for a stranger. A send to a stranger is a nuisance; adding one to a group is
   not recoverable, so `prepareGroupRequest` rejects a leading 0 or a `(0)`.
+- **The drain marker means "delivered", not "processed" — and every socket
+  receives the offline queue.** Found 2026-09-19, when a group member's replies
+  never reached the store while forced syncs reported `offline queue: 2,
+  messages: 0`. Baileys (7.0.0-rc14) puts offline stanzas in a sequential queue of
+  its own (`Utils/offline-node-processor.js`) and works through it
+  asynchronously: decrypt, send the receipt, and only then emit
+  `messages.upsert`. `<ib><offline count=N/>` fires when the N stanzas have
+  arrived on the wire. A cycle closed a fixed 3 s after it, and — worse — a send,
+  a group create, any on-demand socket closed the moment its own job was done,
+  having been handed the same offline queue on connect. Closing mid-queue loses
+  messages in two ways: a stanza still queued behind a slow one is never
+  processed or acked, so it is redelivered next time behind the same slow one;
+  and a stanza cut off *between decrypt and upsert* has advanced the Signal
+  ratchet in SQL with nothing in the store and no ack, so its redelivery cannot
+  be decrypted. For a group `skmsg` that redelivery fails with "old counter", a
+  retry receipt goes out and a stub is upserted; for a one-to-one message
+  libsignal says "Key used already or never filled", which is the one error
+  `handleMessage` answers with a NACK and a bare `return` — no retry, no upsert,
+  no trace. (`test/group-inbound.test.ts` reproduces both.) So `Session` counts
+  offline message stanzas off the raw socket and watches them come out as
+  upserts (`InboundTracker`), and **every** `close()` first waits for them —
+  bounded at 30 s, because a stanza Baileys drops on purpose never comes out —
+  flushing the event buffer as it polls, since that is where an upsert sits
+  until something releases it. Only messages can be tracked; receipts and
+  notifications leave no event to count, share the queue, and are redelivered
+  harmlessly. The cycle's detail line now says what the queue was made of and
+  what, if anything, never came out.
+- **A message that could not be decrypted is a row, not a gap.** Baileys upserts
+  a `CIPHERTEXT` stub after sending the retry receipt. It used to be filed as an
+  empty message, indistinguishable from one with no text; it is now a
+  placeholder (`undecryptable: true`, with Baileys' reason), overwritten under
+  the same id when the sender's resend arrives and never allowed to overwrite a
+  readable row. A close waits a further 10 s for that resend; one that misses it
+  is queued for the next connection like anything else.
+- **`getMessage` is answered from the store.** A recipient device that cannot
+  decrypt one of our sends asks again with a retry receipt. Baileys answers from
+  an in-memory cache of recent sends — which belongs to the socket that sent,
+  closed seconds later — and then from `getMessage`, which defaulted to
+  "nothing". Every retry request for a bridge send was therefore dropped, and
+  that device never got the message; group sends, one sender key to many
+  devices, are where it bites. The store keeps rows rather than protos, so the
+  answer is rebuilt: a text as a plain conversation, an attachment from the
+  descriptors kept for downloads (same CDN object, same key, nothing
+  re-uploaded). Revoked messages are not resent.
+- **Archive and delete are app-state patches, and need a key only the phone can
+  give.** `chatModify` does not address the chat: it encrypts a mutation to the
+  account's synced state (`appPatch`, `Socket/chats.js`). That needs
+  `creds.myAppStateKeyId` and the `app-state-sync-key` it names, which arrive
+  once, in an `APP_STATE_SYNC_KEY_SHARE` from the phone shortly after pairing.
+  `auth.ts` persists both — key rows through the same generic `(type, id)` table
+  as every Signal key, revived as protos; the id inside the creds blob — so
+  nothing had to be added for that. The collection's version
+  (`app-state-sync-version`) is persisted too but is *not* a precondition:
+  `appPatch` resyncs the collection before encoding, from a snapshot when there
+  is no stored version, so it does not matter that the connect-drain-close
+  cycle has probably never let a full initial app-state sync complete
+  (`accountSyncCounter` only advances after one, or after a 20 s wait no cycle
+  stays for). What cannot be fixed from here is a device that was not connected
+  when the key share went out: `auth.appStateProblem()` checks for the key
+  before a socket is opened, the two tools fail with its explanation, and
+  `whatsapp_bridge_status` reports it as `appStateProblem`. A patch the server
+  rejects makes `chatModify` throw; the store's flag is written only after it
+  returns, so there is no path on which the tool reports an archive that did not
+  happen. **Whether the live device holds the key is not known** — it could not
+  be checked without calling the live bridge; read `appStateProblem` after the
+  deploy, before relying on either tool.
+- **The message range is built here, not by Baileys.** Archive and delete carry
+  the chat's newest message by key and time. Handed a `MinimalMessage[]`,
+  `chatModificationToAppPatch` returns each message as it is, leaving the
+  proto's `timestamp` unset; handed a range it passes it through. So
+  `chatops.ts` builds the `SyncActionMessageRange` itself, with the participant
+  exactly as WhatsApp addressed it (`messages.participant`, a LID in newer
+  groups — `sender` holds the number instead). An empty chat sends an empty
+  range dated by the chat.
+- **Nothing is ever deleted from the store.** Leaving a group, archiving,
+  deleting a chat and revoking a message each set a flag — `left_at`,
+  `archived`, `deleted_at`, `revoked_at` — and keep every row. Flagged chats
+  stay in `whatsapp_list_chats`. A chat deleted on the phone (`chats.delete`)
+  is flagged the same way. `deleted_at` lifts when something newer is said in
+  the chat, as WhatsApp itself re-creates it; `left_at` when there is activity
+  well after the leave.
+- **An inbound revoke lands on the row it withdraws.** It arrives as an ordinary
+  message whose content is a `protocolMessage` of type `REVOKE`. It used to be
+  stored as an empty row under the revoke's own id, the original untouched. Two
+  cases: the original is already stored — it is flagged, content kept; or
+  original and revoke sit in the same event buffer (sent and withdrawn while the
+  bridge was offline), where Baileys folds the revoke into the original
+  (`Object.assign(existing, update)`), nulling its content and *replacing its
+  key* — that husk is dropped and a tombstone filed under the original id, which
+  the revoke's own upsert still carries. No protocol message is stored as a row
+  any more; none of them is something anyone said.
+- **`groupLeave` is bypassed for the same reason as `groupCreate`.** It awaits
+  the reply and discards it, and a leave is answered per group
+  (`<leave><group id=… error=…/>`). `groupParticipantsUpdate` keeps the
+  per-participant status but keys it by whatever JID the server answered with,
+  so that reply is read here too, with create's three-spelling matcher and
+  create's vocabulary (`invite_required` for a 403 on an add). `groupMetadata`,
+  `groupUpdateSubject` and `groupRevokeInvite` lose nothing and are called as
+  they are.
+- **Deleting a group chat asks WhatsApp whether we are still in it**, rather
+  than trusting `left_at`: a group left from the phone never told the bridge.
+  Still a member without `leave_first` is a refusal; with it, leave then delete,
+  and a delete that fails after the leave says that the leave happened.
+- **Revoke is refused past 48 hours.** WhatsApp's "about two days" is enforced
+  by the recipients' clients, not the server: a late revoke is accepted and
+  ignored, and flagging the row would record a withdrawal that did not happen.
+- **Schema changes are additive columns, applied at start-up.** `store.ts`
+  `MIGRATIONS`: `chats.archived INTEGER NOT NULL DEFAULT 0`, `chats.left_at`,
+  `chats.deleted_at`, `messages.revoked_at`, `messages.revoked_by`,
+  `messages.participant`, `messages.decrypt_error` (all nullable `TEXT` but the
+  first). A nullable column or one with a constant default is the one `ALTER`
+  SQLite applies without rewriting the table. Each is probed with a `SELECT` of
+  the column and added only if that fails to prepare, so it is idempotent and
+  needs no `PRAGMA`. The `CREATE TABLE`s are left as they were, so a fresh store
+  and the live one reach the schema by the same path — and the test runs the
+  migration over the legacy schema with rows in it.
 - **Timestamps are ISO-8601 UTC.** The Go bridge writes `time.Time` with a
   local offset, which does not sort correctly across offsets; the importer
   converts.
@@ -185,6 +303,9 @@ account-wide** (3-day retention):
 | B5 history import | done; ran against production |
 | B6 send | text and files done, to people and to `…@g.us`; audio must arrive pre-encoded |
 | B8 groups | `whatsapp_create_group` built and unit-tested 2026-09-19; **not yet exercised against a live socket** |
+| B9 chat & group lifecycle | built and unit-tested 2026-09-19: `whatsapp_leave_group`, `whatsapp_archive_chat`, `whatsapp_delete_chat`, `whatsapp_revoke_message`, `whatsapp_group_info`, `whatsapp_group_update_participants`, `whatsapp_group_update_subject`, `whatsapp_group_revoke_invite`; inbound revokes. **None exercised against a live socket**; archive/delete additionally depend on an app-state key the live device may or may not hold |
+| B10 inbound reliability | built and unit-tested 2026-09-19: close waits for offline messages to come out of Baileys, undecryptable placeholders, `getMessage` from the store, per-kind cycle detail. The cause of the live 2026-09-19 loss is **inferred from Baileys' source and reproduced in part offline, not confirmed** — the next live sync's detail line is what confirms or refutes it |
+| B11 profiles | `whatsapp_get_profile` built and unit-tested 2026-09-19, live fetch, nothing stored; **not exercised against a live socket** |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
 Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the
@@ -206,11 +327,25 @@ pairing is what turned up the `creds.registered` trap above.
   metadata query. Groups are named from `chats.upsert`, `groups.upsert` and
   `groups.update` (renames), and a group the bridge created is named at
   creation; a group we have never seen named appears as its JID.
-- **Group administration beyond creation.** Adding or removing members later,
-  renaming, leaving, and revoking the invite link are all in Baileys and none
-  are exposed. Creation was the one thing that could not be done from a chat;
-  the rest is a few taps on the phone and each is another outward-facing tool
-  to gate.
+- **Group administration beyond the small surface.** Members, subject, leaving
+  and the invite link are exposed (B9), each mutating tool confirm-gated.
+  Description, announce/locked settings, disappearing messages, join approval
+  and membership requests are in Baileys and deliberately not: none has come up,
+  and each is another outward-facing tool to gate.
+- **Recovering a message lost before this fix.** A stanza whose ratchet step was
+  spent by a socket that then closed cannot be decrypted again locally. A group
+  message gets a retry receipt and comes back if the sender's phone answers; a
+  one-to-one message hits the error Baileys NACKs without a retry, and changing
+  that means patching Baileys.
+- **Tracking offline receipts and notifications to completion.** They leave no
+  event to count. One that is slow at the head of the queue can still be cut off
+  when no message sits behind it; it is redelivered, and gets the full bound the
+  next time a message does.
+- **Storing profiles, or verified business names.** `whatsapp_get_profile` is a
+  live read and writes nothing. `name` in its result is the store's own chat name
+  or pushName; `verifiedBizName` is on inbound messages and is not kept.
+- **Clear-chat, pin, mute, mark-read.** The same `chatModify` road as archive and
+  equally easy; not asked for.
 - **Sending the invite for you.** When a direct add is refused the tool returns
   the invite link and stops. Messaging someone who has just declined to be
   added is a decision, so it is left to a separate, explicit

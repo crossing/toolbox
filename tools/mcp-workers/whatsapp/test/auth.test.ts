@@ -174,4 +174,53 @@ describe("makeSqlAuthState", () => {
     expect(makeSqlAuthState(sql).state.creds.registrationId).toBe(auth.state.creds.registrationId);
     sql.close();
   });
+
+  // Archive and delete-chat are app-state patches. Baileys' appPatch needs
+  // creds.myAppStateKeyId and the key it names; the collection version is
+  // resynced on demand. Both have to survive the fresh socket every operation
+  // opens.
+  describe("app-state prerequisites", () => {
+    it("reports a device that was never sent an app-state key", () => {
+      const sql = makeFakeSql();
+      expect(makeSqlAuthState(sql).appStateProblem()).toMatch(/no app-state sync key/);
+      sql.close();
+    });
+
+    it("reports a key id whose key is missing from the store", () => {
+      const sql = makeFakeSql();
+      const auth = makeSqlAuthState(sql);
+      auth.state.creds.myAppStateKeyId = "AAAAAGJr";
+      expect(auth.appStateProblem()).toMatch(/missing from its key store/);
+      sql.close();
+    });
+
+    it("is satisfied once the phone's key share has been stored, and stays so for the next socket", async () => {
+      const sql = makeFakeSql();
+      const first = makeSqlAuthState(sql);
+      // What Utils/process-message.js does with an APP_STATE_SYNC_KEY_SHARE.
+      await first.state.keys.set({
+        "app-state-sync-key": { AAAAAGJr: { keyData: Buffer.from("0123456789abcdef0123456789abcdef"), timestamp: 1789810000 } as never },
+      });
+      Object.assign(first.state.creds, { myAppStateKeyId: "AAAAAGJr" });
+      first.saveCreds();
+      expect(first.appStateProblem()).toBeNull();
+
+      const next = makeSqlAuthState(sql);
+      expect(next.state.creds.myAppStateKeyId).toBe("AAAAAGJr");
+      expect(next.appStateProblem()).toBeNull();
+      sql.close();
+    });
+
+    it("round-trips a collection's version state, hash bytes and all", async () => {
+      const sql = makeFakeSql();
+      const state = { version: 7, hash: Buffer.alloc(128, 3), indexValueMap: { "WyJhcmNoaXZlIl0=": { valueMac: Buffer.from("mac") } } };
+      await makeSqlAuthState(sql).state.keys.set({ "app-state-sync-version": { regular_low: state as never } });
+      const revived = (await makeSqlAuthState(sql).state.keys.get("app-state-sync-version", ["regular_low"])).regular_low as any;
+      expect(revived.version).toBe(7);
+      expect(Buffer.isBuffer(revived.hash)).toBe(true);
+      expect(revived.hash.length).toBe(128);
+      expect(Buffer.from(revived.indexValueMap["WyJhcmNoaXZlIl0="].valueMac).toString()).toBe("mac");
+      sql.close();
+    });
+  });
 });

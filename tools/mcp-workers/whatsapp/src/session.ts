@@ -17,8 +17,8 @@
 // Socket/chats.js re-buffers immediately afterwards and flushes on a later
 // task, so callers wait a beat past the marker before closing.
 
-import makeWASocket, { DisconnectReason } from "baileys";
-import type { CacheStore, ConnectionState, WAMessage, WAVersion } from "baileys";
+import makeWASocket, { DisconnectReason, proto } from "baileys";
+import type { CacheStore, ConnectionState, WAMessage, WAMessageKey, WAVersion } from "baileys";
 // ILogger is declared in Utils/logger.d.ts and not re-exported from the root.
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import type { SqlAuthState } from "./auth";
@@ -167,7 +167,15 @@ export interface SessionHandlers {
   /** Called on every `creds.update`; must persist synchronously. */
   onCreds(): void;
   onMessages(messages: WAMessage[], type: string): void;
-  onChats(chats: { jid: string; name?: string | null; lastMessageTime?: string | null }[]): void;
+  /** `archived` is only present when WhatsApp said so (an app-state sync from the phone). */
+  onChats(chats: { jid: string; name?: string | null; lastMessageTime?: string | null; archived?: boolean }[]): void;
+  /** Chats deleted on another device. The store flags them; it never drops them. */
+  onChatsDeleted?(jids: string[]): void;
+  /**
+   * One of our own messages, as a proto, for a recipient device that could not
+   * decrypt it and is asking again. See the note on `getMessage` below.
+   */
+  getMessage?(key: WAMessageKey): proto.IMessage | undefined;
   log: LogSink;
   version?: WAVersion;
   /** Forward Baileys' own debug/info logs; for diagnosing a stuck handshake. */
@@ -269,8 +277,152 @@ export class ConnectionWaiters {
   }
 }
 
+/** How long a close will wait for offline messages still inside Baileys. */
+export const INBOUND_PROCESS_BOUND_MS = 30_000;
+/** How long it then waits for a sender to answer a retry receipt. */
+export const RETRY_GRACE_MS = 10_000;
+const INBOUND_POLL_MS = 400;
+
+export interface InboundSummary {
+  /** Offline stanzas seen on the wire this connection, by kind. */
+  offline: { message: number; receipt: number; notification: number; call: number };
+  /** Offline message stanzas that never came out of Baileys as an upsert. */
+  pendingMessages: number;
+  /** Messages that arrived but could not be decrypted (a retry was requested). */
+  undecryptable: number;
+  /** …of which the sender's resend arrived before the socket closed. */
+  recovered: number;
+}
+
+/**
+ * Knowing when it is safe to hang up.
+ *
+ * WhatsApp's "offline queue drained" marker (`<ib><offline count=N/>`) means the
+ * N stanzas have been *delivered on the wire*. It says nothing about Baileys
+ * having dealt with them: in 7.0.0-rc14 offline stanzas go into a sequential queue
+ * (Utils/offline-node-processor.js) that is worked through asynchronously, one
+ * `await`ed handler at a time — decrypt, send the receipt, and only then emit
+ * `messages.upsert` (Socket/messages-recv.js handleMessage).
+ *
+ * A bridge that closes a fixed beat after the marker — or, worse, the moment
+ * its own send has gone out, which is what every on-demand operation did —
+ * can therefore cut a message off at any of these points:
+ *
+ *   - still queued behind a slow stanza: never processed, never acked, so it
+ *     is redelivered next time behind the same slow stanza, indefinitely
+ *     ("offline queue: 2 … messages: 0", cycle after cycle);
+ *   - decrypted but not yet upserted: the Signal ratchet has advanced and been
+ *     persisted, the store has nothing, and the stanza was never acked. On
+ *     redelivery the key is spent, so decryption fails — and when libsignal
+ *     words that failure "Key used already or never filled", Baileys NACKs the
+ *     stanza and returns *without emitting anything at all*. The message is
+ *     gone and no row says so.
+ *
+ * So this watches the raw stanzas going in and the upserts coming out, and
+ * `settle` holds the socket until every offline message seen has come out — or
+ * a bound passes, because a stanza Baileys drops on purpose (an `msmsg`, the
+ * NACK above) never will. Messages that came out undecryptable get a further,
+ * shorter grace for the sender's phone to answer the retry receipt; a resend
+ * that misses it is simply queued for the next connection.
+ *
+ * Only messages can be tracked this way: receipts and notifications leave no
+ * event to count. They share the queue, so they are covered whenever a message
+ * sits behind them, and are otherwise redelivered harmlessly.
+ */
+export class InboundTracker {
+  readonly offline = { message: 0, receipt: 0, notification: 0, call: 0 };
+  private pending = new Set<string>();
+  private awaitingRetry = new Set<string>();
+  private undecryptable = 0;
+  private recovered = 0;
+
+  /** Every inbound stanza of a kind Baileys queues when it carries `offline`. */
+  onStanza(tag: keyof InboundTracker["offline"], attrs: Record<string, string> | undefined): void {
+    if (!attrs?.offline) return;
+    this.offline[tag]++;
+    if (tag === "message" && attrs.id) this.pending.add(attrs.id);
+  }
+
+  onUpsert(messages: WAMessage[]): void {
+    for (const message of messages) {
+      const id = message.key?.id;
+      if (!id) continue;
+      this.pending.delete(id);
+      if (message.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
+        if (!this.awaitingRetry.has(id)) this.undecryptable++;
+        this.awaitingRetry.add(id);
+      } else if (this.awaitingRetry.delete(id)) {
+        this.recovered++;
+      }
+    }
+  }
+
+  summary(): InboundSummary {
+    return {
+      offline: { ...this.offline },
+      pendingMessages: this.pending.size,
+      undecryptable: this.undecryptable,
+      recovered: this.recovered,
+    };
+  }
+
+  /**
+   * @param flush releases Baileys' event buffer, which is where an upsert sits
+   *   until something lets it out — without it nothing here would ever see one.
+   */
+  async settle(deps: {
+    flush(): void;
+    wait(ms: number): Promise<void>;
+    now?(): number;
+    isOpen?(): boolean;
+    processMs?: number;
+    retryMs?: number;
+  }): Promise<InboundSummary> {
+    const now = deps.now ?? (() => Date.now());
+    const isOpen = deps.isOpen ?? (() => true);
+    const until = async (done: () => boolean, budgetMs: number) => {
+      const deadline = now() + budgetMs;
+      deps.flush();
+      while (!done() && isOpen() && now() < deadline) {
+        await deps.wait(INBOUND_POLL_MS);
+        deps.flush();
+      }
+    };
+    await until(() => this.pending.size === 0, deps.processMs ?? INBOUND_PROCESS_BOUND_MS);
+    await until(() => this.awaitingRetry.size === 0, deps.retryMs ?? RETRY_GRACE_MS);
+    return this.summary();
+  }
+}
+
+/**
+ * What a cycle took in, in enough detail that "offline queue: 2, messages: 0"
+ * can never again be all there is to go on: how many of the queued stanzas were
+ * messages at all, whether any never came out of Baileys, and whether any came
+ * out unreadable.
+ */
+export function describeInbound(offlineCount: number | null, inbound: InboundSummary): string | null {
+  if (offlineCount === null) return null;
+  const { message, receipt, notification, call } = inbound.offline;
+  const parts = [`offline queue: ${offlineCount}`];
+  if (message + receipt + notification + call > 0) {
+    parts.push(`(${message} message, ${receipt} receipt, ${notification} notification${call ? `, ${call} call` : ""})`);
+  }
+  if (inbound.pendingMessages > 0) {
+    parts.push(`— ${inbound.pendingMessages} message(s) never came out of Baileys; they stay queued on WhatsApp if unacknowledged`);
+  }
+  if (inbound.undecryptable > 0) {
+    parts.push(`— ${inbound.undecryptable} undecryptable (${inbound.recovered} recovered by resend)`);
+  }
+  return parts.join(" ");
+}
+
 export class Session {
   readonly sock: ReturnType<typeof makeWASocket>;
+  readonly inbound = new InboundTracker();
+  private settled: Promise<InboundSummary> | null = null;
+  private closing: Promise<void> | null = null;
+  /** WhatsApp (or the network) closed the stream; nothing more will arrive. */
+  private streamClosed = false;
   private waiters = new ConnectionWaiters();
   private ended = false;
   /** Populated when WhatsApp tears the stream down; a Boom status code. */
@@ -301,6 +453,18 @@ export class Session {
       callOfferCache: memCache(),
       userDevicesCache: memCache(),
       placeholderResendCache: memCache(),
+      // When a recipient's device cannot decrypt something we sent, it asks for
+      // it again with a retry receipt. Baileys answers from an in-memory cache
+      // of recent sends and falls back to this — and the cache belongs to the
+      // socket that sent, which here is closed seconds later. The receipt
+      // arrives on some later socket that has never heard of the message, so
+      // without this every retry request for a bridge send is dropped ("recv
+      // retry request, but message not available") and that device never gets
+      // the message. Group sends are where it bites: one sender key, many
+      // devices, and any one of them may have missed the distribution.
+      ...(handlers.getMessage
+        ? { getMessage: async (key: WAMessageKey) => handlers.getMessage!(key) }
+        : {}),
     });
 
     this.sock.ev.on("creds.update", () => handlers.onCreds());
@@ -327,6 +491,7 @@ export class Session {
 
     this.sock.ev.on("connection.update", (update) => {
       if (update.connection === "close") {
+        this.streamClosed = true;
         const err = update.lastDisconnect?.error as
           | { output?: { statusCode?: number }; message?: string }
           | undefined;
@@ -337,6 +502,7 @@ export class Session {
     });
 
     this.sock.ev.on("messages.upsert", ({ messages, type }) => {
+      this.inbound.onUpsert(messages);
       try {
         handlers.onMessages(messages, type);
       } catch (err) {
@@ -346,6 +512,15 @@ export class Session {
 
     this.sock.ev.on("chats.upsert", (chats) => this.reportChats(chats));
     this.sock.ev.on("chats.update", (chats) => this.reportChats(chats));
+    // Arrives when the chat is deleted on the phone or another linked device
+    // (an app-state `deleteChatAction`).
+    this.sock.ev.on("chats.delete", (jids) => {
+      try {
+        if (jids.length > 0) handlers.onChatsDeleted?.(jids);
+      } catch (err) {
+        handlers.log("error", `flagging deleted chats failed: ${String(err)}`);
+      }
+    });
     // A group's subject arrives on its own events, not on chats.*: a rename is
     // `groups.update`, and being added to a group is `groups.upsert`. Without
     // these a renamed group keeps its old name for good.
@@ -366,6 +541,13 @@ export class Session {
       });
     }
 
+    // What came in as backlog, counted off the raw stanzas — see InboundTracker.
+    for (const tag of ["message", "receipt", "notification", "call"] as const) {
+      this.sock.ws.on(`CB:${tag}`, (node: unknown) => {
+        this.inbound.onStanza(tag, (node as BinaryNodeish).attrs as Record<string, string> | undefined);
+      });
+    }
+
     // The backlog size is only ever logged by Baileys; read it off the raw node.
     this.sock.ws.on("CB:ib,,offline", (node: unknown) => {
       const children = (node as { content?: { tag: string; attrs: Record<string, string> }[] }).content;
@@ -374,10 +556,14 @@ export class Session {
     });
   }
 
-  private reportChats(chats: { id?: string | null; name?: string | null; conversationTimestamp?: unknown }[]): void {
+  private reportChats(chats: { id?: string | null; name?: string | null; archived?: boolean | null }[]): void {
     const mapped = chats
       .filter((chat) => Boolean(chat.id))
-      .map((chat) => ({ jid: chat.id as string, name: chat.name ?? null }));
+      .map((chat) => ({
+        jid: chat.id as string,
+        name: chat.name ?? null,
+        ...(typeof chat.archived === "boolean" ? { archived: chat.archived } : {}),
+      }));
     if (mapped.length > 0) {
       try {
         this.handlers.onChats(mapped);
@@ -419,9 +605,45 @@ export class Session {
     return [...wsDebug];
   }
 
+  /**
+   * Hold on until the offline messages seen on the wire have come out of
+   * Baileys, within bounds. Idempotent: a caller that wants the numbers asks
+   * first, and `close()` reuses the answer rather than waiting twice.
+   */
+  settleInbound(): Promise<InboundSummary> {
+    this.settled ??= this.inbound.settle({
+      flush: () => {
+        this.sock.ev.flush();
+      },
+      wait: (ms) => scheduler.wait(ms),
+      isOpen: () => !this.ended && !this.streamClosed,
+    });
+    return this.settled;
+  }
+
   /** Clean shutdown that preserves the session; never `logout()`. */
-  async close(): Promise<void> {
-    if (this.ended) return;
+  close(): Promise<void> {
+    // Memoised: cancelPairing and a pairing tail can both reach for the same
+    // socket, and the second must not end it while the first is still settling.
+    this.closing ??= this.shutDown();
+    return this.closing;
+  }
+
+  private async shutDown(): Promise<void> {
+    // Every socket receives the offline queue, whatever it was opened for — a
+    // send, a group rename — so every close has to let it finish. See
+    // InboundTracker for what is lost otherwise.
+    try {
+      const inbound = await this.settleInbound();
+      if (inbound.pendingMessages > 0 || inbound.undecryptable > inbound.recovered) {
+        this.handlers.log(
+          "warn",
+          `closing with inbound unfinished: ${inbound.pendingMessages} offline message(s) never came out of Baileys, ${inbound.undecryptable - inbound.recovered} undecryptable awaiting a resend`,
+        );
+      }
+    } catch (err) {
+      this.handlers.log("warn", `settling inbound messages threw: ${String(err)}`);
+    }
     this.ended = true;
     this.handlers.log("info", `socket trace: ${wsDebug.slice(-12).join(" | ")}`);
     this.waiters.cancelAll();

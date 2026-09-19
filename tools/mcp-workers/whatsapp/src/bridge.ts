@@ -13,15 +13,22 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type {
+  ArchiveChatResult,
   BridgeCycle,
   BridgeStatus,
   ChatRow,
   CreateGroupResult,
   ContactRow,
+  DeleteChatResult,
+  GroupInfoResult,
+  GroupInviteResult,
+  GroupParticipantAction,
+  GroupSubjectResult,
   ImportCode,
   ImportRequest,
   ImportResult,
   LastInteraction,
+  LeaveGroupResult,
   ListChatsQuery,
   ListMessagesQuery,
   MediaResult,
@@ -29,18 +36,46 @@ import type {
   MessageRow,
   PairingResult,
   PreflightResult,
+  ProfileResult,
+  RevokeMessageResult,
   SendResult,
   SyncResult,
+  UpdateParticipantsResult,
   WhatsAppBridgeApi,
 } from "@toolbox/mcp-shared";
 import { WHATSAPP_SEND_BYTE_CAP } from "@toolbox/mcp-shared";
 import { Curve, fetchLatestWaWebVersion, generateMessageIDV2, MEDIA_PATH_MAP, proto } from "baileys";
 import type { WAVersion } from "baileys";
 import { makeSqlAuthState, type SqlAuthState } from "./auth";
-import { createGroupOnSocket, prepareGroupRequest, type PreparedGroupRequest } from "./groups";
+import { archiveChatOnSocket, checkRevocable, deleteChatOnSocket, revokeMessageOnSocket, type ChatOpsSocket } from "./chatops";
+import {
+  createGroupOnSocket,
+  groupInfoOnSocket,
+  inviteLinkFor,
+  isMember,
+  leaveGroupOnSocket,
+  prepareGroupRequest,
+  prepareParticipants,
+  prepareSubject,
+  requireGroupJid,
+  updateParticipantsOnSocket,
+  type GroupInfoSocket,
+  type Me,
+  type PreparedGroupRequest,
+} from "./groups";
 import { encryptForUpload, fetchAndDecrypt, MediaError, uploadEncrypted } from "./media";
-import { chatNameFor, isoFromSeconds, kindFromFilename, mimeFromFilename, toJid, toStoredMessage } from "./normalize";
-import { deviceBrowser, DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
+import {
+  chatNameFor,
+  isoFromSeconds,
+  kindFromFilename,
+  messageForRetry,
+  mimeFromFilename,
+  revokeOf,
+  toJid,
+  toStoredMessage,
+} from "./normalize";
+import { fetchProfileOnSocket, prepareProfileTarget, type ProfileSocket, type ProfileTarget } from "./profile";
+import { describeInbound, deviceBrowser, DisconnectReason, isFatalDisconnect, Session, type SessionHandlers } from "./session";
 import { Store } from "./store";
 
 export interface BridgeEnv {
@@ -191,6 +226,7 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       pendingQr: qr ? { issuedAt: qr.issuedAt, expiresAt: qr.expiresAt } : null,
       deviceName: this.deviceName(),
       connection: this.connectionState(),
+      appStateProblem: this.auth.isPaired() ? this.auth.appStateProblem() : null,
       autoSync: this.getMeta<boolean>("autoSync", false),
       verbose: this.isVerbose(),
       lastConnectedAt: this.getMeta<number | null>("lastConnectedAt", null),
@@ -300,24 +336,62 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       onCreds: () => this.auth.saveCreds(),
       onMessages: (messages, type) => {
         const meId = this.auth.state.creds.me?.id ?? null;
+        let stored = 0;
+        let undecryptable = 0;
         for (const message of messages) {
-          const row = toStoredMessage(message, meId);
-          if (!row) continue;
-          this.store.upsertMessage(row);
-          this.store.upsertChat({
-            jid: row.chatJid,
-            name: chatNameFor(message),
-            lastMessageTime: row.timestamp,
-          });
-          counters.messages++;
+          // One message at a time: a row that will not normalise or store must
+          // cost itself, not the rest of the batch it arrived in.
+          try {
+            const revoke = revokeOf(message, meId);
+            if (revoke) {
+              const known = this.store.recordRevoke(revoke, Boolean(message.key?.fromMe));
+              this.log("info", `message ${revoke.messageId} in ${revoke.chatJid} was deleted for everyone${known ? "" : " (never seen here; tombstone filed)"}`);
+              continue;
+            }
+            const row = toStoredMessage(message, meId);
+            if (!row) continue;
+            this.store.upsertMessage(row);
+            this.store.upsertChat({
+              jid: row.chatJid,
+              name: chatNameFor(message),
+              lastMessageTime: row.timestamp,
+            });
+            counters.messages++;
+            stored++;
+            if (row.decryptError) {
+              undecryptable++;
+              this.log("warn", `undecryptable message ${row.id} in ${row.chatJid} from ${row.sender}: ${row.decryptError}`, {
+                event: "undecryptable",
+                chat: row.chatJid,
+                sender: row.sender,
+              });
+            }
+          } catch (err) {
+            this.log("error", `storing message ${message.key?.id ?? "?"} failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
-        if (messages.length > 0) this.log("info", `stored ${messages.length} ${type} messages`);
+        if (messages.length > 0) {
+          this.log("info", `stored ${stored} of ${messages.length} ${type} messages${undecryptable ? `, ${undecryptable} undecryptable` : ""}`);
+        }
       },
       onChats: (chats) => {
         for (const chat of chats) {
           this.store.upsertChat(chat);
           counters.chats++;
         }
+      },
+      // Deleted on the phone. Flagged, like a delete made from here; the
+      // messages stay.
+      onChatsDeleted: (jids) => {
+        const at = new Date().toISOString();
+        for (const jid of jids) this.store.markChatDeleted(jid, at);
+        this.log("info", `${jids.length} chat(s) deleted on another device; flagged, messages kept`);
+      },
+      getMessage: (key) => {
+        if (!key.id) return undefined;
+        const message = messageForRetry(this.store.ownMessage(key.id, key.remoteJid));
+        this.log(message ? "info" : "warn", `retry request for ${key.id}: ${message ? "answered from the store" : "not something the store can rebuild"}`);
+        return message;
       },
       log: (level, message) => this.log(level, message),
     };
@@ -681,8 +755,11 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       // The drain marker is not the end of the story: Baileys re-buffers
       // straight afterwards and flushes on a later task.
       await scheduler.wait(POST_DRAIN_SETTLE_MS);
+      // …and it is not the end of the *processing* either: the marker says the
+      // queue was delivered, not that Baileys has worked through it.
+      const inbound = await session.settleInbound();
       this.setMeta("lastDrainAt", Date.now());
-      detail = session.offlineCount === null ? null : `offline queue: ${session.offlineCount}`;
+      detail = describeInbound(session.offlineCount, inbound);
       ok = true;
       this.setMeta("lastError", null);
     } catch (err) {
@@ -1001,6 +1078,243 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       this.setConnection("idle");
       this.busy = false;
     }
+  }
+
+  // --- chat and group lifecycle ---------------------------------------------
+
+  // Open, act, close — the same on-demand connection a send uses. `act` throws
+  // to fail; its message becomes the result's `detail`.
+  private async withSocket<T extends { ok: boolean; detail?: string }>(
+    act: (session: Session) => Promise<T>,
+  ): Promise<T | { ok: false; detail: string }> {
+    if (!this.auth.isPaired()) return { ok: false, detail: "no device is paired" };
+    if (this.inProgress) return { ok: false, detail: "the bridge is busy — try again in a moment" };
+    this.beginOperation();
+    const counters = { messages: 0, chats: 0 };
+    let session: Session | null = null;
+    try {
+      this.setConnection("connecting");
+      session = await this.openSession(counters);
+      await session.waitForOpen(60_000);
+      this.setConnection("open");
+      this.setMeta("lastConnectedAt", Date.now());
+      return await act(session);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.setMeta("lastError", detail);
+      return { ok: false, detail };
+    } finally {
+      this.setConnection("closing");
+      await session?.close();
+      this.setConnection("idle");
+      this.busy = false;
+    }
+  }
+
+  private me(): Me {
+    const me = this.auth.state.creds.me;
+    return { id: me?.id ?? null, lid: me?.lid ?? null };
+  }
+
+  /** Archive and delete act on a chat the bridge knows, so a mistyped number cannot name a stranger's. */
+  private knownChatJid(chatJid: string): string {
+    const jid = toJid(chatJid);
+    const chat = this.store.getChat(jid);
+    if (!chat) throw new Error(`no chat ${jid} in the store — take the JID from whatsapp_list_chats`);
+    return chat.jid;
+  }
+
+  /** Validation that needs no socket; a throw becomes a refusal before one is opened. */
+  private refusal(check: () => void): { ok: false; detail: string } | null {
+    try {
+      check();
+      return null;
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async leaveGroup(groupJid: string): Promise<LeaveGroupResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = requireGroupJid(groupJid);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      await leaveGroupOnSocket(session.sock, jid);
+      const leftAt = new Date().toISOString();
+      this.store.setLeft(jid, leftAt);
+      this.log("info", `left group ${jid}`, { event: "group-left", jid });
+      return { ok: true, groupJid: jid, leftAt };
+    });
+  }
+
+  async archiveChat(chatJid: string, archive: boolean): Promise<ArchiveChatResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = this.knownChatJid(chatJid);
+    });
+    if (refused) return refused;
+    // Checked before a socket is opened: without the key there is nothing to
+    // encrypt the patch with, and Baileys would say so far less clearly.
+    const problem = this.auth.isPaired() ? this.auth.appStateProblem() : null;
+    if (problem) return { ok: false, detail: problem };
+    return this.withSocket(async (session) => {
+      const result = await archiveChatOnSocket(session.sock as unknown as ChatOpsSocket, this.store, jid, archive);
+      this.log("info", `${archive ? "archived" : "unarchived"} ${jid}`, { event: "chat-archived", jid, archive });
+      return result;
+    });
+  }
+
+  // For a group the membership question is put to WhatsApp, not to the store's
+  // "left" flag: a group left from the phone never told the bridge, and a flag
+  // that is merely stale must not be what lets a delete through — deleting the
+  // chat of a group one is still in leaves a member with no chat.
+  async deleteChat(chatJid: string, leaveFirst = false): Promise<DeleteChatResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = this.knownChatJid(chatJid);
+    });
+    if (refused) return refused;
+    const problem = this.auth.isPaired() ? this.auth.appStateProblem() : null;
+    if (problem) return { ok: false, detail: problem };
+    return this.withSocket(async (session): Promise<DeleteChatResult> => {
+      let left = false;
+      if (jid.endsWith("@g.us")) {
+        const member = await isMember(session.sock as unknown as GroupInfoSocket, jid, this.me());
+        if (member && !leaveFirst) {
+          return {
+            ok: false,
+            chatJid: jid,
+            detail: "this account is still a member of that group — leave it first (whatsapp_leave_group), or pass leave_first: true to do both",
+          };
+        }
+        if (member) {
+          await leaveGroupOnSocket(session.sock, jid);
+          left = true;
+        }
+        // Not a member and no flag: the group was left elsewhere. Record it.
+        if (left || !this.store.getChat(jid)?.leftAt) this.store.setLeft(jid, new Date().toISOString());
+      }
+      try {
+        const result = await deleteChatOnSocket(session.sock as unknown as ChatOpsSocket, this.store, jid);
+        this.log("info", `deleted chat ${jid} on WhatsApp; ${result.messagesKept} stored message(s) kept`, {
+          event: "chat-deleted",
+          jid,
+          left,
+        });
+        return { ...result, ...(left ? { left } : {}) };
+      } catch (err) {
+        if (!left) throw err;
+        // The leave cannot be taken back, so the caller has to be told it happened.
+        const detail = err instanceof Error ? err.message : String(err);
+        return { ok: false, chatJid: jid, left, detail: `the group was left, but deleting the chat failed: ${detail}` };
+      }
+    });
+  }
+
+  async revokeMessage(chatJid: string, messageId: string): Promise<RevokeMessageResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = toJid(chatJid);
+      checkRevocable(this.store, jid, messageId);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      const result = await revokeMessageOnSocket(
+        session.sock as unknown as ChatOpsSocket,
+        this.store,
+        jid,
+        messageId,
+        this.auth.state.creds.me?.id ?? null,
+      );
+      this.log("info", `deleted ${messageId} in ${jid} for everyone`, { event: "message-revoked", jid });
+      return result;
+    });
+  }
+
+  async groupInfo(groupJid: string): Promise<GroupInfoResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = requireGroupJid(groupJid);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      const info = await groupInfoOnSocket(session.sock as unknown as GroupInfoSocket, jid, this.me(), (who) =>
+        this.store.knownName(who),
+      );
+      // A subject read straight from WhatsApp is the best name the store can have.
+      if (info.subject) this.store.upsertChat({ jid, name: info.subject });
+      return info;
+    });
+  }
+
+  async groupUpdateParticipants(
+    groupJid: string,
+    participants: string[],
+    action: GroupParticipantAction,
+  ): Promise<UpdateParticipantsResult> {
+    let jid = "";
+    let wanted: ReturnType<typeof prepareParticipants> = [];
+    const refused = this.refusal(() => {
+      jid = requireGroupJid(groupJid);
+      if (!["add", "remove", "promote", "demote"].includes(action)) throw new Error(`unknown action "${action}"`);
+      wanted = prepareParticipants(participants, this.auth.state.creds.me?.id ?? null, "refuse");
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      const result = await updateParticipantsOnSocket(session.sock, jid, action, wanted);
+      this.log("info", `group ${jid}: ${action} ${wanted.length} participant(s)`, {
+        event: "group-participants",
+        jid,
+        action,
+        refused: result.participants?.filter((p) => p.code !== 200).length ?? 0,
+      });
+      return result;
+    });
+  }
+
+  async groupUpdateSubject(groupJid: string, subject: string): Promise<GroupSubjectResult> {
+    let jid = "";
+    let clean = "";
+    const refused = this.refusal(() => {
+      jid = requireGroupJid(groupJid);
+      clean = prepareSubject(subject);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      await session.sock.groupUpdateSubject(jid, clean);
+      this.store.upsertChat({ jid, name: clean });
+      this.log("info", `renamed group ${jid}`, { event: "group-subject", jid });
+      return { ok: true, groupJid: jid, subject: clean };
+    });
+  }
+
+  async groupRevokeInvite(groupJid: string): Promise<GroupInviteResult> {
+    let jid = "";
+    const refused = this.refusal(() => {
+      jid = requireGroupJid(groupJid);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) => {
+      const code = await session.sock.groupRevokeInvite(jid);
+      if (!code) throw new Error("WhatsApp accepted the request but returned no new invite code");
+      this.log("info", `revoked the invite link of ${jid}`, { event: "group-invite-revoked", jid });
+      return { ok: true, groupJid: jid, inviteLink: inviteLinkFor(code) };
+    });
+  }
+
+  // Read-only as far as WhatsApp is concerned, but still a connection: there is
+  // no profile to read without asking the server. Nothing it returns is stored.
+  async getProfile(jidOrPhone: string): Promise<ProfileResult> {
+    let target: ProfileTarget | null = null;
+    const refused = this.refusal(() => {
+      target = prepareProfileTarget(jidOrPhone);
+    });
+    if (refused) return refused;
+    return this.withSocket(async (session) =>
+      fetchProfileOnSocket(session.sock as unknown as ProfileSocket, target!, (who) => this.store.knownName(who)),
+    );
   }
 
   // --- import ---------------------------------------------------------------

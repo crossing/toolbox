@@ -95,7 +95,8 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
   server.registerTool(
     "whatsapp_list_chats",
     {
-      description: "List WhatsApp chats, most recently active first.",
+      description:
+        "List WhatsApp chats, most recently active first. Each chat carries its lifecycle flags — archived, leftAt (a group this account has left) and deletedAt (deleted on WhatsApp) — and flagged chats stay listed: the bridge keeps the messages of a chat whatever happened to it on the phone.",
       inputSchema: {
         query: z.string().optional().describe("Filter by chat name or JID fragment"),
         limit: z.number().int().min(1).max(200).optional().describe("Chats to return (default 20)"),
@@ -114,7 +115,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     "whatsapp_list_messages",
     {
       description:
-        "List or search WhatsApp messages, newest first. Filter by chat, sender, text, or date range.",
+        "List or search WhatsApp messages, newest first. Filter by chat, sender, text, or date range. A message deleted for everyone stays listed with revoked: true (its content kept, if the bridge saw it before the delete). undecryptable: true marks a placeholder for a message that arrived but could not be decrypted — a resend was requested and replaces it if it comes.",
       inputSchema: {
         chat_jid: z.string().optional().describe("Restrict to one chat (JID from whatsapp_list_chats)"),
         sender_phone_number: z
@@ -152,7 +153,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
   server.registerTool(
     "whatsapp_get_chat",
     {
-      description: "Metadata for one WhatsApp chat.",
+      description: "Metadata for one WhatsApp chat, including its archived / leftAt / deletedAt flags.",
       inputSchema: { chat_jid: z.string().describe("Chat JID") },
       annotations: READ_ONLY,
     },
@@ -232,6 +233,32 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
         return asError(err);
       }
     },
+  );
+
+  server.registerTool(
+    "whatsapp_group_info",
+    {
+      description:
+        "Live details of a WhatsApp group: subject, description, owner, and every participant with their phone number where WhatsApp supplies one (newer groups address members by an opaque …@lid), admin role, and the name the bridge already knows them by. admins lists the admins; inviteLink is included only when this account is an admin. Connects to WhatsApp, so it takes a few seconds. A participant's jid or phoneNumber can be passed to whatsapp_get_profile.",
+      inputSchema: { group_jid: z.string().describe("Group JID (…@g.us) from whatsapp_list_chats") },
+      annotations: READ_ONLY,
+    },
+    async ({ group_jid }) => bridgeRunChecked(async () => (await bridge()).groupInfo(group_jid)),
+  );
+
+  server.registerTool(
+    "whatsapp_get_profile",
+    {
+      description:
+        "Look up one person's WhatsApp profile, live: whether the number is on WhatsApp, their About text, profile picture URLs (links only — nothing is downloaded, and they expire), and their business profile when they have one — description, category, website, email, address and opening hours. Each field is fetched separately: one their privacy settings withhold comes back null, and one that failed is named in errors. name comes from the bridge's own store. Nothing is saved. Accepts a phone number in international format (447700900111, no leading 0), a user JID, or a group participant's …@lid. Connects to WhatsApp, so it takes a few seconds.",
+      inputSchema: {
+        jid_or_phone: z
+          .string()
+          .describe("Phone number in international format, a user JID (…@s.whatsapp.net), or a participant LID (…@lid)"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ jid_or_phone }) => bridgeRunChecked(async () => (await bridge()).getProfile(jid_or_phone)),
   );
 
   server.registerTool(
@@ -372,6 +399,138 @@ export function registerWhatsappWriteTools(
     async ({ subject, participants, confirm }) => {
       if (confirm !== true) return needsConfirm();
       return bridgeRunChecked(async () => (await bridge()).createGroup(subject, participants));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_leave_group",
+    {
+      description:
+        "Leave a WhatsApp group. The other members see that this account left, and rejoining needs an invite or an admin, so confirm must be true. The chat stays in whatsapp_list_chats with leftAt set and every stored message kept; to also remove the chat from WhatsApp use whatsapp_delete_chat afterwards.",
+      inputSchema: {
+        group_jid: z.string().describe("Group JID (…@g.us)"),
+        confirm: z.boolean().describe("Must be true: leaving is visible to the group and cannot be undone from here"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ group_jid, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).leaveGroup(group_jid));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_archive_chat",
+    {
+      description:
+        "Archive (archive: true) or unarchive (archive: false) a chat — a group or a one-to-one chat — on WhatsApp. It syncs to the phone like an archive made there. The chat stays in whatsapp_list_chats, flagged archived. Fails with an explanation, never silently, if this device holds no app-state sync key (see appStateProblem in whatsapp_bridge_status).",
+      inputSchema: {
+        chat_jid: z.string().describe("Chat JID from whatsapp_list_chats"),
+        archive: z.boolean().describe("true to archive, false to unarchive"),
+        confirm: z.boolean().describe("Must be true: this changes the chat list on the phone"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ chat_jid, archive, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).archiveChat(chat_jid, archive));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_delete_chat",
+    {
+      description:
+        "Delete a chat on WhatsApp — it disappears from the phone and every linked device, and that cannot be undone there. THE BRIDGE'S OWN COPY IS KEPT: every stored message of the chat remains readable through whatsapp_list_messages, and the chat stays in whatsapp_list_chats with deletedAt set; messagesKept in the result says how many. A group is refused while this account is still a member, unless leave_first: true is passed, which leaves the group and then deletes the chat. Needs an app-state sync key, like whatsapp_archive_chat.",
+      inputSchema: {
+        chat_jid: z.string().describe("Chat JID from whatsapp_list_chats"),
+        leave_first: z
+          .boolean()
+          .optional()
+          .describe("For a group this account is still in: leave it, then delete the chat (default false: refuse)"),
+        confirm: z.boolean().describe("Must be true: the chat is removed from WhatsApp on every device"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ chat_jid, leave_first, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).deleteChat(chat_jid, leave_first));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_revoke_message",
+    {
+      description:
+        "Delete one of this account's own messages for everyone (\"withdraw\" it). Only messages this account sent, and only within about two days of sending — WhatsApp ignores a later request, so an older message is refused rather than reported as deleted. Recipients see that a message was deleted. The stored row is kept and flagged revoked. Take chat_jid and message_id from whatsapp_list_messages.",
+      inputSchema: {
+        chat_jid: z.string().describe("The message's chat JID"),
+        message_id: z.string().describe("Message id from whatsapp_list_messages; must be one of this account's own"),
+        confirm: z.boolean().describe("Must be true: recipients are shown that a message was deleted"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ chat_jid, message_id, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).revokeMessage(chat_jid, message_id));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_group_update_participants",
+    {
+      description:
+        "Add, remove, promote (make admin) or demote members of a group this account administers. Like whatsapp_create_group it is not all-or-nothing: each participant comes back with a status — added / removed / promoted / demoted on success, invite_required when an add was refused with 403 by that person's privacy settings (inviteLink then carries the group's link to send them by hand), failed with WhatsApp's code otherwise, or unknown. Participants are phone numbers in international format (no leading 0), user JIDs, or …@lid JIDs from whatsapp_group_info; at most 32. This account itself is refused — use whatsapp_leave_group.",
+      inputSchema: {
+        group_jid: z.string().describe("Group JID (…@g.us)"),
+        participants: z
+          .array(z.string().describe("Phone number in international format, user JID, or participant LID"))
+          .min(1)
+          .max(32)
+          .describe("Who to act on"),
+        action: z.enum(["add", "remove", "promote", "demote"]).describe("What to do to them"),
+        confirm: z.boolean().describe("Must be true: members are notified, and a removal cannot be taken back"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ group_jid, participants, action, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).groupUpdateParticipants(group_jid, participants, action));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_group_update_subject",
+    {
+      description:
+        "Rename a WhatsApp group. Every member sees the change and who made it. Up to 100 characters.",
+      inputSchema: {
+        group_jid: z.string().describe("Group JID (…@g.us)"),
+        subject: z.string().min(1).max(100).describe("The new name"),
+        confirm: z.boolean().describe("Must be true: the rename is announced to the whole group"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ group_jid, subject, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).groupUpdateSubject(group_jid, subject));
+    },
+  );
+
+  server.registerTool(
+    "whatsapp_group_revoke_invite",
+    {
+      description:
+        "Invalidate a group's invite link and return the new one. Every link handed out before stops working at once, including any this tool or whatsapp_create_group returned earlier. Needs this account to be an admin.",
+      inputSchema: {
+        group_jid: z.string().describe("Group JID (…@g.us)"),
+        confirm: z.boolean().describe("Must be true: every existing invite link to the group stops working"),
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ group_jid, confirm }) => {
+      if (confirm !== true) return needsConfirm();
+      return bridgeRunChecked(async () => (await bridge()).groupRevokeInvite(group_jid));
     },
   );
 

@@ -13,7 +13,13 @@
 //     us for free and group messages are unreadable without it;
 //   - media descriptors are base64 TEXT rather than BLOB: DO SQLite handles
 //     both, but the RPC boundary to the gateway is JSON, so base64 avoids a
-//     conversion on every hop.
+//     conversion on every hop;
+//   - lifecycle columns (2026-09-19): chats.archived / left_at / deleted_at and
+//     messages.revoked_at / revoked_by / participant. They are added by
+//     MIGRATIONS below rather than written into the CREATE TABLEs, so a fresh
+//     store and the live one reach the same schema by the same path. Nothing
+//     in this file ever deletes a row: leaving, archiving, deleting a chat and
+//     revoking a message all set a flag and keep what was said.
 
 import type { ChatRow, ContactRow, ListChatsQuery, ListMessagesQuery, MessageRow } from "@toolbox/mcp-shared";
 import type { SqlLike } from "./auth";
@@ -47,6 +53,47 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (chat_jid, timesta
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages (timestamp);
 `;
 
+// Additive only: a nullable column, or NOT NULL with a constant default, is the
+// one kind of ALTER that SQLite applies without rewriting the table, so this is
+// safe against the live Durable Object's storage and loses nothing. Each entry
+// is applied at most once — the probe is a SELECT of the column, which fails to
+// prepare when it is missing. (A PRAGMA would do, but this needs nothing from
+// the platform beyond plain SQL, and runs unchanged under node:sqlite in tests.)
+export const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
+  { table: "chats", column: "archived", ddl: "archived INTEGER NOT NULL DEFAULT 0" },
+  { table: "chats", column: "left_at", ddl: "left_at TEXT" },
+  { table: "chats", column: "deleted_at", ddl: "deleted_at TEXT" },
+  { table: "messages", column: "revoked_at", ddl: "revoked_at TEXT" },
+  { table: "messages", column: "revoked_by", ddl: "revoked_by TEXT" },
+  // key.participant exactly as WhatsApp addressed it (a LID in newer groups).
+  // `sender` holds the phone number instead, and an app-state message range
+  // has to quote the key the phone knows the message by.
+  { table: "messages", column: "participant", ddl: "participant TEXT" },
+  // Why a message that arrived could not be read; null for every readable row.
+  // A message WhatsApp delivered but the bridge could not decrypt is kept as a
+  // visible placeholder instead of an anonymous empty row, and is overwritten
+  // by the sender's resend when that arrives under the same id.
+  { table: "messages", column: "decrypt_error", ddl: "decrypt_error TEXT" },
+];
+
+/** How long after a leave new activity has to be dated to count as a rejoin. */
+const REJOIN_MARGIN_MS = 2 * 60 * 1000;
+
+function hasColumn(sql: SqlLike, table: string, column: string): boolean {
+  try {
+    sql.exec(`SELECT ${column} FROM ${table} LIMIT 0`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function migrate(sql: SqlLike): void {
+  for (const { table, column, ddl } of MIGRATIONS) {
+    if (!hasColumn(sql, table, column)) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 export interface StoredMessage {
   id: string;
   chatJid: string;
@@ -64,16 +111,33 @@ export interface StoredMessage {
   fileLength?: number | null;
   directPath?: string | null;
   mimeType?: string | null;
+  /** Raw key.participant of a group message someone else wrote. */
+  participant?: string | null;
+  /** Set on a placeholder for a message that arrived undecryptable. */
+  decryptError?: string | null;
 }
 
 export interface StoredChat {
   jid: string;
   name?: string | null;
   lastMessageTime?: string | null;
+  /** Only written when WhatsApp (or an archive call) actually said so. */
+  archived?: boolean;
+}
+
+/** What an app-state message range needs to know about a chat's newest message. */
+export interface LastMessageKey {
+  id: string;
+  fromMe: boolean;
+  /** Who wrote it, for a group message from someone else; null otherwise. */
+  participant: string | null;
+  timestampSeconds: number;
 }
 
 const MESSAGE_COLUMNS = `m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp,
-  m.is_from_me, m.media_type, m.filename, c.name AS chat_name`;
+  m.is_from_me, m.media_type, m.filename, m.revoked_at, m.decrypt_error, c.name AS chat_name`;
+
+const CHAT_COLUMNS = "c.jid, c.name, c.last_message_time, c.archived, c.left_at, c.deleted_at";
 
 function toMessageRow(row: Record<string, unknown>): MessageRow {
   return {
@@ -87,6 +151,10 @@ function toMessageRow(row: Record<string, unknown>): MessageRow {
     isFromMe: row.is_from_me === 1,
     mediaType: (row.media_type as string | null) ?? null,
     filename: (row.filename as string | null) ?? null,
+    revoked: row.revoked_at != null,
+    revokedAt: (row.revoked_at as string | null) ?? null,
+    undecryptable: row.decrypt_error != null,
+    decryptError: (row.decrypt_error as string | null) ?? null,
   };
 }
 
@@ -95,6 +163,9 @@ function toChatRow(row: Record<string, unknown>): ChatRow {
     jid: row.jid as string,
     name: (row.name as string | null) ?? null,
     lastMessageTime: (row.last_message_time as string | null) ?? null,
+    archived: row.archived === 1,
+    leftAt: (row.left_at as string | null) ?? null,
+    deletedAt: (row.deleted_at as string | null) ?? null,
   };
 }
 
@@ -140,11 +211,17 @@ export function toStoredTimestamp(value: string): string {
 export class Store {
   constructor(private sql: SqlLike) {
     this.sql.exec(STORE_SCHEMA);
+    migrate(this.sql);
   }
 
   upsertChat(chat: StoredChat): void {
     // A chat's name is only overwritten when we actually learn one: WhatsApp
     // sends bare JIDs constantly and a null would erase a known contact name.
+    // deleted_at: WhatsApp re-creates a deleted chat the moment something new
+    // is said in it, so activity dated after the delete lifts the flag.
+    // left_at: a group that has been left goes silent, so anything said in it
+    // well after the leave means this account was added back. "Well after",
+    // because the leave's own system message is dated a moment after the flag.
     this.sql.exec(
       `INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
        ON CONFLICT(jid) DO UPDATE SET
@@ -153,11 +230,201 @@ export class Store {
            WHEN excluded.last_message_time IS NULL THEN chats.last_message_time
            WHEN chats.last_message_time IS NULL THEN excluded.last_message_time
            WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
-           ELSE chats.last_message_time END`,
+           ELSE chats.last_message_time END,
+         deleted_at = CASE
+           WHEN chats.deleted_at IS NOT NULL AND excluded.last_message_time IS NOT NULL
+             AND excluded.last_message_time > chats.deleted_at THEN NULL
+           ELSE chats.deleted_at END,
+         left_at = CASE
+           WHEN chats.left_at IS NOT NULL AND excluded.last_message_time IS NOT NULL
+             AND excluded.last_message_time > ? THEN NULL
+           ELSE chats.left_at END`,
       normalizeJid(chat.jid),
       chat.name ?? null,
       chat.lastMessageTime ?? null,
+      this.rejoinThreshold(chat.jid),
     );
+    if (chat.archived !== undefined) this.setArchived(chat.jid, chat.archived);
+  }
+
+  // --- lifecycle flags --------------------------------------------------------
+  //
+  // Every one of these is an UPDATE of a flag. None removes a chat or a
+  // message: the second brain's rule is that a record is never destroyed, only
+  // annotated with what became of it.
+
+  /** left_at plus a margin, as a comparable timestamp; "" sorts below everything when not left. */
+  private rejoinThreshold(jid: string): string {
+    const rows = this.sql.exec("SELECT left_at FROM chats WHERE jid = ?", normalizeJid(jid)).toArray();
+    const leftAt = rows[0]?.left_at as string | null | undefined;
+    if (!leftAt) return "";
+    return new Date(new Date(leftAt).getTime() + REJOIN_MARGIN_MS).toISOString();
+  }
+
+  private ensureChat(jid: string): void {
+    this.sql.exec("INSERT INTO chats (jid) VALUES (?) ON CONFLICT(jid) DO NOTHING", normalizeJid(jid));
+  }
+
+  setArchived(jid: string, archived: boolean): void {
+    this.ensureChat(jid);
+    this.sql.exec("UPDATE chats SET archived = ? WHERE jid = ?", archived ? 1 : 0, normalizeJid(jid));
+  }
+
+  /** `at` null means "a member again" — being re-added clears the flag. */
+  setLeft(jid: string, at: string | null): void {
+    this.ensureChat(jid);
+    this.sql.exec("UPDATE chats SET left_at = ? WHERE jid = ?", at, normalizeJid(jid));
+  }
+
+  markChatDeleted(jid: string, at: string): void {
+    this.ensureChat(jid);
+    this.sql.exec("UPDATE chats SET deleted_at = ? WHERE jid = ?", at, normalizeJid(jid));
+  }
+
+  /**
+   * Flag a message as deleted-for-everyone. Content is left exactly as it was.
+   * Returns false when the store never held the message, so the caller can say
+   * so rather than invent a row for something it never saw. The first revoke
+   * wins: a replayed one does not move the timestamp.
+   */
+  markRevoked(chatJid: string, messageId: string, at: string, by: string | null): boolean {
+    const chat = normalizeJid(chatJid);
+    const found = this.sql
+      .exec("SELECT 1 AS present FROM messages WHERE id = ? AND chat_jid = ?", messageId, chat)
+      .toArray();
+    if (found.length === 0) return false;
+    this.sql.exec(
+      `UPDATE messages SET revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?)
+       WHERE id = ? AND chat_jid = ?`,
+      at,
+      by ? normalizeJid(by) : null,
+      messageId,
+      chat,
+    );
+    return true;
+  }
+
+  /**
+   * File an inbound "delete for everyone". It lands on the row it withdraws.
+   * When the store never held that row — sent and withdrawn while the bridge
+   * was offline, in which case Baileys has already merged the two and the
+   * content is gone (see normalize.ts) — a tombstone is filed under the
+   * original id, so "someone deleted a message here" is on record even though
+   * what it said never was. Returns whether the original was known.
+   */
+  recordRevoke(
+    revoke: { chatJid: string; messageId: string; revokedBy: string | null; revokedAt: string },
+    fromMe: boolean,
+  ): boolean {
+    if (this.markRevoked(revoke.chatJid, revoke.messageId, revoke.revokedAt, revoke.revokedBy)) return true;
+    this.upsertMessage({
+      id: revoke.messageId,
+      chatJid: revoke.chatJid,
+      sender: revoke.revokedBy ?? revoke.chatJid,
+      content: null,
+      timestamp: revoke.revokedAt,
+      isFromMe: fromMe,
+    });
+    this.markRevoked(revoke.chatJid, revoke.messageId, revoke.revokedAt, revoke.revokedBy);
+    return false;
+  }
+
+  /** The facts a revoke has to check before anything is sent. */
+  messageFacts(chatJid: string, messageId: string): { isFromMe: boolean; timestamp: string; revokedAt: string | null } | null {
+    const rows = this.sql
+      .exec(
+        "SELECT is_from_me, timestamp, revoked_at FROM messages WHERE id = ? AND chat_jid = ?",
+        messageId,
+        normalizeJid(chatJid),
+      )
+      .toArray();
+    if (rows.length === 0) return null;
+    const row = rows[0]!;
+    return {
+      isFromMe: row.is_from_me === 1,
+      timestamp: row.timestamp as string,
+      revokedAt: (row.revoked_at as string | null) ?? null,
+    };
+  }
+
+  lastMessageKey(chatJid: string): LastMessageKey | null {
+    const rows = this.sql
+      .exec(
+        `SELECT id, is_from_me, sender, participant, timestamp FROM messages
+         WHERE chat_jid = ? ORDER BY timestamp DESC, id DESC LIMIT 1`,
+        normalizeJid(chatJid),
+      )
+      .toArray();
+    if (rows.length === 0) return null;
+    const row = rows[0]!;
+    const fromMe = row.is_from_me === 1;
+    const isGroup = normalizeJid(chatJid).endsWith("@g.us");
+    return {
+      id: row.id as string,
+      fromMe,
+      participant: isGroup && !fromMe ? ((row.participant as string | null) ?? (row.sender as string)) : null,
+      timestampSeconds: Math.floor(new Date(row.timestamp as string).getTime() / 1000),
+    };
+  }
+
+  /**
+   * One of our own messages with its media descriptors, for answering a
+   * recipient's retry request. Looked up by id among our own sends rather than
+   * by (id, chat): the asking device may name a 1:1 chat by LID where the row
+   * was filed under the phone number, and our ids are random enough to stand
+   * alone. A match in the named chat is still preferred.
+   */
+  ownMessage(messageId: string, chatJid?: string | null): (StoredMessage & { revokedAt: string | null }) | null {
+    const rows = this.sql
+      .exec(
+        `SELECT * FROM messages WHERE id = ? AND is_from_me = 1
+         ORDER BY (chat_jid = ?) DESC LIMIT 1`,
+        messageId,
+        chatJid ? normalizeJid(chatJid) : "",
+      )
+      .toArray();
+    if (rows.length === 0) return null;
+    const row = rows[0]!;
+    return {
+      id: row.id as string,
+      chatJid: row.chat_jid as string,
+      sender: row.sender as string,
+      content: (row.content as string | null) ?? null,
+      timestamp: row.timestamp as string,
+      isFromMe: true,
+      mediaType: (row.media_type as string | null) ?? null,
+      filename: (row.filename as string | null) ?? null,
+      url: (row.url as string | null) ?? null,
+      mediaKeyB64: (row.media_key as string | null) ?? null,
+      fileSha256B64: (row.file_sha256 as string | null) ?? null,
+      fileEncSha256B64: (row.file_enc_sha256 as string | null) ?? null,
+      fileLength: (row.file_length as number | null) ?? null,
+      directPath: (row.direct_path as string | null) ?? null,
+      mimeType: (row.mime_type as string | null) ?? null,
+      revokedAt: (row.revoked_at as string | null) ?? null,
+    };
+  }
+
+  /** The best name the store has for a person: a chat name, else their latest pushName. */
+  knownName(jid: string): string | null {
+    const normalized = normalizeJid(jid);
+    const chat = this.sql.exec("SELECT name FROM chats WHERE jid = ?", normalized).toArray();
+    if (chat[0]?.name) return chat[0].name as string;
+    const pushed = this.sql
+      .exec(
+        `SELECT sender_name FROM messages WHERE sender = ? AND is_from_me = 0 AND sender_name IS NOT NULL
+         ORDER BY timestamp DESC LIMIT 1`,
+        normalized,
+      )
+      .toArray();
+    return (pushed[0]?.sender_name as string | undefined) ?? null;
+  }
+
+  countMessages(chatJid: string): number {
+    const rows = this.sql
+      .exec("SELECT COUNT(*) AS n FROM messages WHERE chat_jid = ?", normalizeJid(chatJid))
+      .toArray();
+    return (rows[0]?.n as number) ?? 0;
   }
 
   upsertMessage(msg: StoredMessage): void {
@@ -165,8 +432,8 @@ export class Store {
       `INSERT INTO messages (
          id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
          media_type, filename, url, media_key, file_sha256, file_enc_sha256,
-         file_length, direct_path, mime_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         file_length, direct_path, mime_type, participant, decrypt_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id, chat_jid) DO UPDATE SET
          content = COALESCE(excluded.content, messages.content),
          sender_name = COALESCE(excluded.sender_name, messages.sender_name),
@@ -178,7 +445,12 @@ export class Store {
          file_enc_sha256 = COALESCE(excluded.file_enc_sha256, messages.file_enc_sha256),
          file_length = COALESCE(excluded.file_length, messages.file_length),
          direct_path = COALESCE(excluded.direct_path, messages.direct_path),
-         mime_type = COALESCE(excluded.mime_type, messages.mime_type)`,
+         mime_type = COALESCE(excluded.mime_type, messages.mime_type),
+         participant = COALESCE(excluded.participant, messages.participant),
+         decrypt_error = CASE
+           WHEN excluded.decrypt_error IS NULL THEN NULL
+           WHEN messages.decrypt_error IS NULL THEN NULL
+           ELSE excluded.decrypt_error END`,
       msg.id,
       normalizeJid(msg.chatJid),
       normalizeJid(msg.sender),
@@ -195,6 +467,8 @@ export class Store {
       msg.fileLength ?? null,
       msg.directPath ?? null,
       msg.mimeType ?? null,
+      msg.participant ?? null,
+      msg.decryptError ?? null,
     );
   }
 
@@ -250,7 +524,7 @@ export class Store {
     }
     return this.sql
       .exec(
-        `SELECT c.jid, c.name, c.last_message_time FROM chats c ${where}
+        `SELECT ${CHAT_COLUMNS} FROM chats c ${where}
          ORDER BY ${order} LIMIT ? OFFSET ?`,
         ...bindings,
         limit,
@@ -262,7 +536,7 @@ export class Store {
 
   getChat(chatJid: string): ChatRow | null {
     const rows = this.sql
-      .exec("SELECT jid, name, last_message_time FROM chats WHERE jid = ?", normalizeJid(chatJid))
+      .exec(`SELECT ${CHAT_COLUMNS} FROM chats c WHERE c.jid = ?`, normalizeJid(chatJid))
       .toArray();
     return rows.length > 0 ? toChatRow(rows[0]!) : null;
   }
@@ -272,9 +546,9 @@ export class Store {
     if (!digits) return null;
     const rows = this.sql
       .exec(
-        `SELECT jid, name, last_message_time FROM chats
-         WHERE jid LIKE ? ESCAPE '${LIKE_ESCAPE}' AND jid NOT LIKE '%@g.us'
-         ORDER BY last_message_time IS NULL, last_message_time DESC LIMIT 1`,
+        `SELECT ${CHAT_COLUMNS} FROM chats c
+         WHERE c.jid LIKE ? ESCAPE '${LIKE_ESCAPE}' AND c.jid NOT LIKE '%@g.us'
+         ORDER BY c.last_message_time IS NULL, c.last_message_time DESC LIMIT 1`,
         `${digits}@%`,
       )
       .toArray();
@@ -285,7 +559,7 @@ export class Store {
     const capped = Math.min(Math.max(limit, 1), 200);
     return this.sql
       .exec(
-        `SELECT DISTINCT c.jid, c.name, c.last_message_time
+        `SELECT DISTINCT ${CHAT_COLUMNS}
          FROM chats c JOIN messages m ON m.chat_jid = c.jid
          WHERE c.jid = ? OR m.sender = ?
          ORDER BY c.last_message_time IS NULL, c.last_message_time DESC

@@ -66,6 +66,11 @@ export interface SqlAuthState {
   isPaired(): boolean;
   /** Forget the device entirely — next connect starts a fresh pairing. */
   reset(): void;
+  /**
+   * Why an app-state patch (archive, delete chat) cannot be sent, or null when
+   * it can. See the note on the implementation.
+   */
+  appStateProblem(): string | null;
 }
 
 /**
@@ -150,6 +155,39 @@ export function makeSqlAuthState(
     // never written speculatively. `registered` stays in the disjunction only
     // so a session paired before this was understood keeps working.
     isPaired: () => Boolean(creds.me?.id && (creds.account || creds.registered)),
+    // Archiving or deleting a chat is not a stanza to the chat: it is an
+    // encrypted patch to the account's app state, and Baileys' `appPatch`
+    // (Socket/chats.js) needs two things from here to build one.
+    //
+    //   - `creds.myAppStateKeyId`, and the `app-state-sync-key` row it names.
+    //     Neither is derived: the phone sends them, once, in an
+    //     APP_STATE_SYNC_KEY_SHARE protocol message shortly after pairing
+    //     (Utils/process-message.js). This store persists both — key rows go
+    //     through the same generic (type, id) table as every Signal key, and
+    //     the id rides in the creds blob — so a device that was connected when
+    //     the share arrived has them for good. A device that was not has
+    //     nothing to encrypt with, and there is no way to conjure a key.
+    //   - the collection's `app-state-sync-version` (its LTHash state). That
+    //     one is *not* a precondition: `appPatch` resyncs the collection itself
+    //     before encoding, from a snapshot if there is no stored version, so the
+    //     bridge's short connect-drain-close cycles never having completed a
+    //     full initial app-state sync does not matter.
+    //
+    // So the first is checked up front and reported in words, rather than left
+    // to surface as Baileys' "App state key not present!".
+    appStateProblem: () => {
+      const keyId = creds.myAppStateKeyId;
+      if (!keyId) {
+        return "this device holds no app-state sync key: the phone shares one shortly after pairing and this bridge has no record of receiving it. Archive and delete-chat cannot be sent until it has one — run a sync, and if whatsapp_bridge_status still reports this, unpair and pair again";
+      }
+      const rows = sql
+        .exec("SELECT 1 AS present FROM auth_keys WHERE type = 'app-state-sync-key' AND id = ?", keyId)
+        .toArray();
+      if (rows.length === 0) {
+        return "the app-state sync key this device was told to use is missing from its key store; unpair and pair again to be sent a fresh one";
+      }
+      return null;
+    },
     reset: () => {
       sql.exec("DELETE FROM auth_keys");
       sql.exec("DELETE FROM auth_creds");

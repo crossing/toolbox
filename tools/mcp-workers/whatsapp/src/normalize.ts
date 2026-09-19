@@ -2,7 +2,7 @@
 // MCP tools) expects. Kept apart from the socket so it can be unit-tested
 // without a connection.
 
-import { extractMessageContent, getContentType, jidNormalizedUser, toNumber } from "baileys";
+import { extractMessageContent, getContentType, jidNormalizedUser, proto, toNumber } from "baileys";
 import type { WAMessage } from "baileys";
 import type { StoredMessage } from "./store";
 
@@ -79,12 +79,71 @@ function groupSenderOf(message: WAMessage): string | null {
   return participant ?? alt;
 }
 
+/** An inbound "delete for everyone", reduced to what the store needs. */
+export interface InboundRevoke {
+  chatJid: string;
+  /** The id of the message being withdrawn — not the id of the revoke itself. */
+  messageId: string;
+  revokedBy: string | null;
+  revokedAt: string;
+}
+
+/**
+ * A revoke is delivered as an ordinary message whose whole content is a
+ * `protocolMessage` of type REVOKE naming another message's key. Baileys also
+ * announces it on `messages.update` (Utils/process-message.js), but the upsert
+ * is the path every drain already flows through. The chat is taken from the
+ * envelope, as Baileys does, not from the inner key: in a 1:1 chat the inner
+ * `remoteJid` is written from the sender's point of view.
+ */
+export function revokeOf(message: WAMessage, meId: string | null): InboundRevoke | null {
+  const protocol = extractMessageContent(message.message ?? undefined)?.protocolMessage;
+  if (!protocol || protocol.type !== proto.Message.ProtocolMessage.Type.REVOKE) return null;
+  const chatJid = message.key?.remoteJid;
+  const messageId = protocol.key?.id;
+  if (!chatJid || !messageId) return null;
+  const by = message.key?.fromMe ? meId : (groupSenderOf(message) ?? chatJid);
+  return {
+    chatJid,
+    messageId,
+    revokedBy: by ? jidNormalizedUser(by) || by : null,
+    revokedAt: isoFromSeconds(toNumber(message.messageTimestamp) || Math.floor(Date.now() / 1000)),
+  };
+}
+
 export function toStoredMessage(message: WAMessage, meId: string | null): StoredMessage | null {
   const chatJid = message.key?.remoteJid;
   const id = message.key?.id;
   if (!chatJid || !id) return null;
 
   const content = extractMessageContent(message.message ?? undefined);
+  // Protocol messages are plumbing — revokes, edits, key shares, history-sync
+  // notices, disappearing-message settings. None is something anyone said, and
+  // filed as a row each would be an empty message under an id of its own. A
+  // revoke in particular must land on the row it withdraws (revokeOf), not
+  // beside it.
+  if (content?.protocolMessage) return null;
+
+  const StubType = proto.WebMessageInfo.StubType;
+  // The other half of an inbound revoke. When the original and its revoke sit
+  // in the same event buffer — the ordinary case for something sent and
+  // withdrawn while the bridge was offline — Baileys folds the revoke into the
+  // original (Utils/event-buffer.js, `Object.assign(existing, update)`), and
+  // what comes out is the original with `message: null`, this stub type, and
+  // its key *replaced by the revoke's*. Its content is gone and its id is
+  // wrong; the revoke's own upsert carries the right id, and revokeOf files
+  // the tombstone under that.
+  if (message.messageStubType === StubType.REVOKE && !content) return null;
+
+  // Delivered, but not readable: decryption failed, and Baileys has already
+  // asked the sender's phone to send it again. Filed as what it is rather than
+  // as an empty message, so "he wrote and the bridge could not read it" is
+  // visible in whatsapp_list_messages instead of indistinguishable from
+  // nothing having arrived.
+  const decryptError =
+    message.messageStubType === StubType.CIPHERTEXT
+      ? (message.messageStubParameters?.[0] ?? "decryption failed").slice(0, 300)
+      : null;
   const type = content ? getContentType(content) : undefined;
   const mediaType = (type && MEDIA_KINDS[type]) ?? null;
   const media = (type && content ? ((content as Record<string, unknown>)[type] as MediaLike) : null) ?? null;
@@ -120,7 +179,53 @@ export function toStoredMessage(message: WAMessage, meId: string | null): Stored
     fileLength,
     directPath: media?.directPath ?? null,
     mimeType: media?.mimetype ?? null,
+    // The key as WhatsApp addressed it, which `sender` deliberately is not.
+    participant: fromMe || !chatJid.endsWith("@g.us") ? null : (message.key?.participant ?? null),
+    decryptError,
   };
+}
+
+function bytes(b64Value: string | null | undefined): Uint8Array | undefined {
+  return b64Value ? new Uint8Array(Buffer.from(b64Value, "base64")) : undefined;
+}
+
+/**
+ * One of our own stored messages, rebuilt as the proto a recipient's device is
+ * asking to be sent again (see `getMessage` in session.ts). The store keeps
+ * rows, not protos, so this is a reconstruction: a text comes back as a plain
+ * conversation, and an attachment from the descriptors kept for downloads —
+ * the same ciphertext on WhatsApp's CDN, the same key, so nothing is
+ * re-uploaded. A revoked message is not resent, and neither is anything that
+ * cannot be rebuilt whole.
+ */
+export function messageForRetry(row: (StoredMessage & { revokedAt?: string | null }) | null): proto.IMessage | undefined {
+  if (!row || !row.isFromMe || row.revokedAt) return undefined;
+  if (!row.mediaType) return row.content ? { conversation: row.content } : undefined;
+
+  const mediaKey = bytes(row.mediaKeyB64);
+  if (!mediaKey || !row.directPath) return undefined;
+  const descriptor = {
+    url: row.url ?? undefined,
+    directPath: row.directPath,
+    mediaKey,
+    mimetype: row.mimeType ?? undefined,
+    fileSha256: bytes(row.fileSha256B64),
+    fileEncSha256: bytes(row.fileEncSha256B64),
+    fileLength: row.fileLength ?? undefined,
+  };
+  const caption = row.content ?? undefined;
+  switch (row.mediaType) {
+    case "image":
+      return { imageMessage: { ...descriptor, caption } };
+    case "video":
+      return { videoMessage: { ...descriptor, caption } };
+    case "audio":
+      return { audioMessage: { ...descriptor, ptt: false } };
+    case "document":
+      return { documentMessage: { ...descriptor, fileName: row.filename ?? undefined, caption } };
+    default:
+      return undefined;
+  }
 }
 
 /** A phone number or an already-qualified JID → a JID WhatsApp will accept. */

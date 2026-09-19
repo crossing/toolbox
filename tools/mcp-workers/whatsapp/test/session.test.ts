@@ -2,7 +2,17 @@
 // ones it would be convenient for it to follow.
 
 import { describe, expect, it } from "vitest";
-import { ConnectionWaiters, deviceBrowser, isFatalDisconnect, DisconnectReason, serializeLogValue } from "../src/session";
+import { proto } from "baileys";
+import type { WAMessage } from "baileys";
+import {
+  ConnectionWaiters,
+  describeInbound,
+  deviceBrowser,
+  InboundTracker,
+  isFatalDisconnect,
+  DisconnectReason,
+  serializeLogValue,
+} from "../src/session";
 
 describe("serializeLogValue", () => {
   // The bug this guards: Baileys logs `{ jid, err }` where err is an Error, and
@@ -137,5 +147,145 @@ describe("isFatalDisconnect", () => {
     expect(isFatalDisconnect(DisconnectReason.restartRequired)).toBe(false);
     expect(isFatalDisconnect(DisconnectReason.connectionClosed)).toBe(false);
     expect(isFatalDisconnect(null)).toBe(false);
+  });
+});
+
+// The live symptom, 2026-09-19: forced syncs reporting "offline queue: 2" and
+// storing nothing, while a group member's replies sat unread. WhatsApp's drain
+// marker means "delivered", not "processed" — Baileys works through offline
+// stanzas in a queue of its own, and the bridge was hanging up on it.
+describe("InboundTracker", () => {
+  const CIPHERTEXT = proto.WebMessageInfo.StubType.CIPHERTEXT;
+  const msg = (id: string, extra: Partial<WAMessage> = {}) =>
+    ({ key: { remoteJid: "120363000000000001@g.us", fromMe: false, id }, ...extra }) as WAMessage;
+
+  /** A clock the test drives, and a Baileys that releases its buffer on flush. */
+  function harness(tracker: InboundTracker) {
+    let clock = 0;
+    const buffered: WAMessage[][] = [];
+    /** What Baileys will have finished processing by a given moment. */
+    const schedule: { at: number; messages: WAMessage[] }[] = [];
+    return {
+      finishAt: (at: number, messages: WAMessage[]) => schedule.push({ at, messages }),
+      elapsed: () => clock,
+      deps: {
+        now: () => clock,
+        wait: async (ms: number) => {
+          clock += ms;
+          for (const due of schedule.filter((item) => item.at <= clock)) {
+            buffered.push(due.messages);
+            schedule.splice(schedule.indexOf(due), 1);
+          }
+        },
+        // An upsert reaches a listener only when the event buffer is flushed.
+        flush: () => {
+          for (const batch of buffered.splice(0)) tracker.onUpsert(batch);
+        },
+      },
+    };
+  }
+
+  it("counts only offline stanzas, by kind", () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "A1", offline: "1" });
+    tracker.onStanza("receipt", { id: "R1", offline: "1" });
+    tracker.onStanza("notification", { id: "N1", offline: "0" });
+    tracker.onStanza("message", { id: "LIVE" });
+    expect(tracker.summary()).toEqual({
+      offline: { message: 1, receipt: 1, notification: 1, call: 0 },
+      pendingMessages: 1,
+      undecryptable: 0,
+      recovered: 0,
+    });
+  });
+
+  it("returns at once when nothing is outstanding", async () => {
+    const tracker = new InboundTracker();
+    const h = harness(tracker);
+    await tracker.settle(h.deps);
+    expect(h.elapsed()).toBe(0);
+  });
+
+  it("holds the socket until every offline message seen on the wire has come out of Baileys", async () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "A1", offline: "1" });
+    tracker.onStanza("message", { id: "A2", offline: "1" });
+    const h = harness(tracker);
+    // Slow: a first message from a new sender, queued behind something else.
+    h.finishAt(2_000, [msg("A1", { message: { conversation: "hello" } })]);
+    h.finishAt(7_000, [msg("A2", { message: { conversation: "anyone?" } })]);
+
+    const summary = await tracker.settle(h.deps);
+    expect(summary.pendingMessages).toBe(0);
+    // Well past the old fixed three-second beat, and no longer than it had to be.
+    expect(h.elapsed()).toBeGreaterThanOrEqual(7_000);
+    expect(h.elapsed()).toBeLessThan(8_000);
+  });
+
+  it("gives up after a bound, and says how many never came out", async () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "DROPPED", offline: "1" });
+    const h = harness(tracker);
+    const summary = await tracker.settle({ ...h.deps, processMs: 5_000 });
+    expect(summary.pendingMessages).toBe(1);
+    expect(h.elapsed()).toBeGreaterThanOrEqual(5_000);
+    expect(h.elapsed()).toBeLessThan(6_000);
+  });
+
+  it("stops waiting the moment the stream is gone", async () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "A1", offline: "1" });
+    const h = harness(tracker);
+    await tracker.settle({ ...h.deps, isOpen: () => false });
+    expect(h.elapsed()).toBe(0);
+  });
+
+  it("waits a further, shorter grace for the resend of an undecryptable message, and notes the recovery", async () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "A1", offline: "1" });
+    const h = harness(tracker);
+    h.finishAt(1_000, [msg("A1", { messageStubType: CIPHERTEXT, messageStubParameters: ["No SenderKeyRecord found for decryption"] })]);
+    // His phone is online and answers the retry receipt.
+    h.finishAt(4_000, [msg("A1", { message: { conversation: "is the flat still available?" } })]);
+
+    const summary = await tracker.settle(h.deps);
+    expect(summary).toMatchObject({ pendingMessages: 0, undecryptable: 1, recovered: 1 });
+    expect(h.elapsed()).toBeLessThan(5_000);
+  });
+
+  it("does not wait for ever for a resend that is not coming", async () => {
+    const tracker = new InboundTracker();
+    tracker.onStanza("message", { id: "A1", offline: "1" });
+    const h = harness(tracker);
+    h.finishAt(400, [msg("A1", { messageStubType: CIPHERTEXT })]);
+    const summary = await tracker.settle({ ...h.deps, retryMs: 3_000 });
+    expect(summary).toMatchObject({ undecryptable: 1, recovered: 0 });
+    expect(h.elapsed()).toBeLessThan(4_500);
+  });
+});
+
+describe("describeInbound", () => {
+  const quiet = { offline: { message: 0, receipt: 0, notification: 0, call: 0 }, pendingMessages: 0, undecryptable: 0, recovered: 0 };
+
+  it("keeps the old wording when the queue was empty, and says nothing without a count", () => {
+    expect(describeInbound(0, quiet)).toBe("offline queue: 0");
+    expect(describeInbound(null, quiet)).toBeNull();
+  });
+
+  it("says what the queue was made of — two receipts are not two messages", () => {
+    expect(describeInbound(2, { ...quiet, offline: { message: 0, receipt: 2, notification: 0, call: 0 } })).toBe(
+      "offline queue: 2 (0 message, 2 receipt, 0 notification)",
+    );
+  });
+
+  it("names messages that never came out, and ones that came out unreadable", () => {
+    const detail = describeInbound(2, {
+      offline: { message: 2, receipt: 0, notification: 0, call: 0 },
+      pendingMessages: 1,
+      undecryptable: 1,
+      recovered: 0,
+    })!;
+    expect(detail).toMatch(/1 message\(s\) never came out of Baileys/);
+    expect(detail).toMatch(/1 undecryptable \(0 recovered by resend\)/);
   });
 });

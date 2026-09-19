@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { normalizeJid, phoneOf, phoneOrJidToPhone, Store, toStoredTimestamp } from "../src/store";
+import { MIGRATIONS, normalizeJid, phoneOf, phoneOrJidToPhone, Store, toStoredTimestamp } from "../src/store";
 import { makeFakeSql, type FakeSql } from "./sqlfake";
 
 const ADA = "447700900111@s.whatsapp.net";
@@ -208,6 +208,192 @@ describe("inputs that arrive in more than one shape", () => {
     // Strict < / > on the timestamp alone would drop both neighbours.
     expect(context.before.map((m) => m.id).at(-1)).toBe("C1");
     expect(context.after.map((m) => m.id)).toEqual(["C3"]);
+  });
+});
+
+// The live Durable Object already holds tables made by the schema as it was
+// before 2026-09-19, full of rows. This is that schema, verbatim, so the
+// migration is tested against the thing it will actually meet.
+const LEGACY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chats (
+  jid TEXT PRIMARY KEY,
+  name TEXT,
+  last_message_time TEXT
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT NOT NULL,
+  chat_jid TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  sender_name TEXT,
+  content TEXT,
+  timestamp TEXT NOT NULL,
+  is_from_me INTEGER NOT NULL,
+  media_type TEXT,
+  filename TEXT,
+  url TEXT,
+  media_key TEXT,
+  file_sha256 TEXT,
+  file_enc_sha256 TEXT,
+  file_length INTEGER,
+  direct_path TEXT,
+  mime_type TEXT,
+  PRIMARY KEY (id, chat_jid)
+);
+`;
+
+describe("schema migration", () => {
+  it("adds the lifecycle columns to a populated legacy store without touching a row", () => {
+    const sql = makeFakeSql();
+    sql.exec(LEGACY_SCHEMA);
+    sql.exec("INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)", ADA, "Ada", at(5));
+    sql.exec(
+      `INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_type, filename, media_key)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'document', 'invoice.pdf', 'a2V5')`,
+      "OLD1", ADA, ADA, "Ada", "from before the migration", at(5),
+    );
+
+    const migrated = new Store(sql);
+    expect(migrated.counts()).toEqual({ chats: 1, messages: 1 });
+    expect(migrated.getChat(ADA)).toEqual({
+      jid: ADA, name: "Ada", lastMessageTime: at(5), archived: false, leftAt: null, deletedAt: null,
+    });
+    expect(migrated.listMessages({ chatJid: ADA })[0]).toMatchObject({
+      id: "OLD1", content: "from before the migration", senderName: "Ada", mediaType: "document", filename: "invoice.pdf",
+      revoked: false, revokedAt: null, undecryptable: false, decryptError: null,
+    });
+    expect(migrated.mediaFor("OLD1", ADA)?.mediaKeyB64).toBe("a2V5");
+    sql.close();
+  });
+
+  it("is idempotent: a second start finds the columns and changes nothing", () => {
+    const sql = makeFakeSql();
+    const first = new Store(sql);
+    first.upsertChat({ jid: ADA, name: "Ada", lastMessageTime: at(5) });
+    first.setArchived(ADA, true);
+    const second = new Store(sql);
+    expect(second.getChat(ADA)?.archived).toBe(true);
+    for (const { table, column } of MIGRATIONS) {
+      const columns = sql.exec(`PRAGMA table_info(${table})`).toArray().filter((c) => c.name === column);
+      expect(columns, `${table}.${column}`).toHaveLength(1);
+    }
+    sql.close();
+  });
+
+  it("only ever adds nullable columns or ones with a constant default", () => {
+    for (const { ddl } of MIGRATIONS) {
+      expect(/ NOT NULL/.test(ddl) ? / DEFAULT /.test(ddl) : true, ddl).toBe(true);
+      expect(ddl).not.toMatch(/PRIMARY KEY|UNIQUE|REFERENCES/i);
+    }
+  });
+});
+
+describe("lifecycle flags", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store(makeFakeSql());
+    store.upsertChat({ jid: ADA, name: "Ada", lastMessageTime: at(5) });
+    store.upsertChat({ jid: GROUP, name: "Book club", lastMessageTime: at(9) });
+    store.upsertMessage({ id: "M1", chatJid: ADA, sender: ADA, senderName: "Ada", content: "morning", timestamp: at(1), isFromMe: false });
+    store.upsertMessage({ id: "M2", chatJid: ADA, sender: ME, content: "morning yourself", timestamp: at(2), isFromMe: true });
+  });
+
+  it("keeps archived, left and deleted chats in the listing, flagged", () => {
+    store.setArchived(ADA, true);
+    store.setLeft(GROUP, at(10));
+    store.markChatDeleted(GROUP, at(11));
+    const chats = store.listChats({});
+    expect(chats.map((c) => c.jid).sort()).toEqual([GROUP, ADA].sort());
+    expect(chats.find((c) => c.jid === ADA)).toMatchObject({ archived: true, leftAt: null, deletedAt: null });
+    expect(chats.find((c) => c.jid === GROUP)).toMatchObject({ archived: false, leftAt: at(10), deletedAt: at(11) });
+  });
+
+  it("does not let an ordinary chat upsert clear a flag", () => {
+    store.setArchived(ADA, true);
+    store.upsertChat({ jid: ADA, name: "Ada L" });
+    expect(store.getChat(ADA)).toMatchObject({ name: "Ada L", archived: true });
+  });
+
+  it("takes an archive state WhatsApp reported, in either direction", () => {
+    store.upsertChat({ jid: ADA, archived: true });
+    expect(store.getChat(ADA)?.archived).toBe(true);
+    store.upsertChat({ jid: ADA, archived: false });
+    expect(store.getChat(ADA)?.archived).toBe(false);
+  });
+
+  it("lifts the deleted flag when something is said in the chat afterwards, and not before", () => {
+    store.markChatDeleted(ADA, at(30));
+    store.upsertChat({ jid: ADA, lastMessageTime: at(20) });
+    expect(store.getChat(ADA)?.deletedAt).toBe(at(30));
+    store.upsertChat({ jid: ADA, lastMessageTime: at(31) });
+    expect(store.getChat(ADA)?.deletedAt).toBeNull();
+  });
+
+  it("lifts the left flag only for activity well after the leave", () => {
+    store.setLeft(GROUP, at(30));
+    // The leave's own system message lands a moment later.
+    store.upsertChat({ jid: GROUP, lastMessageTime: at(31) });
+    expect(store.getChat(GROUP)?.leftAt).toBe(at(30));
+    store.upsertChat({ jid: GROUP, lastMessageTime: at(40) });
+    expect(store.getChat(GROUP)?.leftAt).toBeNull();
+  });
+
+  it("flags a revoked message and keeps what it said; the first revoke wins", () => {
+    expect(store.markRevoked(ADA, "M1", at(3), ADA)).toBe(true);
+    expect(store.markRevoked(ADA, "M1", at(8), ADA)).toBe(true);
+    const row = store.listMessages({ chatJid: ADA }).find((m) => m.id === "M1")!;
+    expect(row).toMatchObject({ content: "morning", revoked: true, revokedAt: at(3) });
+    expect(store.counts().messages).toBe(2);
+  });
+
+  it("says so when asked to revoke a message it never held", () => {
+    expect(store.markRevoked(ADA, "NEVER-SEEN", at(3), ADA)).toBe(false);
+    expect(store.counts().messages).toBe(2);
+  });
+
+  it("files an inbound revoke on the original, or as a tombstone when the original was never seen", () => {
+    const revoke = { chatJid: ADA, revokedBy: ADA, revokedAt: at(6) };
+    expect(store.recordRevoke({ ...revoke, messageId: "M1" }, false)).toBe(true);
+    expect(store.counts().messages).toBe(2);
+
+    expect(store.recordRevoke({ ...revoke, messageId: "GONE-BEFORE-WE-LOOKED" }, false)).toBe(false);
+    const tombstone = store.listMessages({ chatJid: ADA }).find((m) => m.id === "GONE-BEFORE-WE-LOOKED")!;
+    expect(tombstone).toMatchObject({ content: null, sender: ADA, isFromMe: false, revoked: true, revokedAt: at(6), timestamp: at(6) });
+    // A replay of the same revoke adds nothing.
+    store.recordRevoke({ ...revoke, messageId: "GONE-BEFORE-WE-LOOKED" }, false);
+    expect(store.counts().messages).toBe(3);
+  });
+
+  it("does not un-revoke a message when it is upserted again", () => {
+    store.markRevoked(ADA, "M1", at(3), ADA);
+    store.upsertMessage({ id: "M1", chatJid: ADA, sender: ADA, content: "morning", timestamp: at(1), isFromMe: false });
+    expect(store.listMessages({ chatJid: ADA }).find((m) => m.id === "M1")?.revoked).toBe(true);
+  });
+
+  it("replaces an undecryptable placeholder when the resend arrives, and never degrades a readable row", () => {
+    store.upsertMessage({ id: "U1", chatJid: GROUP, sender: BOB, timestamp: at(12), isFromMe: false, decryptError: "No SenderKeyRecord found for decryption" });
+    expect(store.listMessages({ chatJid: GROUP })[0]).toMatchObject({ id: "U1", content: null, undecryptable: true, decryptError: "No SenderKeyRecord found for decryption" });
+
+    store.upsertMessage({ id: "U1", chatJid: GROUP, sender: BOB, senderName: "Bob", content: "can you hear me now", timestamp: at(12), isFromMe: false });
+    expect(store.listMessages({ chatJid: GROUP })[0]).toMatchObject({ id: "U1", content: "can you hear me now", undecryptable: false, decryptError: null });
+
+    // A duplicate delivery that fails must not turn the good row back into a placeholder.
+    store.upsertMessage({ id: "U1", chatJid: GROUP, sender: BOB, timestamp: at(12), isFromMe: false, decryptError: "Received message with old counter" });
+    expect(store.listMessages({ chatJid: GROUP })[0]).toMatchObject({ content: "can you hear me now", undecryptable: false });
+  });
+
+  it("finds our own message for a retry whichever chat spelling the asker used, and nobody else's", () => {
+    expect(store.ownMessage("M2", ADA)?.content).toBe("morning yourself");
+    expect(store.ownMessage("M2", "199900000000001@lid")?.content).toBe("morning yourself");
+    expect(store.ownMessage("M1", ADA)).toBeNull();
+  });
+
+  it("knows a person by chat name first, then by their latest pushName", () => {
+    expect(store.knownName(ADA)).toBe("Ada");
+    store.upsertMessage({ id: "G1", chatJid: GROUP, sender: BOB, senderName: "Bobby", content: "hi", timestamp: at(3), isFromMe: false });
+    store.upsertMessage({ id: "G2", chatJid: GROUP, sender: BOB, senderName: "Bob T", content: "hi again", timestamp: at(4), isFromMe: false });
+    expect(store.knownName(BOB)).toBe("Bob T");
+    expect(store.knownName("447700900999@s.whatsapp.net")).toBeNull();
   });
 });
 
