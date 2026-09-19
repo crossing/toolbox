@@ -137,9 +137,13 @@ on demand, which is why the first send in a while takes a few seconds.
   for a stranger. A send to a stranger is a nuisance; adding one to a group is
   not recoverable, so `prepareGroupRequest` rejects a leading 0 or a `(0)`.
 - **The drain marker means "delivered", not "processed" — and every socket
-  receives the offline queue.** Found 2026-09-19, when a group member's replies
-  never reached the store while forced syncs reported `offline queue: 2,
-  messages: 0`. Baileys (7.0.0-rc14) puts offline stanzas in a sequential queue of
+  receives the offline queue.** Written 2026-09-19 on the belief that a group
+  member's replies had failed to reach the store while forced syncs reported
+  `offline queue: 2, messages: 0`. **That belief was wrong**: he had sent
+  nothing, and the two queued items were receipts, which the per-kind detail
+  line now makes visible. No loss has been observed live; what follows is a race
+  read out of Baileys' source, and the close-time wait is hardening against it.
+  Baileys (7.0.0-rc14) puts offline stanzas in a sequential queue of
   its own (`Utils/offline-node-processor.js`) and works through it
   asynchronously: decrypt, send the receipt, and only then emit
   `messages.upsert`. `<ib><offline count=N/>` fires when the N stanzas have
@@ -302,10 +306,10 @@ account-wide** (3-day retention):
 | B4 media | download done (WebCrypto, integrity-checked); R2 offload not built |
 | B5 history import | done; ran against production |
 | B6 send | text and files done, to people and to `…@g.us`; audio must arrive pre-encoded |
-| B8 groups | `whatsapp_create_group` built and unit-tested 2026-09-19; **not yet exercised against a live socket** |
-| B9 chat & group lifecycle | built and unit-tested 2026-09-19: `whatsapp_leave_group`, `whatsapp_archive_chat`, `whatsapp_delete_chat`, `whatsapp_revoke_message`, `whatsapp_group_info`, `whatsapp_group_update_participants`, `whatsapp_group_update_subject`, `whatsapp_group_revoke_invite`; inbound revokes. **None exercised against a live socket**; archive/delete additionally depend on an app-state key the live device may or may not hold |
-| B10 inbound reliability | built and unit-tested 2026-09-19: close waits for offline messages to come out of Baileys, undecryptable placeholders, `getMessage` from the store, per-kind cycle detail. The cause of the live 2026-09-19 loss is **inferred from Baileys' source and reproduced in part offline, not confirmed** — the next live sync's detail line is what confirms or refutes it |
-| B11 profiles | `whatsapp_get_profile` built and unit-tested 2026-09-19, live fetch, nothing stored; **not exercised against a live socket** |
+| B8 groups | `whatsapp_create_group` live-tested 2026-09-19: group created with a phone-number JID, participant `added/200`; national-format number refused |
+| B9 chat & group lifecycle | live-tested 2026-09-19, all passing: group info (LID-addressed group, phone numbers resolved), send + revoke, rename, invite revoke, promote/demote/remove/add, archive/unarchive (app-state key present), leave, delete with `leave_first`, still-a-member refusal. One live failure: delete after a separate leave answered `forbidden` — `isMember` read the code from `output.statusCode`, but Baileys puts a stanza error's code in the Boom's `data`; fixed in `stanzaErrorCode`, **fix not yet re-run live**. Inbound revokes not exercised live. Calls made in parallel get `the bridge is busy — try again in a moment`; call the bridge sequentially |
+| B10 inbound reliability | built and unit-tested 2026-09-19: close waits for offline messages to come out of Baileys, undecryptable placeholders, `getMessage` from the store, per-kind cycle detail. Deployed 2026-09-19; inbound group messages seen arriving live with sender phone number and push name. The "live loss" that prompted it was a **false alarm** (receipts misread as messages) — this is hardening, not a fix for anything observed |
+| B11 profiles | `whatsapp_get_profile` live-tested 2026-09-19 on a personal and two business accounts: about, picture URLs, LID, business description/category/website/email/address/hours all returned; nothing stored |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
 Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the
