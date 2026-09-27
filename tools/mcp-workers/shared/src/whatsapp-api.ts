@@ -50,7 +50,30 @@ export interface MessageRow {
    */
   undecryptable: boolean;
   decryptError: string | null;
+  /**
+   * Emoji reactions on this message, one per reactor: a second reaction from
+   * the same person replaces the first, and removing one removes the entry.
+   * `sender` is a phone-number JID (or ours, for a reaction made from the phone).
+   */
+  reactions: MessageReaction[];
+  /**
+   * How far the message got, from the receipts WhatsApp has sent this bridge.
+   * For a message this account sent: delivered / read / played by the other
+   * side (in a group, by anyone). For a message someone else sent: "read"
+   * once this account read it on the phone. null when no receipt has been
+   * seen — which for our own sends means "sent, no delivery receipt yet".
+   */
+  status: MessageStatus | null;
 }
+
+export interface MessageReaction {
+  sender: string;
+  emoji: string;
+  /** When the reaction was made (ISO-8601 UTC). */
+  at: string;
+}
+
+export type MessageStatus = "sent" | "delivered" | "read" | "played";
 
 export interface BridgeStatus {
   paired: boolean;

@@ -39,7 +39,9 @@ export function isoFromSeconds(seconds: number): string {
 
 /**
  * The text a human would say the message "is": the body for text messages,
- * the caption for captioned media, and nothing for a bare attachment.
+ * the caption for captioned media, and nothing for a bare attachment. A
+ * shared contact or location has no body either, but filing it with no text
+ * made it indistinguishable from an empty row, so it is summarised instead.
  */
 export function textOf(message: WAMessage): string | null {
   const content = extractMessageContent(message.message ?? undefined);
@@ -51,8 +53,23 @@ export function textOf(message: WAMessage): string | null {
     media.imageMessage?.caption ??
     media.videoMessage?.caption ??
     media.documentMessage?.caption ??
-    null
+    sharedOf(content)
   );
+}
+
+function sharedOf(content: proto.IMessage): string | null {
+  if (content.contactMessage) return `contact: ${content.contactMessage.displayName ?? "(unnamed)"}`;
+  if (content.contactsArrayMessage) {
+    const names = (content.contactsArrayMessage.contacts ?? []).map((c) => c.displayName ?? "(unnamed)");
+    return `contacts: ${names.join(", ")}`;
+  }
+  const location = content.locationMessage ?? content.liveLocationMessage;
+  if (location) {
+    const where = [location.degreesLatitude, location.degreesLongitude].map((d) => Number(d ?? 0).toFixed(5)).join(",");
+    const label = (content.locationMessage?.name || content.locationMessage?.address || "").trim();
+    return `location: ${where}${label ? ` (${label})` : ""}`;
+  }
+  return null;
 }
 
 /** null for a text-only message; otherwise "image" | "video" | … */
@@ -111,6 +128,43 @@ export function revokeOf(message: WAMessage, meId: string | null): InboundRevoke
   };
 }
 
+/** An inbound emoji reaction, reduced to what the store needs. */
+export interface InboundReaction {
+  chatJid: string;
+  /** The message reacted to — not the id of the reaction itself. */
+  messageId: string;
+  sender: string;
+  /** Empty when the reaction was removed. */
+  emoji: string;
+  reactedAt: string;
+}
+
+/**
+ * A reaction arrives as an ordinary message whose whole content is a
+ * `reactionMessage` naming another message's key — the same shape as a revoke,
+ * and read off the upsert for the same reason (see revokeOf). Filed as a
+ * message it was a row with no text, which is what "a blank message from X"
+ * turned out to be every time someone sent a thumbs-up.
+ */
+export function reactionOf(message: WAMessage, meId: string | null): InboundReaction | null {
+  const reaction = extractMessageContent(message.message ?? undefined)?.reactionMessage;
+  if (!reaction) return null;
+  const chatJid = message.key?.remoteJid;
+  const messageId = reaction.key?.id;
+  if (!chatJid || !messageId) return null;
+  const by = message.key?.fromMe ? meId : (groupSenderOf(message) ?? chatJid);
+  const stampMs = toNumber(reaction.senderTimestampMs);
+  return {
+    chatJid,
+    messageId,
+    sender: by ? jidNormalizedUser(by) || by : chatJid,
+    emoji: reaction.text ?? "",
+    reactedAt: stampMs
+      ? new Date(stampMs).toISOString()
+      : isoFromSeconds(toNumber(message.messageTimestamp) || Math.floor(Date.now() / 1000)),
+  };
+}
+
 export function toStoredMessage(message: WAMessage, meId: string | null): StoredMessage | null {
   const chatJid = message.key?.remoteJid;
   const id = message.key?.id;
@@ -123,6 +177,14 @@ export function toStoredMessage(message: WAMessage, meId: string | null): Stored
   // revoke in particular must land on the row it withdraws (revokeOf), not
   // beside it.
   if (content?.protocolMessage) return null;
+  // Likewise a reaction lands on the row it is about (reactionOf), and a poll
+  // vote is a fact about a poll, not a message anyone wrote.
+  if (content?.reactionMessage || content?.pollUpdateMessage) return null;
+  // Content with nothing in it that counts as content: a bare sender-key
+  // distribution, which every member of a group sends after the membership
+  // changes, or a lone messageContextInfo. Baileys upserts them like anything
+  // else, and each one filed was a blank message from that person.
+  if (content && !getContentType(content)) return null;
 
   const StubType = proto.WebMessageInfo.StubType;
   // The other half of an inbound revoke. When the original and its revoke sit
@@ -134,6 +196,11 @@ export function toStoredMessage(message: WAMessage, meId: string | null): Stored
   // wrong; the revoke's own upsert carries the right id, and revokeOf files
   // the tombstone under that.
   if (message.messageStubType === StubType.REVOKE && !content) return null;
+  // Every other content-less upsert is a group system event — someone added,
+  // the subject changed, a member left — which the store has no column for
+  // and used to file as a blank message from whoever did it. A CIPHERTEXT
+  // stub is the one content-less message that is a message, handled below.
+  if (!content && message.messageStubType !== StubType.CIPHERTEXT) return null;
 
   // Delivered, but not readable: decryption failed, and Baileys has already
   // asked the sender's phone to send it again. Filed as what it is rather than

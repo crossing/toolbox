@@ -70,6 +70,7 @@ import {
   kindFromFilename,
   messageForRetry,
   mimeFromFilename,
+  reactionOf,
   revokeOf,
   toJid,
   toStoredMessage,
@@ -348,6 +349,18 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
               this.log("info", `message ${revoke.messageId} in ${revoke.chatJid} was deleted for everyone${known ? "" : " (never seen here; tombstone filed)"}`);
               continue;
             }
+            // A reaction is about a message, not a message: it lands on its
+            // target's row. Not counted as stored, and not chat activity
+            // either — the phone does not move a chat for one.
+            const reaction = reactionOf(message, meId);
+            if (reaction) {
+              const known = this.store.recordReaction(reaction);
+              this.log(
+                "info",
+                `${reaction.emoji ? `reaction ${reaction.emoji}` : "reaction removed"} on ${reaction.messageId} in ${reaction.chatJid}${known ? "" : " (message not in the store)"}`,
+              );
+              continue;
+            }
             const row = toStoredMessage(message, meId);
             if (!row) continue;
             this.store.upsertMessage(row);
@@ -386,6 +399,21 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
         const at = new Date().toISOString();
         for (const jid of jids) this.store.markChatDeleted(jid, at);
         this.log("info", `${jids.length} chat(s) deleted on another device; flagged, messages kept`);
+      },
+      // Receipts. Only the status is taken; the same event also carries edits
+      // and resend bookkeeping, which the store has no column for.
+      onMessageUpdates: (updates) => {
+        let applied = 0;
+        let unknown = 0;
+        for (const { key, update } of updates) {
+          const status = typeof update.status === "number" ? update.status : null;
+          if (status === null || !key.id) continue;
+          if (this.store.setStatus(key.remoteJid, key.id, status)) applied++;
+          else unknown++;
+        }
+        if (applied + unknown > 0) {
+          this.log("info", `${applied} receipt(s) applied${unknown ? `, ${unknown} for messages not in the store` : ""}`);
+        }
       },
       getMessage: (key) => {
         if (!key.id) return undefined;

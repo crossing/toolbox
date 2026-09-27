@@ -21,7 +21,15 @@
 //     in this file ever deletes a row: leaving, archiving, deleting a chat and
 //     revoking a message all set a flag and keep what was said.
 
-import type { ChatRow, ContactRow, ListChatsQuery, ListMessagesQuery, MessageRow } from "@toolbox/mcp-shared";
+import type {
+  ChatRow,
+  ContactRow,
+  ListChatsQuery,
+  ListMessagesQuery,
+  MessageReaction,
+  MessageRow,
+  MessageStatus,
+} from "@toolbox/mcp-shared";
 import type { SqlLike } from "./auth";
 
 export const STORE_SCHEMA = `
@@ -51,6 +59,14 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (chat_jid, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages (timestamp);
+CREATE TABLE IF NOT EXISTS reactions (
+  chat_jid TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  reacted_at TEXT NOT NULL,
+  PRIMARY KEY (chat_jid, message_id, sender)
+);
 `;
 
 // Additive only: a nullable column, or NOT NULL with a constant default, is the
@@ -74,7 +90,22 @@ export const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   // visible placeholder instead of an anonymous empty row, and is overwritten
   // by the sender's resend when that arrives under the same id.
   { table: "messages", column: "decrypt_error", ddl: "decrypt_error TEXT" },
+  // Baileys' WebMessageInfo.Status, from receipts: 3 delivered, 4 read, 5
+  // played. Only ever moves up. Null until a receipt has been seen.
+  { table: "messages", column: "status", ddl: "status INTEGER" },
 ];
+
+// The reactions table is in STORE_SCHEMA, not here: the schema runs on every
+// construction with IF NOT EXISTS, so a table is created on the live store the
+// first time the new code starts, and MIGRATIONS only knows how to add columns.
+
+/** WebMessageInfo.Status values a receipt can carry, and what tools call them. */
+const STATUS_NAMES: Record<number, MessageStatus> = {
+  2: "sent", // SERVER_ACK
+  3: "delivered", // DELIVERY_ACK
+  4: "read",
+  5: "played",
+};
 
 /** How long after a leave new activity has to be dated to count as a rejoin. */
 const REJOIN_MARGIN_MS = 2 * 60 * 1000;
@@ -134,10 +165,25 @@ export interface LastMessageKey {
   timestampSeconds: number;
 }
 
+// Reactions ride along as a JSON array built by a correlated subquery, so a
+// page of messages is still one statement: a second query with the page's
+// ids in an IN (...) would hit Durable Object SQLite's 100-parameter cap at
+// half the maximum page size.
 const MESSAGE_COLUMNS = `m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp,
-  m.is_from_me, m.media_type, m.filename, m.revoked_at, m.decrypt_error, c.name AS chat_name`;
+  m.is_from_me, m.media_type, m.filename, m.revoked_at, m.decrypt_error, m.status, c.name AS chat_name,
+  (SELECT json_group_array(json_object('sender', r.sender, 'emoji', r.emoji, 'at', r.reacted_at))
+     FROM (SELECT sender, emoji, reacted_at FROM reactions
+           WHERE chat_jid = m.chat_jid AND message_id = m.id ORDER BY reacted_at) r) AS reactions_json`;
 
 const CHAT_COLUMNS = "c.jid, c.name, c.last_message_time, c.archived, c.left_at, c.deleted_at";
+
+// Rows that say nothing: no text, no attachment, not a revoke tombstone, not
+// an undecryptable placeholder. Before 2026-09-27 every reaction, sender-key
+// rotation and group system stub was filed as one of these, and each read as
+// "a blank message from X". The normaliser no longer produces them, but the
+// live store keeps what it was given — nothing here deletes — so reads leave
+// them out instead.
+const SAYS_NOTHING = "(m.content IS NULL AND m.media_type IS NULL AND m.revoked_at IS NULL AND m.decrypt_error IS NULL)";
 
 function toMessageRow(row: Record<string, unknown>): MessageRow {
   return {
@@ -155,7 +201,18 @@ function toMessageRow(row: Record<string, unknown>): MessageRow {
     revokedAt: (row.revoked_at as string | null) ?? null,
     undecryptable: row.decrypt_error != null,
     decryptError: (row.decrypt_error as string | null) ?? null,
+    reactions: parseReactions(row.reactions_json),
+    status: STATUS_NAMES[row.status as number] ?? null,
   };
+}
+
+function parseReactions(json: unknown): MessageReaction[] {
+  if (typeof json !== "string" || json === "") return [];
+  try {
+    return JSON.parse(json) as MessageReaction[];
+  } catch {
+    return [];
+  }
 }
 
 function toChatRow(row: Record<string, unknown>): ChatRow {
@@ -327,6 +384,71 @@ export class Store {
     });
     this.markRevoked(revoke.chatJid, revoke.messageId, revoke.revokedAt, revoke.revokedBy);
     return false;
+  }
+
+  /**
+   * File a reaction on the message it is about. One row per (message,
+   * reactor): a new emoji from the same person replaces the old, and an empty
+   * emoji — how WhatsApp says "reaction removed" — deletes the row. Nothing is
+   * checked against the messages table: a reaction to a message the store
+   * never held (older than the import, say) is still a fact worth keeping,
+   * and it surfaces the moment that row appears. Returns whether the message
+   * is known, so the log can say so.
+   */
+  recordReaction(reaction: { chatJid: string; messageId: string; sender: string; emoji: string; reactedAt: string }): boolean {
+    const chat = normalizeJid(reaction.chatJid);
+    const sender = normalizeJid(reaction.sender);
+    if (reaction.emoji === "") {
+      this.sql.exec(
+        "DELETE FROM reactions WHERE chat_jid = ? AND message_id = ? AND sender = ?",
+        chat,
+        reaction.messageId,
+        sender,
+      );
+    } else {
+      this.sql.exec(
+        `INSERT INTO reactions (chat_jid, message_id, sender, emoji, reacted_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(chat_jid, message_id, sender) DO UPDATE SET
+           emoji = excluded.emoji, reacted_at = excluded.reacted_at`,
+        chat,
+        reaction.messageId,
+        sender,
+        reaction.emoji,
+        reaction.reactedAt,
+      );
+    }
+    return (
+      this.sql
+        .exec("SELECT 1 AS present FROM messages WHERE id = ? AND chat_jid = ?", reaction.messageId, chat)
+        .toArray().length > 0
+    );
+  }
+
+  /**
+   * Record how far a message got, from a receipt. Status only ever advances:
+   * receipts arrive in whatever order the offline queue held them, and a
+   * "delivered" after a "read" must not take the read back. Looked up by id
+   * with the named chat preferred rather than by (id, chat) alone, because a
+   * receipt names a 1:1 chat by whichever address the other side used — a
+   * LID, often — while the row is filed under the phone number. Returns
+   * whether a row was found.
+   */
+  setStatus(chatJid: string | null | undefined, messageId: string, status: number): boolean {
+    const rows = this.sql
+      .exec(
+        "SELECT chat_jid FROM messages WHERE id = ? ORDER BY (chat_jid = ?) DESC LIMIT 1",
+        messageId,
+        chatJid ? normalizeJid(chatJid) : "",
+      )
+      .toArray();
+    if (rows.length === 0) return false;
+    this.sql.exec(
+      "UPDATE messages SET status = MAX(COALESCE(status, 0), ?) WHERE id = ? AND chat_jid = ?",
+      status,
+      messageId,
+      rows[0]!.chat_jid as string,
+    );
+    return true;
   }
 
   /** The facts a revoke has to check before anything is sent. */
@@ -579,7 +701,7 @@ export class Store {
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         WHERE m.chat_jid = ? OR m.sender = ?
+         WHERE (m.chat_jid = ? OR m.sender = ?) AND NOT ${SAYS_NOTHING}
          ORDER BY m.timestamp DESC LIMIT 1`,
         normalized,
         normalized,
@@ -591,7 +713,7 @@ export class Store {
   listMessages(q: ListMessagesQuery): MessageRow[] {
     const limit = Math.min(Math.max(q.limit ?? 20, 1), 200);
     const offset = (q.page ?? 0) * limit;
-    const clauses: string[] = [];
+    const clauses: string[] = [`NOT ${SAYS_NOTHING}`];
     const bindings: unknown[] = [];
     if (q.chatJid) {
       clauses.push("m.chat_jid = ?");
@@ -616,7 +738,7 @@ export class Store {
       clauses.push("m.timestamp < ?");
       bindings.push(toStoredTimestamp(q.before));
     }
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const where = `WHERE ${clauses.join(" AND ")}`;
     return this.sql
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
@@ -644,7 +766,7 @@ export class Store {
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         WHERE m.chat_jid = ? AND (m.timestamp < ? OR (m.timestamp = ? AND m.id < ?))
+         WHERE m.chat_jid = ? AND (m.timestamp < ? OR (m.timestamp = ? AND m.id < ?)) AND NOT ${SAYS_NOTHING}
          ORDER BY m.timestamp DESC, m.id DESC LIMIT ?`,
         message.chatJid,
         message.timestamp,
@@ -659,7 +781,7 @@ export class Store {
       .exec(
         `SELECT ${MESSAGE_COLUMNS} FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         WHERE m.chat_jid = ? AND (m.timestamp > ? OR (m.timestamp = ? AND m.id > ?))
+         WHERE m.chat_jid = ? AND (m.timestamp > ? OR (m.timestamp = ? AND m.id > ?)) AND NOT ${SAYS_NOTHING}
          ORDER BY m.timestamp ASC, m.id ASC LIMIT ?`,
         message.chatJid,
         message.timestamp,

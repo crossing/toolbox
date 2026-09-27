@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { proto } from "baileys";
 import type { WAMessage } from "baileys";
-import { chatNameFor, mediaKindOf, messageForRetry, revokeOf, textOf, toStoredMessage } from "../src/normalize";
+import { chatNameFor, mediaKindOf, messageForRetry, reactionOf, revokeOf, textOf, toStoredMessage } from "../src/normalize";
 
 const ME = "447700900000:12@s.whatsapp.net";
 
@@ -310,9 +310,78 @@ describe("undecryptable messages", () => {
 
   it("leaves decryptError null on everything that was read", () => {
     expect(toStoredMessage(message({ message: { conversation: "fine" } }), ME)?.decryptError).toBeNull();
-    // A system stub (group created, member added) is not a decryption failure.
+  });
+});
+
+// Everything Baileys upserts that nobody wrote. Each of these was filed as a
+// row with no text — a "blank message from X" in whatsapp_list_messages, and
+// the last interaction with X if it was the newest thing they sent.
+describe("toStoredMessage drops what is not a message", () => {
+  it("a reaction (it lands on its target through reactionOf)", () => {
+    const reaction = message({ message: { reactionMessage: { key: { id: "MSG0", fromMe: true }, text: "👍" } } });
+    expect(toStoredMessage(reaction, ME)).toBeNull();
+  });
+
+  it("a bare sender-key distribution, sent by every member when a group's membership changes", () => {
+    const skdm = message({
+      key: { remoteJid: "120363000000000001@g.us", fromMe: false, id: "K1", participant: "447700900111@s.whatsapp.net" },
+      message: { senderKeyDistributionMessage: { groupId: "120363000000000001@g.us", axolotlSenderKeyDistributionMessage: new Uint8Array([1]) } },
+    });
+    expect(toStoredMessage(skdm, ME)).toBeNull();
+  });
+
+  it("a poll vote", () => {
+    const vote = message({ message: { pollUpdateMessage: { pollCreationMessageKey: { id: "P1" }, vote: {} } } });
+    expect(toStoredMessage(vote, ME)).toBeNull();
+  });
+
+  it("a group system stub, which is not a decryption failure either", () => {
     const stub = message({ messageStubType: proto.WebMessageInfo.StubType.GROUP_CREATE, messageStubParameters: ["Roof repair"] });
-    expect(toStoredMessage(stub, ME)?.decryptError).toBeNull();
+    expect(toStoredMessage(stub, ME)).toBeNull();
+  });
+
+  it("but keeps a shared contact or location, summarised as text", () => {
+    const contact = message({ message: { contactMessage: { displayName: "Bob Builder", vcard: "BEGIN:VCARD" } } });
+    expect(toStoredMessage(contact, ME)?.content).toBe("contact: Bob Builder");
+    const location = message({ message: { locationMessage: { degreesLatitude: 51.5007, degreesLongitude: -0.1246, name: "Big Ben" } } });
+    expect(toStoredMessage(location, ME)?.content).toBe("location: 51.50070,-0.12460 (Big Ben)");
+  });
+});
+
+describe("reactionOf", () => {
+  const GROUP = "120363000000000001@g.us";
+
+  it("reads the target, the emoji and the reactor off an inbound reaction", () => {
+    const reaction = message({
+      key: { remoteJid: GROUP, fromMe: false, id: "R1", participant: "447700900111:3@s.whatsapp.net" },
+      messageTimestamp: 1758283200,
+      message: { reactionMessage: { key: { remoteJid: GROUP, fromMe: true, id: "MSG0" }, text: "👍", senderTimestampMs: 1758283199500 } },
+    });
+    expect(reactionOf(reaction, ME)).toEqual({
+      chatJid: GROUP,
+      messageId: "MSG0",
+      sender: "447700900111@s.whatsapp.net",
+      emoji: "👍",
+      reactedAt: "2025-09-19T11:59:59.500Z",
+    });
+  });
+
+  it("names us as the reactor for one made from the phone, and dates it from the envelope when there is no sender stamp", () => {
+    const reaction = message({
+      key: { remoteJid: "447700900111@s.whatsapp.net", fromMe: true, id: "R2" },
+      messageTimestamp: 1758283200,
+      message: { reactionMessage: { key: { remoteJid: "447700900111@s.whatsapp.net", fromMe: false, id: "MSG5" }, text: "❤️" } },
+    });
+    expect(reactionOf(reaction, ME)).toMatchObject({ sender: "447700900000@s.whatsapp.net", emoji: "❤️", reactedAt: "2025-09-19T12:00:00.000Z" });
+  });
+
+  it("an empty emoji is a removal", () => {
+    const reaction = message({ message: { reactionMessage: { key: { id: "MSG0" }, text: "" } } });
+    expect(reactionOf(reaction, ME)?.emoji).toBe("");
+  });
+
+  it("is null for anything else", () => {
+    expect(reactionOf(message({ message: { conversation: "👍" } }), ME)).toBeNull();
   });
 });
 

@@ -185,14 +185,18 @@ describe("InboundTracker", () => {
     };
   }
 
-  it("counts only offline stanzas, by kind", () => {
+  it("counts only offline stanzas, by kind — and receipts by type", () => {
     const tracker = new InboundTracker();
     tracker.onStanza("message", { id: "A1", offline: "1" });
-    tracker.onStanza("receipt", { id: "R1", offline: "1" });
+    tracker.onStanza("receipt", { id: "R1", offline: "1", type: "read" });
+    // No type is the plain delivery receipt.
+    tracker.onStanza("receipt", { id: "R2", offline: "1" });
     tracker.onStanza("notification", { id: "N1", offline: "0" });
     tracker.onStanza("message", { id: "LIVE" });
+    tracker.onStanza("receipt", { id: "LIVE-R", type: "read" });
     expect(tracker.summary()).toEqual({
-      offline: { message: 1, receipt: 1, notification: 1, call: 0 },
+      offline: { message: 1, receipt: 2, notification: 1, call: 0 },
+      receipts: { read: 1, delivered: 1 },
       pendingMessages: 1,
       undecryptable: 0,
       recovered: 0,
@@ -265,22 +269,26 @@ describe("InboundTracker", () => {
 });
 
 describe("describeInbound", () => {
-  const quiet = { offline: { message: 0, receipt: 0, notification: 0, call: 0 }, pendingMessages: 0, undecryptable: 0, recovered: 0 };
+  const quiet = { offline: { message: 0, receipt: 0, notification: 0, call: 0 }, receipts: {}, pendingMessages: 0, undecryptable: 0, recovered: 0 };
 
   it("keeps the old wording when the queue was empty, and says nothing without a count", () => {
     expect(describeInbound(0, quiet)).toBe("offline queue: 0");
     expect(describeInbound(null, quiet)).toBeNull();
   });
 
-  it("says what the queue was made of — two receipts are not two messages", () => {
+  it("says what the queue was made of — two receipts are not two messages, and says which receipts", () => {
     expect(describeInbound(2, { ...quiet, offline: { message: 0, receipt: 2, notification: 0, call: 0 } })).toBe(
       "offline queue: 2 (0 message, 2 receipt, 0 notification)",
     );
+    expect(
+      describeInbound(2, { ...quiet, offline: { message: 0, receipt: 2, notification: 0, call: 0 }, receipts: { read: 1, delivered: 1 } }),
+    ).toBe("offline queue: 2 (0 message, 2 receipt (1 read, 1 delivered), 0 notification)");
   });
 
   it("names messages that never came out, and ones that came out unreadable", () => {
     const detail = describeInbound(2, {
       offline: { message: 2, receipt: 0, notification: 0, call: 0 },
+      receipts: {},
       pendingMessages: 1,
       undecryptable: 1,
       recovered: 0,

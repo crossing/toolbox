@@ -172,6 +172,12 @@ export interface SessionHandlers {
   /** Chats deleted on another device. The store flags them; it never drops them. */
   onChatsDeleted?(jids: string[]): void;
   /**
+   * `messages.update`: a receipt (delivered / read / played) for a message
+   * we sent, or a read from our own phone for one we received. Baileys never
+   * upserts a receipt, so without this it leaves no trace but the queue count.
+   */
+  onMessageUpdates?(updates: { key: WAMessageKey; update: Partial<WAMessage> }[]): void;
+  /**
    * One of our own messages, as a proto, for a recipient device that could not
    * decrypt it and is asking again. See the note on `getMessage` below.
    */
@@ -286,6 +292,8 @@ const INBOUND_POLL_MS = 400;
 export interface InboundSummary {
   /** Offline stanzas seen on the wire this connection, by kind. */
   offline: { message: number; receipt: number; notification: number; call: number };
+  /** The receipts among them by type — read, delivered, retry… — so two of them read as what they are. */
+  receipts: Record<string, number>;
   /** Offline message stanzas that never came out of Baileys as an upsert. */
   pendingMessages: number;
   /** Messages that arrived but could not be decrypted (a retry was requested). */
@@ -331,6 +339,7 @@ export interface InboundSummary {
  */
 export class InboundTracker {
   readonly offline = { message: 0, receipt: 0, notification: 0, call: 0 };
+  readonly receipts: Record<string, number> = {};
   private pending = new Set<string>();
   private awaitingRetry = new Set<string>();
   private undecryptable = 0;
@@ -341,6 +350,11 @@ export class InboundTracker {
     if (!attrs?.offline) return;
     this.offline[tag]++;
     if (tag === "message" && attrs.id) this.pending.add(attrs.id);
+    if (tag === "receipt") {
+      // A receipt with no type is the plain "delivered" (Utils/generics.js).
+      const kind = attrs.type || "delivered";
+      this.receipts[kind] = (this.receipts[kind] ?? 0) + 1;
+    }
   }
 
   onUpsert(messages: WAMessage[]): void {
@@ -360,6 +374,7 @@ export class InboundTracker {
   summary(): InboundSummary {
     return {
       offline: { ...this.offline },
+      receipts: { ...this.receipts },
       pendingMessages: this.pending.size,
       undecryptable: this.undecryptable,
       recovered: this.recovered,
@@ -405,7 +420,12 @@ export function describeInbound(offlineCount: number | null, inbound: InboundSum
   const { message, receipt, notification, call } = inbound.offline;
   const parts = [`offline queue: ${offlineCount}`];
   if (message + receipt + notification + call > 0) {
-    parts.push(`(${message} message, ${receipt} receipt, ${notification} notification${call ? `, ${call} call` : ""})`);
+    // "2 receipt" was once read as two lost messages; "2 receipt (2 read)" cannot be.
+    const kinds = Object.entries(inbound.receipts ?? {})
+      .map(([kind, count]) => `${count} ${kind}`)
+      .join(", ");
+    const receipts = `${receipt} receipt${kinds ? ` (${kinds})` : ""}`;
+    parts.push(`(${message} message, ${receipts}, ${notification} notification${call ? `, ${call} call` : ""})`);
   }
   if (inbound.pendingMessages > 0) {
     parts.push(`— ${inbound.pendingMessages} message(s) never came out of Baileys; they stay queued on WhatsApp if unacknowledged`);
@@ -507,6 +527,31 @@ export class Session {
         handlers.onMessages(messages, type);
       } catch (err) {
         handlers.log("error", `storing messages failed: ${String(err)}`);
+      }
+    });
+
+    // Receipts, edits, placeholder-resend bookkeeping all arrive here; the
+    // handler picks out what it wants.
+    this.sock.ev.on("messages.update", (updates) => {
+      try {
+        if (updates.length > 0) handlers.onMessageUpdates?.(updates);
+      } catch (err) {
+        handlers.log("error", `applying message updates failed: ${String(err)}`);
+      }
+    });
+    // A group receipt is per member and comes on its own event with a
+    // timestamp instead of a status (Socket/messages-recv.js handleReceipt).
+    // Folded into the same handler as the status it amounts to.
+    this.sock.ev.on("message-receipt.update", (receipts) => {
+      const { DELIVERY_ACK, READ } = proto.WebMessageInfo.Status;
+      const updates = receipts.map(({ key, receipt }) => ({
+        key,
+        update: { status: receipt.readTimestamp ? READ : DELIVERY_ACK },
+      }));
+      try {
+        if (updates.length > 0) handlers.onMessageUpdates?.(updates);
+      } catch (err) {
+        handlers.log("error", `applying group receipts failed: ${String(err)}`);
       }
     });
 

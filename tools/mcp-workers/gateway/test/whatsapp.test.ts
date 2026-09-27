@@ -800,6 +800,8 @@ describe("chat and group lifecycle tools", () => {
           id: "M1", chatJid: GROUP, chatName: "Roof repair", sender: ADA, senderName: "Ada", content: "sorry, wrong group",
           timestamp: "2026-09-19T11:00:00.000Z", isFromMe: false, mediaType: null, filename: null,
           revoked: true, revokedAt: "2026-09-19T11:01:00.000Z", undecryptable: false, decryptError: null,
+          reactions: [{ sender: "447700900000@s.whatsapp.net", emoji: "👍", at: "2026-09-19T11:00:30.000Z" }],
+          status: "read",
         },
       ],
     });
@@ -813,6 +815,8 @@ describe("chat and group lifecycle tools", () => {
     expect(JSON.parse((messages.content as { text: string }[])[0]!.text).messages[0]).toMatchObject({
       revoked: true,
       content: "sorry, wrong group",
+      reactions: [{ emoji: "👍" }],
+      status: "read",
     });
   });
 });

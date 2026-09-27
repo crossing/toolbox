@@ -115,7 +115,7 @@ export function registerWhatsappReadTools(server: McpServer, bridge: () => Promi
     "whatsapp_list_messages",
     {
       description:
-        "List or search WhatsApp messages, newest first. Filter by chat, sender, text, or date range. A message deleted for everyone stays listed with revoked: true (its content kept, if the bridge saw it before the delete). undecryptable: true marks a placeholder for a message that arrived but could not be decrypted — a resend was requested and replaces it if it comes.",
+        "List or search WhatsApp messages, newest first. Filter by chat, sender, text, or date range. A message deleted for everyone stays listed with revoked: true (its content kept, if the bridge saw it before the delete). undecryptable: true marks a placeholder for a message that arrived but could not be decrypted — a resend was requested and replaces it if it comes. reactions lists emoji reactions on the message by sender; status is how far it got per WhatsApp's receipts (delivered / read / played for our own messages; read for someone else's once this account read it on the phone), null when no receipt has been seen.",
       inputSchema: {
         chat_jid: z.string().optional().describe("Restrict to one chat (JID from whatsapp_list_chats)"),
         sender_phone_number: z
