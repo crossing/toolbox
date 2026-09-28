@@ -440,6 +440,16 @@ describe("reactions and receipts", () => {
     expect(store.listMessages({ chatJid: ADA, before: at(1) })[0]).toMatchObject({ id: "OLDER", reactions: [{ emoji: "👍" }] });
   });
 
+  it("lands a reaction on the row whichever address the stanza named the chat by", () => {
+    // Our send to Ada is filed under her number; her phone reacts in a chat it
+    // knows by LID. Seen live 2026-09-28: "(message not in the store)".
+    expect(store.recordReaction({ chatJid: "199900000000111@lid", messageId: "M2", sender: ADA, emoji: "👍", reactedAt: at(3) })).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[0]?.reactions).toEqual([{ sender: ADA, emoji: "👍", at: at(3) }]);
+    // And a revoke, which has the same problem.
+    expect(store.markRevoked("199900000000111@lid", "M1", at(4), ADA)).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[1]).toMatchObject({ id: "M1", revoked: true });
+  });
+
   it("a reactor's device suffix is dropped like every other sender", () => {
     store.recordReaction({ chatJid: ADA, messageId: "M2", sender: "447700900111:7@s.whatsapp.net", emoji: "👍", reactedAt: at(3) });
     expect(store.listMessages({ chatJid: ADA })[0]?.reactions[0]?.sender).toBe(ADA);

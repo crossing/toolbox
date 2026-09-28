@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { proto } from "baileys";
 import type { WAMessage } from "baileys";
-import { chatNameFor, mediaKindOf, messageForRetry, reactionOf, revokeOf, textOf, toStoredMessage } from "../src/normalize";
+import { chatNameFor, chatOf, mediaKindOf, messageForRetry, reactionOf, revokeOf, textOf, toStoredMessage } from "../src/normalize";
 
 const ME = "447700900000:12@s.whatsapp.net";
 
@@ -348,6 +348,28 @@ describe("toStoredMessage drops what is not a message", () => {
   });
 });
 
+describe("chatOf", () => {
+  it("is the number for a message from a LID-addressed contact", () => {
+    const m = message({ key: { remoteJid: "230785906917427@lid", remoteJidAlt: "447900584161@s.whatsapp.net", fromMe: false, id: "L1" } as never });
+    expect(chatOf(m)).toBe("447900584161@s.whatsapp.net");
+    expect(toStoredMessage({ ...m, message: { conversation: "hi" } } as never, ME)).toMatchObject({
+      chatJid: "447900584161@s.whatsapp.net",
+      sender: "447900584161@s.whatsapp.net",
+    });
+  });
+
+  it("ignores the alt on one of ours sent from the phone — that alt is our own number", () => {
+    const m = message({ key: { remoteJid: "230785906917427@lid", remoteJidAlt: "447700900000@s.whatsapp.net", fromMe: true, id: "L2" } as never });
+    expect(chatOf(m)).toBe("230785906917427@lid");
+  });
+
+  it("leaves a number, a group, or a LID with no alt alone", () => {
+    expect(chatOf(message({}))).toBe("447700900111@s.whatsapp.net");
+    expect(chatOf(message({ key: { remoteJid: "120363000000000001@g.us", fromMe: false, id: "G" } }))).toBe("120363000000000001@g.us");
+    expect(chatOf(message({ key: { remoteJid: "230785906917427@lid", fromMe: false, id: "L3" } }))).toBe("230785906917427@lid");
+  });
+});
+
 describe("reactionOf", () => {
   const GROUP = "120363000000000001@g.us";
 
@@ -373,6 +395,16 @@ describe("reactionOf", () => {
       message: { reactionMessage: { key: { remoteJid: "447700900111@s.whatsapp.net", fromMe: false, id: "MSG5" }, text: "❤️" } },
     });
     expect(reactionOf(reaction, ME)).toMatchObject({ sender: "447700900000@s.whatsapp.net", emoji: "❤️", reactedAt: "2025-09-19T12:00:00.000Z" });
+  });
+
+  it("files a reaction from a LID-addressed contact under their number, as the message row is", () => {
+    // What the live test on 2026-09-28 produced: the reaction's envelope named
+    // the chat by LID, the row sat under the number, and the two never met.
+    const reaction = message({
+      key: { remoteJid: "230785906917427@lid", remoteJidAlt: "447900584161@s.whatsapp.net", fromMe: false, id: "R3" } as never,
+      message: { reactionMessage: { key: { id: "MSG7" }, text: "👍" } },
+    });
+    expect(reactionOf(reaction, ME)).toMatchObject({ chatJid: "447900584161@s.whatsapp.net", sender: "447900584161@s.whatsapp.net" });
   });
 
   it("an empty emoji is a removal", () => {

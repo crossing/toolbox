@@ -345,11 +345,8 @@ export class Store {
    * wins: a replayed one does not move the timestamp.
    */
   markRevoked(chatJid: string, messageId: string, at: string, by: string | null): boolean {
-    const chat = normalizeJid(chatJid);
-    const found = this.sql
-      .exec("SELECT 1 AS present FROM messages WHERE id = ? AND chat_jid = ?", messageId, chat)
-      .toArray();
-    if (found.length === 0) return false;
+    const chat = this.chatOfMessage(messageId, chatJid);
+    if (chat === null) return false;
     this.sql.exec(
       `UPDATE messages SET revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?)
        WHERE id = ? AND chat_jid = ?`,
@@ -396,7 +393,11 @@ export class Store {
    * is known, so the log can say so.
    */
   recordReaction(reaction: { chatJid: string; messageId: string; sender: string; emoji: string; reactedAt: string }): boolean {
-    const chat = normalizeJid(reaction.chatJid);
+    // Under the chat the message is actually filed in: a reaction from the
+    // phone names a 1:1 chat by whichever address the phone used, and a LID
+    // there would put the reaction beside the row instead of on it.
+    const found = this.chatOfMessage(reaction.messageId, reaction.chatJid);
+    const chat = found ?? normalizeJid(reaction.chatJid);
     const sender = normalizeJid(reaction.sender);
     if (reaction.emoji === "") {
       this.sql.exec(
@@ -417,23 +418,16 @@ export class Store {
         reaction.reactedAt,
       );
     }
-    return (
-      this.sql
-        .exec("SELECT 1 AS present FROM messages WHERE id = ? AND chat_jid = ?", reaction.messageId, chat)
-        .toArray().length > 0
-    );
+    return found !== null;
   }
 
   /**
-   * Record how far a message got, from a receipt. Status only ever advances:
-   * receipts arrive in whatever order the offline queue held them, and a
-   * "delivered" after a "read" must not take the read back. Looked up by id
-   * with the named chat preferred rather than by (id, chat) alone, because a
-   * receipt names a 1:1 chat by whichever address the other side used — a
-   * LID, often — while the row is filed under the phone number. Returns
-   * whether a row was found.
+   * The chat a stored message is filed under, looked up by id with the named
+   * chat preferred. Ids are random enough to stand alone, and a stanza about
+   * a message — receipt, reaction, revoke — names a 1:1 chat by whichever
+   * address the other side used, LID or number, not by what the row says.
    */
-  setStatus(chatJid: string | null | undefined, messageId: string, status: number): boolean {
+  private chatOfMessage(messageId: string, chatJid: string | null | undefined): string | null {
     const rows = this.sql
       .exec(
         "SELECT chat_jid FROM messages WHERE id = ? ORDER BY (chat_jid = ?) DESC LIMIT 1",
@@ -441,12 +435,23 @@ export class Store {
         chatJid ? normalizeJid(chatJid) : "",
       )
       .toArray();
-    if (rows.length === 0) return false;
+    return rows.length > 0 ? (rows[0]!.chat_jid as string) : null;
+  }
+
+  /**
+   * Record how far a message got, from a receipt. Status only ever advances:
+   * receipts arrive in whatever order the offline queue held them, and a
+   * "delivered" after a "read" must not take the read back. Returns whether a
+   * row was found (see chatOfMessage for why not by (id, chat) alone).
+   */
+  setStatus(chatJid: string | null | undefined, messageId: string, status: number): boolean {
+    const chat = this.chatOfMessage(messageId, chatJid);
+    if (chat === null) return false;
     this.sql.exec(
       "UPDATE messages SET status = MAX(COALESCE(status, 0), ?) WHERE id = ? AND chat_jid = ?",
       status,
       messageId,
-      rows[0]!.chat_jid as string,
+      chat,
     );
     return true;
   }

@@ -96,6 +96,24 @@ function groupSenderOf(message: WAMessage): string | null {
   return participant ?? alt;
 }
 
+/**
+ * The chat a message belongs to, as a phone-number JID whenever WhatsApp told
+ * us one. Newer 1:1 chats are LID-addressed: `key.remoteJid` is an opaque
+ * `…@lid`, and Baileys puts the number in `key.remoteJidAlt`
+ * (Utils/decode-wa-message.js) — but only on a message *from* the other side.
+ * On one of ours sent from the phone the alt is our own number, so it is
+ * ignored there and the store matches by message id instead. Filing under
+ * the LID split every such chat in two: their messages under `…@lid`, ours
+ * under the number, and a reaction or receipt under whichever the stanza
+ * happened to use.
+ */
+export function chatOf(message: WAMessage): string | null {
+  const jid = message.key?.remoteJid ?? null;
+  if (!jid || message.key?.fromMe || !jid.endsWith("@lid")) return jid;
+  const alt = (message.key as { remoteJidAlt?: string | null } | undefined)?.remoteJidAlt;
+  return alt?.endsWith("@s.whatsapp.net") ? alt : jid;
+}
+
 /** An inbound "delete for everyone", reduced to what the store needs. */
 export interface InboundRevoke {
   chatJid: string;
@@ -116,7 +134,7 @@ export interface InboundRevoke {
 export function revokeOf(message: WAMessage, meId: string | null): InboundRevoke | null {
   const protocol = extractMessageContent(message.message ?? undefined)?.protocolMessage;
   if (!protocol || protocol.type !== proto.Message.ProtocolMessage.Type.REVOKE) return null;
-  const chatJid = message.key?.remoteJid;
+  const chatJid = chatOf(message);
   const messageId = protocol.key?.id;
   if (!chatJid || !messageId) return null;
   const by = message.key?.fromMe ? meId : (groupSenderOf(message) ?? chatJid);
@@ -149,7 +167,7 @@ export interface InboundReaction {
 export function reactionOf(message: WAMessage, meId: string | null): InboundReaction | null {
   const reaction = extractMessageContent(message.message ?? undefined)?.reactionMessage;
   if (!reaction) return null;
-  const chatJid = message.key?.remoteJid;
+  const chatJid = chatOf(message);
   const messageId = reaction.key?.id;
   if (!chatJid || !messageId) return null;
   const by = message.key?.fromMe ? meId : (groupSenderOf(message) ?? chatJid);
@@ -166,7 +184,7 @@ export function reactionOf(message: WAMessage, meId: string | null): InboundReac
 }
 
 export function toStoredMessage(message: WAMessage, meId: string | null): StoredMessage | null {
-  const chatJid = message.key?.remoteJid;
+  const chatJid = chatOf(message);
   const id = message.key?.id;
   if (!chatJid || !id) return null;
 
