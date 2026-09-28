@@ -416,16 +416,31 @@ run_flex() {
     --to-date "$flex_to_date"
   )
 
-  if output=$(printf '%s' "$token" | ibkr-flex-fetch "${helper_args[@]}" 2>/dev/null); then
+  # The helper's own diagnostics name the IBKR error code, which is the only way to tell an
+  # expired token from a bad query or a rate limit.  Relay one line of it, but only when it
+  # has the helper's prefix, is plain text with no URL or query-string characters, and does
+  # not contain the token -- anything else is dropped, as before.
+  local helper_stderr cause=""
+  helper_stderr=$(mktemp)
+  if output=$(printf '%s' "$token" | ibkr-flex-fetch "${helper_args[@]}" 2>"$helper_stderr"); then
     token=""
     unset token
+    rm -f -- "$helper_stderr"
     printf '%s\n' "$output"
   else
+    local last_line
+    last_line=$(tail -n 1 -- "$helper_stderr")
+    rm -f -- "$helper_stderr"
+    if [[ "$last_line" =~ ^ibkr-flex-fetch:\ ([[:alnum:] ,.\(\)-]{1,160})$ ]] &&
+      [[ "$last_line" != *"$token"* ]]; then
+      cause=": ${BASH_REMATCH[1]}"
+    fi
+    last_line=""
     token=""
     unset token
     output=""
     unset output
-    die "Flex history request failed for profile $profile"
+    die "Flex history request failed for profile $profile$cause"
   fi
 }
 
