@@ -249,13 +249,54 @@ on demand, which is why the first send in a while takes a few seconds.
 - **Schema changes are additive columns, applied at start-up.** `store.ts`
   `MIGRATIONS`: `chats.archived INTEGER NOT NULL DEFAULT 0`, `chats.left_at`,
   `chats.deleted_at`, `messages.revoked_at`, `messages.revoked_by`,
-  `messages.participant`, `messages.decrypt_error` (all nullable `TEXT` but the
-  first). A nullable column or one with a constant default is the one `ALTER`
+  `messages.participant`, `messages.decrypt_error`, `messages.status` (all
+  nullable but the first; `status` is `INTEGER`). A nullable column or one with a constant default is the one `ALTER`
   SQLite applies without rewriting the table. Each is probed with a `SELECT` of
   the column and added only if that fails to prepare, so it is idempotent and
   needs no `PRAGMA`. The `CREATE TABLE`s are left as they were, so a fresh store
   and the live one reach the schema by the same path — and the test runs the
-  migration over the legacy schema with rows in it.
+  migration over the legacy schema with rows in it. A *new* table (`reactions`)
+  goes in the schema string itself: `CREATE TABLE IF NOT EXISTS` runs on every
+  start, so the live store gets it the first time the new code constructs.
+- **A reaction is filed on the message it is about, not as a message.**
+  Found 2026-09-27, chasing "missing messages" the model kept reporting: a
+  thumbs-up arrives as an ordinary upsert whose content is a `reactionMessage`,
+  and `toStoredMessage` filed it as a row with no text — a blank message from
+  that person, and their last interaction if it was the newest thing they sent.
+  The same went for a bare `senderKeyDistributionMessage` (every member sends
+  one after a group's membership changes), poll votes, and group system stubs.
+  All of those are dropped now; a shared contact or location, which was also a
+  blank row, is summarised as text instead. Reactions go through `reactionOf`
+  (the `revokeOf` pattern: read off the upsert, chat from the envelope) into a
+  `reactions` table keyed `(chat, message, sender)` — a new emoji from the same
+  person replaces, an empty one removes — and come back on every `MessageRow`
+  as `reactions`, built by a correlated `json_group_array` subquery so a page is
+  still one statement (a second query with the ids in `IN (…)` would hit the
+  100-parameter cap at half the maximum page). A reaction is not chat activity.
+  The blank rows already in the live store stay — nothing in the store deletes
+  — but every read leaves out a row with no text, no attachment, no revoke and
+  no decrypt error, which is nothing the normaliser can produce any more.
+- **A LID-addressed 1:1 chat is filed under the number.** Found live
+  2026-09-28: the first reaction arrived with its envelope naming the chat by
+  LID while the row sat under the number, and the same split had quietly made
+  two chats of every LID-addressed contact — their messages under `…@lid`, ours
+  under `4477…`. `chatOf` takes `key.remoteJidAlt`, the number Baileys reads
+  off `sender_pn`, for a message *from* the other side (on our own phone-sent
+  messages that field is our own number, so it is ignored there), and the
+  store resolves anything *about* a message — reaction, receipt, revoke — by
+  message id with the named chat preferred (`chatOfMessage`). Rows filed under
+  a LID before this stay where they are.
+- **Receipts become `messages.status`.** Baileys never upserts a receipt; it
+  emits `messages.update` with a `WebMessageInfo.Status` for a 1:1 chat and
+  `message-receipt.update` with per-member timestamps for a group, which the
+  session folds into the same handler. The store keeps the highest status seen
+  (receipts come out of the offline queue in any order) and finds the row by id
+  with the named chat preferred, because a 1:1 receipt names the chat by
+  whichever address the other side used — often a LID — while the row is filed
+  under the phone number. `whatsapp_list_messages` reports it as
+  `delivered / read / played` on our own sends and `read` on someone else's
+  once this account read it on the phone. The cycle detail line also says what
+  kind the receipts were: `2 receipt (2 read)`.
 - **Timestamps are ISO-8601 UTC.** The Go bridge writes `time.Time` with a
   local offset, which does not sort correctly across offsets; the importer
   converts.
@@ -310,6 +351,7 @@ account-wide** (3-day retention):
 | B9 chat & group lifecycle | live-tested 2026-09-19, all passing: group info (LID-addressed group, phone numbers resolved), send + revoke, rename, invite revoke, promote/demote/remove/add, archive/unarchive (app-state key present), leave, delete with `leave_first`, still-a-member refusal. One live failure: delete after a separate leave answered `forbidden` — `isMember` read the code from `output.statusCode`, but Baileys puts a stanza error's code in the Boom's `data`; fixed in `stanzaErrorCode`, **fix not yet re-run live**. Inbound revokes not exercised live. Calls made in parallel get `the bridge is busy — try again in a moment`; call the bridge sequentially |
 | B10 inbound reliability | built and unit-tested 2026-09-19: close waits for offline messages to come out of Baileys, undecryptable placeholders, `getMessage` from the store, per-kind cycle detail. Deployed 2026-09-19; inbound group messages seen arriving live with sender phone number and push name. The "live loss" that prompted it was a **false alarm** (receipts misread as messages) — this is hardening, not a fix for anything observed |
 | B11 profiles | `whatsapp_get_profile` live-tested 2026-09-19 on a personal and two business accounts: about, picture URLs, LID, business description/category/website/email/address/hours all returned; nothing stored |
+| B12 reactions & receipts | deployed and live-tested 2026-09-28: a reaction from a personal number on a bridge send came through as `reactions: [{sender, emoji: 👍, at}]`, a remove-then-re-add as two stanzas landing on the same row; group sends showed `status: "read"` from `message-receipt.update`, a 1:1 send from `messages.update`; cycle detail reads `2 receipt (1 read, 1 delivered)`; 0 blank rows in the last 200 messages. The first live attempt exposed the LID split (reaction envelope `…@lid`, row under the number — "message not in the store"), fixed by `chatOf` + id-first lookup; two reactions filed under the LID before that fix stay where they are, invisible |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
 Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the

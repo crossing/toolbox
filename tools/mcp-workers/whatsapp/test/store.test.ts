@@ -260,8 +260,12 @@ describe("schema migration", () => {
     expect(migrated.listMessages({ chatJid: ADA })[0]).toMatchObject({
       id: "OLD1", content: "from before the migration", senderName: "Ada", mediaType: "document", filename: "invoice.pdf",
       revoked: false, revokedAt: null, undecryptable: false, decryptError: null,
+      reactions: [], status: null,
     });
     expect(migrated.mediaFor("OLD1", ADA)?.mediaKeyB64).toBe("a2V5");
+    // The reactions table is new to the live store too; it has to appear on
+    // first start rather than wait for a migration entry.
+    expect(migrated.recordReaction({ chatJid: ADA, messageId: "OLD1", sender: ADA, emoji: "👍", reactedAt: at(6) })).toBe(true);
     sql.close();
   });
 
@@ -394,6 +398,103 @@ describe("lifecycle flags", () => {
     store.upsertMessage({ id: "G2", chatJid: GROUP, sender: BOB, senderName: "Bob T", content: "hi again", timestamp: at(4), isFromMe: false });
     expect(store.knownName(BOB)).toBe("Bob T");
     expect(store.knownName("447700900999@s.whatsapp.net")).toBeNull();
+  });
+});
+
+describe("reactions and receipts", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store(makeFakeSql());
+    store.upsertChat({ jid: ADA, name: "Ada", lastMessageTime: at(5) });
+    store.upsertChat({ jid: GROUP, name: "Book club", lastMessageTime: at(9) });
+    store.upsertMessage({ id: "M1", chatJid: ADA, sender: ADA, senderName: "Ada", content: "morning", timestamp: at(1), isFromMe: false });
+    store.upsertMessage({ id: "M2", chatJid: ADA, sender: ME, content: "morning yourself", timestamp: at(2), isFromMe: true });
+    store.upsertMessage({ id: "G1", chatJid: GROUP, sender: ME, content: "who is bringing wine?", timestamp: at(9), isFromMe: true });
+  });
+
+  it("attaches reactions to the message they are about, oldest first, and nothing to the rest", () => {
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: ADA, emoji: "👍", reactedAt: at(3) });
+    store.recordReaction({ chatJid: GROUP, messageId: "G1", sender: BOB, emoji: "🍷", reactedAt: at(11) });
+    store.recordReaction({ chatJid: GROUP, messageId: "G1", sender: ADA, emoji: "🙋", reactedAt: at(10) });
+    const [m2, m1] = store.listMessages({ chatJid: ADA });
+    expect(m2?.reactions).toEqual([{ sender: ADA, emoji: "👍", at: at(3) }]);
+    expect(m1?.reactions).toEqual([]);
+    expect(store.listMessages({ chatJid: GROUP })[0]?.reactions.map((r) => r.emoji)).toEqual(["🙋", "🍷"]);
+    // Every read path carries them, not only the listing.
+    expect(store.getMessageContext("M2").message?.reactions).toHaveLength(1);
+    expect(store.getLastInteraction(GROUP)?.reactions).toHaveLength(2);
+  });
+
+  it("keeps one reaction per person: a new emoji replaces, an empty one removes", () => {
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: ADA, emoji: "👍", reactedAt: at(3) });
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: ADA, emoji: "❤️", reactedAt: at(4) });
+    expect(store.listMessages({ chatJid: ADA })[0]?.reactions).toEqual([{ sender: ADA, emoji: "❤️", at: at(4) }]);
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: ADA, emoji: "", reactedAt: at(5) });
+    expect(store.listMessages({ chatJid: ADA })[0]?.reactions).toEqual([]);
+  });
+
+  it("files a reaction to a message it never held, and says so; the reaction shows once the message does", () => {
+    expect(store.recordReaction({ chatJid: ADA, messageId: "OLDER", sender: ADA, emoji: "👍", reactedAt: at(3) })).toBe(false);
+    store.upsertMessage({ id: "OLDER", chatJid: ADA, sender: ME, content: "from before", timestamp: at(0), isFromMe: true });
+    expect(store.listMessages({ chatJid: ADA, before: at(1) })[0]).toMatchObject({ id: "OLDER", reactions: [{ emoji: "👍" }] });
+  });
+
+  it("lands a reaction on the row whichever address the stanza named the chat by", () => {
+    // Our send to Ada is filed under her number; her phone reacts in a chat it
+    // knows by LID. Seen live 2026-09-28: "(message not in the store)".
+    expect(store.recordReaction({ chatJid: "199900000000111@lid", messageId: "M2", sender: ADA, emoji: "👍", reactedAt: at(3) })).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[0]?.reactions).toEqual([{ sender: ADA, emoji: "👍", at: at(3) }]);
+    // And a revoke, which has the same problem.
+    expect(store.markRevoked("199900000000111@lid", "M1", at(4), ADA)).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[1]).toMatchObject({ id: "M1", revoked: true });
+  });
+
+  it("a reactor's device suffix is dropped like every other sender", () => {
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: "447700900111:7@s.whatsapp.net", emoji: "👍", reactedAt: at(3) });
+    expect(store.listMessages({ chatJid: ADA })[0]?.reactions[0]?.sender).toBe(ADA);
+  });
+
+  it("does not count reactions as messages or move a chat's activity", () => {
+    store.recordReaction({ chatJid: ADA, messageId: "M2", sender: ADA, emoji: "👍", reactedAt: at(30) });
+    expect(store.counts().messages).toBe(3);
+    expect(store.getChat(ADA)?.lastMessageTime).toBe(at(5));
+  });
+
+  it("records how far a message got, and only ever forwards", () => {
+    expect(store.listMessages({ chatJid: ADA })[0]?.status).toBeNull();
+    expect(store.setStatus(ADA, "M2", 3)).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[0]?.status).toBe("delivered");
+    store.setStatus(ADA, "M2", 4);
+    expect(store.listMessages({ chatJid: ADA })[0]?.status).toBe("read");
+    // Receipts come out of the offline queue in whatever order it held them.
+    store.setStatus(ADA, "M2", 3);
+    expect(store.listMessages({ chatJid: ADA })[0]?.status).toBe("read");
+  });
+
+  it("finds the message whichever chat spelling the receipt used, and says when there is none", () => {
+    // A 1:1 receipt names the chat by the address the other side used — a LID here.
+    expect(store.setStatus("199900000000111@lid", "M2", 4)).toBe(true);
+    expect(store.listMessages({ chatJid: ADA })[0]?.status).toBe("read");
+    expect(store.setStatus(ADA, "NEVER", 4)).toBe(false);
+  });
+
+  it("leaves out rows that say nothing — the blank messages reactions used to be filed as — but never a tombstone or a placeholder", () => {
+    // What the live store holds from before: a reaction, filed as a message.
+    store.upsertMessage({ id: "OLD-REACTION", chatJid: ADA, sender: ADA, senderName: "Ada", timestamp: at(3), isFromMe: false });
+    store.recordRevoke({ chatJid: ADA, messageId: "GONE", revokedBy: ADA, revokedAt: at(4) }, false);
+    store.upsertMessage({ id: "UNREAD", chatJid: ADA, sender: ADA, timestamp: at(6), isFromMe: false, decryptError: "Bad MAC" });
+    const ids = store.listMessages({ chatJid: ADA }).map((m) => m.id);
+    expect(ids).toEqual(["UNREAD", "GONE", "M2", "M1"]);
+    expect(store.getLastInteraction(ADA)?.id).toBe("UNREAD");
+    expect(store.getMessageContext("M2").after.map((m) => m.id)).toEqual(["GONE", "UNREAD"]);
+    // Still there, still counted: nothing was deleted.
+    expect(store.counts().messages).toBe(6);
+  });
+
+  it("marks a message someone else sent as read once this account read it on the phone", () => {
+    store.setStatus(ADA, "M1", 4);
+    expect(store.listMessages({ chatJid: ADA })[1]).toMatchObject({ id: "M1", isFromMe: false, status: "read" });
   });
 });
 
