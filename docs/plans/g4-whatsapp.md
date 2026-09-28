@@ -276,6 +276,16 @@ on demand, which is why the first send in a while takes a few seconds.
   The blank rows already in the live store stay — nothing in the store deletes
   — but every read leaves out a row with no text, no attachment, no revoke and
   no decrypt error, which is nothing the normaliser can produce any more.
+- **A LID-addressed 1:1 chat is filed under the number.** Found live
+  2026-09-28: the first reaction arrived with its envelope naming the chat by
+  LID while the row sat under the number, and the same split had quietly made
+  two chats of every LID-addressed contact — their messages under `…@lid`, ours
+  under `4477…`. `chatOf` takes `key.remoteJidAlt`, the number Baileys reads
+  off `sender_pn`, for a message *from* the other side (on our own phone-sent
+  messages that field is our own number, so it is ignored there), and the
+  store resolves anything *about* a message — reaction, receipt, revoke — by
+  message id with the named chat preferred (`chatOfMessage`). Rows filed under
+  a LID before this stay where they are.
 - **Receipts become `messages.status`.** Baileys never upserts a receipt; it
   emits `messages.update` with a `WebMessageInfo.Status` for a 1:1 chat and
   `message-receipt.update` with per-member timestamps for a group, which the
@@ -341,7 +351,7 @@ account-wide** (3-day retention):
 | B9 chat & group lifecycle | live-tested 2026-09-19, all passing: group info (LID-addressed group, phone numbers resolved), send + revoke, rename, invite revoke, promote/demote/remove/add, archive/unarchive (app-state key present), leave, delete with `leave_first`, still-a-member refusal. One live failure: delete after a separate leave answered `forbidden` — `isMember` read the code from `output.statusCode`, but Baileys puts a stanza error's code in the Boom's `data`; fixed in `stanzaErrorCode`, **fix not yet re-run live**. Inbound revokes not exercised live. Calls made in parallel get `the bridge is busy — try again in a moment`; call the bridge sequentially |
 | B10 inbound reliability | built and unit-tested 2026-09-19: close waits for offline messages to come out of Baileys, undecryptable placeholders, `getMessage` from the store, per-kind cycle detail. Deployed 2026-09-19; inbound group messages seen arriving live with sender phone number and push name. The "live loss" that prompted it was a **false alarm** (receipts misread as messages) — this is hardening, not a fix for anything observed |
 | B11 profiles | `whatsapp_get_profile` live-tested 2026-09-19 on a personal and two business accounts: about, picture URLs, LID, business description/category/website/email/address/hours all returned; nothing stored |
-| B12 reactions & receipts | built and unit-tested 2026-09-27: reactions on their target's row, blank rows for non-messages gone, `status` from receipts, blank rows already in the store hidden from reads. **Not yet deployed or seen live** |
+| B12 reactions & receipts | deployed and live-tested 2026-09-28: a reaction from a personal number on a bridge send came through as `reactions: [{sender, emoji: 👍, at}]`, a remove-then-re-add as two stanzas landing on the same row; group sends showed `status: "read"` from `message-receipt.update`, a 1:1 send from `messages.update`; cycle detail reads `2 receipt (1 read, 1 delivered)`; 0 blank rows in the last 200 messages. The first live attempt exposed the LID split (reaction envelope `…@lid`, row under the number — "message not in the store"), fixed by `chatOf` + id-first lookup; two reactions filed under the LID before that fix stay where they are, invisible |
 | B7 pairing UX | QR-first, phone code as fallback, named device, auto-refreshing status |
 
 Paired over **QR** 2026-08-23 (device `…:3@s.whatsapp.net`) and syncing on the
