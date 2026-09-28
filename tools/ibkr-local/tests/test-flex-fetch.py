@@ -283,6 +283,55 @@ class RequestStatementTests(unittest.TestCase):
         self.assertNotIn(runtime_secret, str(error.exception))
         self.assertEqual(str(error.exception), "unable to contact the IBKR Flex service")
 
+    def _poll(self, statement_responses):
+        responses = iter(
+            [
+                "<FlexStatementResponse><Status>Success</Status><ReferenceCode>12345</ReferenceCode></FlexStatementResponse>",
+                *statement_responses,
+            ]
+        )
+        pauses = []
+        original_http_get = flex_fetch._http_get
+        flex_fetch._http_get = lambda _url: next(responses)
+        try:
+            try:
+                result = flex_fetch.request_statement(
+                    "token",
+                    "100001",
+                    date(2025, 9, 1),
+                    date(2026, 9, 25),
+                    pause=pauses.append,
+                )
+            except flex_fetch.FlexError as error:
+                result = error
+        finally:
+            flex_fetch._http_get = original_http_get
+        return result, pauses
+
+    def test_waits_through_a_slow_generation(self):
+        in_progress = "<FlexStatementResponse><ErrorCode>1019</ErrorCode></FlexStatementResponse>"
+        result, pauses = self._poll([in_progress] * 8 + [statement_xml("ACCOUNT_SYNTH_A")])
+
+        self.assertIn("<FlexQueryResponse", result)
+        self.assertEqual(pauses, [2, 4, 8, 15, 15, 15, 15, 15])
+
+    def test_generation_that_never_finishes_reports_a_timeout(self):
+        in_progress = "<FlexStatementResponse><ErrorCode>1019</ErrorCode></FlexStatementResponse>"
+        result, pauses = self._poll([in_progress] * 1000)
+
+        self.assertIsInstance(result, flex_fetch.FlexError)
+        self.assertEqual(str(result), "IBKR Flex statement generation timed out")
+        self.assertGreaterEqual(sum(pauses), flex_fetch.GENERATION_WAIT_SECONDS)
+        self.assertLess(sum(pauses), flex_fetch.GENERATION_WAIT_SECONDS + 15)
+
+    def test_other_statement_errors_are_not_retried(self):
+        result, pauses = self._poll(
+            ["<FlexStatementResponse><ErrorCode>1015</ErrorCode></FlexStatementResponse>"]
+        )
+
+        self.assertEqual(str(result), "IBKR rejected the Flex statement (code 1015)")
+        self.assertEqual(pauses, [])
+
 
 if __name__ == "__main__":
     unittest.main()

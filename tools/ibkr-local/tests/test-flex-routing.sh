@@ -109,6 +109,18 @@ if [[ "${FLEX_TEST_MODE:-success}" == fail ]]; then
   printf 'unsafe diagnostic: %s\n' "$token" >&2
   exit 1
 fi
+if [[ "${FLEX_TEST_MODE:-success}" == coded ]]; then
+  printf 'ibkr-flex-fetch: IBKR rejected the Flex statement (code 1019)\n' >&2
+  exit 1
+fi
+if [[ "${FLEX_TEST_MODE:-success}" == prefixed-leak ]]; then
+  printf 'ibkr-flex-fetch: %s\n' "$token" >&2
+  exit 1
+fi
+if [[ "${FLEX_TEST_MODE:-success}" == url-leak ]]; then
+  printf 'ibkr-flex-fetch: see https://example.invalid/GetStatement?t=x\n' >&2
+  exit 1
+fi
 printf '{"rows":[],"count":0}\n'
 EOF
 sed -i "1s|.*|#!$(command -v bash)|" "$test_root/bin/ibkr-flex-fetch"
@@ -266,6 +278,24 @@ flex_output=$(assert_failure_contains \
   "Flex history request failed for profile single-live" \
   run_wrapper flex --kind trades --profile single-live --days 30)
 [[ "$flex_output" != *"$runtime_secret"* ]] || fail "Flex helper failure leaked the runtime secret"
+[[ "$flex_output" != *"unsafe diagnostic"* ]] || fail "an unprefixed helper line was relayed"
+
+FLEX_TEST_MODE=coded
+flex_output=$(assert_failure_contains \
+  "Flex history request failed for profile single-live: IBKR rejected the Flex statement (code 1019)" \
+  run_wrapper flex --kind trades --profile single-live --days 30)
+
+FLEX_TEST_MODE=prefixed-leak
+flex_output=$(assert_failure_contains \
+  "Flex history request failed for profile single-live" \
+  run_wrapper flex --kind trades --profile single-live --days 30)
+[[ "$flex_output" != *"$runtime_secret"* ]] || fail "a prefixed helper line leaked the runtime secret"
+
+FLEX_TEST_MODE=url-leak
+flex_output=$(assert_failure_contains \
+  "Flex history request failed for profile single-live" \
+  run_wrapper flex --kind trades --profile single-live --days 30)
+[[ "$flex_output" != *"example.invalid"* ]] || fail "a helper line carrying a URL was relayed"
 unset FLEX_TEST_MODE
 
 rm -f "$CAPTURE_DIR"/*

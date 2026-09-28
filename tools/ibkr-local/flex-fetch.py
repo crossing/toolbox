@@ -19,8 +19,11 @@ from urllib.request import Request, urlopen
 
 FLEX_BASE_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 MAX_CHUNK_DAYS = 365
-MAX_ATTEMPTS = 5
-RETRY_DELAY_SECONDS = 2
+# GetStatement answers 1019 while IBKR is still generating the statement.  A year-long
+# activity query takes well over the few seconds a short window does, so poll with a
+# growing delay up to a total wait, rather than a fixed handful of attempts.
+GENERATION_POLL_DELAYS_SECONDS = (2, 4, 8, 15)
+GENERATION_WAIT_SECONDS = 240
 HTTP_TIMEOUT_SECONDS = 30
 CHUNK_REQUEST_DELAY_SECONDS = 6
 
@@ -267,7 +270,13 @@ def _response_value(xml: str, name: str) -> str | None:
     return None
 
 
-def request_statement(token: str, query_id: str, start: date, end: date) -> str:
+def request_statement(
+    token: str,
+    query_id: str,
+    start: date,
+    end: date,
+    pause: Callable[[float], None] = time.sleep,
+) -> str:
     """Run the two-step Flex Web Service request for one date chunk."""
     request_query = urlencode(
         {
@@ -290,21 +299,28 @@ def request_statement(token: str, query_id: str, start: date, end: date) -> str:
         raise FlexError(f"IBKR rejected the Flex request{suffix}")
 
     statement_query = urlencode({"q": reference_code, "t": token, "v": "3"})
-    for attempt in range(MAX_ATTEMPTS):
+    waited = 0.0
+    attempt = 0
+    while True:
         try:
             statement = _http_get(f"{FLEX_BASE_URL}/GetStatement?{statement_query}")
         except Exception:
             raise FlexError("unable to contact the IBKR Flex service") from None
         error_code = _response_value(statement, "ErrorCode")
-        if error_code == "1019" and attempt + 1 < MAX_ATTEMPTS:
-            time.sleep(RETRY_DELAY_SECONDS)
+        if error_code == "1019":
+            if waited >= GENERATION_WAIT_SECONDS:
+                raise FlexError("IBKR Flex statement generation timed out")
+            delay = GENERATION_POLL_DELAYS_SECONDS[
+                min(attempt, len(GENERATION_POLL_DELAYS_SECONDS) - 1)
+            ]
+            pause(delay)
+            waited += delay
+            attempt += 1
             continue
         if error_code:
             suffix = f" (code {error_code})" if error_code.isdigit() else ""
             raise FlexError(f"IBKR rejected the Flex statement{suffix}")
         return statement
-
-    raise FlexError("IBKR Flex statement generation timed out")
 
 
 def _parse_iso_date(value: str, option: str) -> date:
