@@ -72,7 +72,7 @@ confirmation, and never infer a quantity the user did not state.
 
 ### Bonds and other identifier-based instruments
 
-`bars`, `order-preview` and `order-prepare` take `--sec-type STK|BOND` (default `STK`) plus
+`bars`, `order-preview` and `order-prepare` take `--sec-type STK|BOND|CASH` (default `STK`) plus
 `--conid ID` and/or `--isin ISIN`. A bond (for example a UK gilt) must be named by conId or
 ISIN; IBKR does not resolve bonds by ticker. With either identifier the positional SYMBOL
 is only a label. Pass the currency the bond is denominated in (`--currency GBP` for a gilt).
@@ -100,6 +100,42 @@ With `--isin`, the lookup is sent without an exchange (IBKR matches no ISIN once
 named) and `--exchange` is then checked against the bond's valid exchanges and applied
 for routing. `bars` for a bond returns no rows with the default `TRADES` (IBKR error
 162); use `--what-to-show MIDPOINT`, `BID` or `ASK`.
+
+### Currency conversion
+
+A currency conversion is cash housekeeping, placed as a slippage-capped marketable limit
+order on IBKR's IDEALPRO FX venue. Name it with `--sec-type CASH` and a pair SYMBOL.
+IBKR lists each pair once: `GBP.USD` exists and `USD.GBP` does not.
+
+| Want | Order |
+|---|---|
+| USD -> GBP | `buy GBP.USD` |
+| GBP -> USD | `sell GBP.USD` |
+
+The quantity is in the base currency (GBP for `GBP.USD`) and must be a multiple of 0.01;
+the price is quote currency per unit of base (USD per GBP).
+
+```bash
+ibkr order-prepare buy GBP.USD 5000 --profile main-live --account U00000001 \
+  --sec-type CASH --max-slippage-bps 20
+```
+
+You do not choose the price. `order-prepare` reads the latest 1-minute MIDPOINT bar as the
+reference rate and derives the limit: BUY at reference x (1 + bps/10000) rounded down to
+the tick, SELL at reference x (1 - bps/10000) rounded up. `--max-slippage-bps` defaults to
+20 and is refused above 50 or below 1. A `--limit` is accepted only inside the band
+(between the reference and the capped limit, on the tick). The reference must be at most
+15 minutes old; FX is closed at weekends, so outside market hours the command refuses
+rather than trade on a stale rate. `--outside-rth` stays refused: FX has no RTH session
+and does not need it.
+
+The ticket records the pair, conId, reference rate and time, cap and band under
+`order.fx`. `order-submit` sends it by that conId and refuses a ticket whose pair, conId
+or limit no longer matches the recorded band. Show the user the pair, side, quantity,
+reference rate, limit and cap before asking for approval.
+
+`bars` for a pair defaults to `MIDPOINT` (IBKR has no `TRADES` history for FX):
+`ibkr bars GBP.USD --sec-type CASH --bar-size '1 min' --all-hours`.
 
 ## Gateway not responding
 

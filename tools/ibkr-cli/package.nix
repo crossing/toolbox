@@ -40,6 +40,9 @@ let
       # con_id on every `orders executions` row, so a fill names its instrument exactly
       # rather than by a ticker that cannot tell one gilt from another.
       ./patches/execution-contract-id.patch
+      # --sec-type CASH on buy, sell and bars: a currency pair such as GBP.USD on IDEALPRO,
+      # resolved by pair or conId; bars default to MIDPOINT, since FX has no TRADES history.
+      ./patches/fx-contracts.patch
     ];
   };
 

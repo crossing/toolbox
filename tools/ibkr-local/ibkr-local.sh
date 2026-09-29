@@ -27,10 +27,15 @@ Flex history options:
   -d, --days DAYS          Lookback ending today (default 365)
 
 Instrument options (bars, order-preview, order-prepare):
-  --sec-type TYPE          STK (default, resolved by ticker) or BOND
+  --sec-type TYPE          STK (default, resolved by ticker), BOND or CASH
   --conid ID               IBKR contract id; SYMBOL becomes a label only
   --isin ISIN              Resolve via secIdType=ISIN; SYMBOL becomes a label only
                            BOND requires --conid or --isin
+                           CASH takes a pair SYMBOL such as GBP.USD on IDEALPRO
+
+Currency conversion (order-prepare --sec-type CASH):
+  --max-slippage-bps N     Cap on the derived limit, 1-50 (default 20); the limit is
+                           derived from a fresh MIDPOINT rate, --limit must lie in the band
 
 Commands:
   doctor                   JSON connectivity/config diagnostic
@@ -56,6 +61,7 @@ Examples:
   ibkr flex --kind trades --profile main-live --flex-query tax-activity --account U1234567 --from 2025-04-06 --to 2026-04-05
   ibkr order-preview buy AAPL 1 --profile main-paper --limit 100 --json
   ibkr order-preview buy TN28 10 --profile main-paper --currency GBP --sec-type BOND --isin GB00BMBL1G81 --type LMT --limit 95
+  ibkr order-prepare buy GBP.USD 1000 --profile main-paper --account U1234567 --sec-type CASH --max-slippage-bps 20
 USAGE
 }
 
