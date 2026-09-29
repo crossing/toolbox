@@ -227,6 +227,13 @@ class FetchRawTests(unittest.TestCase):
             )
 
 
+ACCEPTED = "<FlexStatementResponse><Status>Success</Status><ReferenceCode>12345</ReferenceCode></FlexStatementResponse>"
+
+
+def flex_error(code):
+    return f"<FlexStatementResponse><Status>Fail</Status><ErrorCode>{code}</ErrorCode></FlexStatementResponse>"
+
+
 class RequestStatementTests(unittest.TestCase):
     def test_uses_exact_from_and_to_overrides(self):
         runtime_secret = secrets.token_urlsafe(24)
@@ -284,12 +291,10 @@ class RequestStatementTests(unittest.TestCase):
         self.assertEqual(str(error.exception), "unable to contact the IBKR Flex service")
 
     def _poll(self, statement_responses):
-        responses = iter(
-            [
-                "<FlexStatementResponse><Status>Success</Status><ReferenceCode>12345</ReferenceCode></FlexStatementResponse>",
-                *statement_responses,
-            ]
-        )
+        return self._exchange([ACCEPTED], statement_responses)
+
+    def _exchange(self, request_responses, statement_responses):
+        responses = iter([*request_responses, *statement_responses])
         pauses = []
         original_http_get = flex_fetch._http_get
         flex_fetch._http_get = lambda _url: next(responses)
@@ -331,6 +336,49 @@ class RequestStatementTests(unittest.TestCase):
 
         self.assertEqual(str(result), "IBKR rejected the Flex statement (code 1015)")
         self.assertEqual(pauses, [])
+
+
+    def test_retries_a_rate_limited_request(self):
+        result, pauses = self._exchange(
+            [flex_error("1018"), ACCEPTED], [statement_xml("ACCOUNT_SYNTH_A")]
+        )
+
+        self.assertIn("<FlexQueryResponse", result)
+        self.assertEqual(pauses, [15])
+
+    def test_request_that_stays_busy_reports_it_after_retrying(self):
+        result, pauses = self._exchange([flex_error("1001")] * 1000, [])
+
+        self.assertIsInstance(result, flex_fetch.FlexError)
+        self.assertEqual(
+            str(result), "IBKR rejected the Flex request (code 1001) after retrying"
+        )
+        self.assertEqual(pauses, [15, 30, 60, 45])
+        self.assertEqual(sum(pauses), flex_fetch.BUSY_RETRY_WAIT_SECONDS)
+
+    def test_other_request_errors_are_not_retried(self):
+        result, pauses = self._exchange([flex_error("1015")], [])
+
+        self.assertEqual(str(result), "IBKR rejected the Flex request (code 1015)")
+        self.assertEqual(pauses, [])
+
+    def test_busy_statement_retries_against_its_own_budget(self):
+        result, pauses = self._poll(
+            [flex_error("1018"), flex_error("1019"), statement_xml("ACCOUNT_SYNTH_A")]
+        )
+
+        self.assertIn("<FlexQueryResponse", result)
+        self.assertEqual(pauses, [15, 2])
+
+    def test_statement_that_stays_busy_reports_it_after_retrying(self):
+        result, pauses = self._poll([flex_error("1018")] * 1000)
+
+        self.assertIsInstance(result, flex_fetch.FlexError)
+        self.assertEqual(
+            str(result), "IBKR rejected the Flex statement (code 1018) after retrying"
+        )
+        self.assertEqual(pauses, [15, 30, 60, 45])
+        self.assertEqual(sum(pauses), flex_fetch.BUSY_RETRY_WAIT_SECONDS)
 
 
 if __name__ == "__main__":
