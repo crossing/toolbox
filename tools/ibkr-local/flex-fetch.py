@@ -24,6 +24,14 @@ MAX_CHUNK_DAYS = 365
 # growing delay up to a total wait, rather than a fixed handful of attempts.
 GENERATION_POLL_DELAYS_SECONDS = (2, 4, 8, 15)
 GENERATION_WAIT_SECONDS = 240
+# 1001 (statement could not be generated, try again shortly) and 1018 (too many requests)
+# are transient.  Retry them at either step with a backoff, against a busy budget that is
+# separate from the generation budget.  The last busy delay is trimmed to the budget, so the
+# worst case per chunk is 150 + about 255 + 150 s of waiting; a one-chunk run must stay under
+# the investment framework caller's 600 s subprocess timeout (flex_capture.py _TIMEOUT_SECONDS).
+RETRYABLE_ERROR_CODES = frozenset({"1001", "1018"})
+BUSY_RETRY_DELAYS_SECONDS = (15, 30, 60)
+BUSY_RETRY_WAIT_SECONDS = 150
 HTTP_TIMEOUT_SECONDS = 30
 CHUNK_REQUEST_DELAY_SECONDS = 6
 
@@ -270,6 +278,11 @@ def _response_value(xml: str, name: str) -> str | None:
     return None
 
 
+def _busy_delay(attempt: int, waited: float) -> float:
+    delay = BUSY_RETRY_DELAYS_SECONDS[min(attempt, len(BUSY_RETRY_DELAYS_SECONDS) - 1)]
+    return min(delay, BUSY_RETRY_WAIT_SECONDS - waited)
+
+
 def request_statement(
     token: str,
     query_id: str,
@@ -287,20 +300,36 @@ def request_statement(
             "td": end.strftime("%Y%m%d"),
         }
     )
-    try:
-        response = _http_get(f"{FLEX_BASE_URL}/SendRequest?{request_query}")
-    except Exception:
-        raise FlexError("unable to contact the IBKR Flex service") from None
+    waited = 0.0
+    attempt = 0
+    while True:
+        try:
+            response = _http_get(f"{FLEX_BASE_URL}/SendRequest?{request_query}")
+        except Exception:
+            raise FlexError("unable to contact the IBKR Flex service") from None
 
-    reference_code = _response_value(response, "ReferenceCode")
-    if not reference_code:
+        reference_code = _response_value(response, "ReferenceCode")
+        if reference_code:
+            break
         error_code = _response_value(response, "ErrorCode")
+        if error_code in RETRYABLE_ERROR_CODES:
+            if waited >= BUSY_RETRY_WAIT_SECONDS:
+                raise FlexError(
+                    f"IBKR rejected the Flex request (code {error_code}) after retrying"
+                )
+            delay = _busy_delay(attempt, waited)
+            pause(delay)
+            waited += delay
+            attempt += 1
+            continue
         suffix = f" (code {error_code})" if error_code and error_code.isdigit() else ""
         raise FlexError(f"IBKR rejected the Flex request{suffix}")
 
     statement_query = urlencode({"q": reference_code, "t": token, "v": "3"})
     waited = 0.0
     attempt = 0
+    busy_waited = 0.0
+    busy_attempt = 0
     while True:
         try:
             statement = _http_get(f"{FLEX_BASE_URL}/GetStatement?{statement_query}")
@@ -316,6 +345,16 @@ def request_statement(
             pause(delay)
             waited += delay
             attempt += 1
+            continue
+        if error_code in RETRYABLE_ERROR_CODES:
+            if busy_waited >= BUSY_RETRY_WAIT_SECONDS:
+                raise FlexError(
+                    f"IBKR rejected the Flex statement (code {error_code}) after retrying"
+                )
+            delay = _busy_delay(busy_attempt, busy_waited)
+            pause(delay)
+            busy_waited += delay
+            busy_attempt += 1
             continue
         if error_code:
             suffix = f" (code {error_code})" if error_code.isdigit() else ""
