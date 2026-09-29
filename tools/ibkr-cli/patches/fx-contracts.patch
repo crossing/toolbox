@@ -1,0 +1,242 @@
+diff --git a/src/ibkr_cli/app.py b/src/ibkr_cli/app.py
+index 7747811..471751d 100644
+--- a/src/ibkr_cli/app.py
++++ b/src/ibkr_cli/app.py
+@@ -972,7 +972,7 @@ def buy(
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
+-    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default), BOND or CASH. BOND requires --conid or --isin; CASH takes a pair such as GBP.USD (quantity in the base currency) or --conid."),
+     con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
+     isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     order_type: str = typer.Option("MKT", "--type", help="Order type: MKT, LMT, STP, STP LMT, or TRAIL."),
+@@ -1006,7 +1006,7 @@ def sell(
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
+-    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default), BOND or CASH. BOND requires --conid or --isin; CASH takes a pair such as GBP.USD (quantity in the base currency) or --conid."),
+     con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
+     isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     order_type: str = typer.Option("MKT", "--type", help="Order type: MKT, LMT, STP, STP LMT, or TRAIL."),
+@@ -1198,13 +1198,13 @@ def bars(
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
+-    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default), BOND or CASH. BOND requires --conid or --isin; CASH takes a pair such as GBP.USD (quantity in the base currency) or --conid."),
+     con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
+     isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     end: str = typer.Option("", "--end", help="End timestamp, for example '20260317 16:00:00'. Empty means now."),
+     duration: str = typer.Option("1 D", "--duration", help="Historical duration, for example '1 D' or '2 W'."),
+     bar_size: str = typer.Option("5 mins", "--bar-size", help="Bar size, for example '1 min' or '1 day'."),
+-    what_to_show: str = typer.Option("TRADES", "--what-to-show", help="Historical source, for example TRADES or MIDPOINT."),
++    what_to_show: Optional[str] = typer.Option(None, "--what-to-show", help="Historical source, for example TRADES or MIDPOINT. Default TRADES; MIDPOINT for CASH, which has no TRADES history."),
+     use_rth: bool = typer.Option(True, "--rth/--all-hours", help="Use regular trading hours only."),
+     timeout: float = typer.Option(10.0, "--timeout", min=0.1, help="API timeout in seconds."),
+     json_output: bool = typer.Option(False, "--json", help="Output JSON instead of a table."),
+diff --git a/src/ibkr_cli/ib_service.py b/src/ibkr_cli/ib_service.py
+index 1346a2d..027a27c 100644
+--- a/src/ibkr_cli/ib_service.py
++++ b/src/ibkr_cli/ib_service.py
+@@ -696,10 +696,15 @@ _SUPPORTED_ORDER_TYPES = ("MKT", "LMT", "STP", "STP LMT", "TRAIL")
+ 
+ # Security types a caller may request. STK keeps the historical ticker-based lookup; every
+ # other type must name the instrument by conId or ISIN, because IBKR does not resolve those
+-# by ticker (a gilt's "symbol" matches every gilt).
+-SUPPORTED_SEC_TYPES = ("STK", "BOND")
++# by ticker (a gilt's "symbol" matches every gilt). CASH (a currency pair on IDEALPRO) is
++# named by its pair, for example GBP.USD, or by --conid.
++SUPPORTED_SEC_TYPES = ("STK", "BOND", "CASH")
+ _IDENTIFIER_REQUIRED_SEC_TYPES = ("BOND",)
+ _ISIN_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
++_FX_EXCHANGE = "IDEALPRO"
++_FX_PAIR_PATTERN = re.compile(r"^([A-Z]{3})\.([A-Z]{3})$")
++# IBKR keeps no TRADES history for currency pairs.
++_FX_WHAT_TO_SHOW = ("MIDPOINT", "BID", "ASK", "BID_ASK")
+ 
+ 
+ def _isin_check_digit_ok(isin: str) -> bool:
+@@ -738,9 +743,64 @@ def normalize_contract_request(
+             f"{normalized_sec_type} contracts must be identified with --conid or --isin; "
+             "IBKR does not resolve them by ticker."
+         )
++    if normalized_sec_type == "CASH" and normalized_isin is not None:
++        raise ValueError("CASH contracts are named by currency pair (for example GBP.USD) or --conid, not --isin.")
+     return normalized_sec_type, con_id, normalized_isin
+ 
+ 
++def normalize_fx_request(
++    symbol: str,
++    exchange: str,
++    currency: str,
++    con_id: Optional[int] = None,
++) -> Tuple[Optional[str], str, str]:
++    """Split a CASH pair such as GBP.USD into (base, quote) and pin the exchange to IDEALPRO.
++
++    IBKR lists each pair once: GBP.USD exists and USD.GBP does not, so converting USD into
++    GBP is a BUY of GBP.USD. The quantity is in the base currency and the price is quote
++    currency per unit of base. Without a pair the instrument must be named by --conid.
++    """
++    pair = (symbol or "").strip().upper()
++    match = _FX_PAIR_PATTERN.match(pair)
++    quote_currency = (currency or "").strip().upper()
++    base: Optional[str] = None
++    if match:
++        base, quote = match.group(1), match.group(2)
++        if base == quote:
++            raise ValueError(f"'{symbol}' is not a currency pair.")
++        if quote_currency and quote_currency != quote:
++            raise ValueError(
++                f"--currency {quote_currency} does not match the quote currency of {pair}; pass --currency {quote}."
++            )
++        quote_currency = quote
++    elif con_id is None:
++        raise ValueError(
++            f"CASH contracts must be named by currency pair, for example GBP.USD, or by --conid; got '{symbol}'."
++        )
++    if not quote_currency:
++        raise ValueError("CASH contracts need a quote currency.")
++    normalized_exchange = (exchange or "").strip().upper()
++    if normalized_exchange in ("", "SMART"):
++        normalized_exchange = _FX_EXCHANGE
++    if normalized_exchange != _FX_EXCHANGE:
++        raise ValueError(f"CASH contracts trade only on {_FX_EXCHANGE}, not '{exchange}'.")
++    return base, quote_currency, normalized_exchange
++
++
++def validate_contract_selector(
++    symbol: str,
++    exchange: str,
++    currency: str,
++    sec_type: Optional[str] = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> None:
++    """Reject a malformed selector, including a malformed CASH pair, before any Gateway session."""
++    normalized_sec_type, con_id, _ = normalize_contract_request(sec_type, con_id, isin)
++    if normalized_sec_type == "CASH":
++        normalize_fx_request(symbol, exchange, currency, con_id)
++
++
+ def _build_contract(
+     symbol: str,
+     exchange: str,
+@@ -761,6 +821,15 @@ def _build_contract(
+         # Unchanged historical behaviour: a stock resolved by ticker.
+         return Stock(symbol=symbol.upper(), exchange=exchange, currency=currency)
+ 
++    if normalized_sec_type == "CASH":
++        base, quote, fx_exchange = normalize_fx_request(symbol, exchange, currency, con_id)
++        fx_fields: Dict[str, object] = dict(secType="CASH", exchange=fx_exchange, currency=quote)
++        if base is not None:
++            fx_fields["symbol"] = base
++        if con_id is not None:
++            fx_fields["conId"] = con_id
++        return Contract(**fx_fields)
++
+     # Identifier-based lookup. The positional symbol is deliberately left out: a caller's
+     # label must never widen or redirect which instrument IBKR resolves.
+     fields: Dict[str, object] = dict(secType=normalized_sec_type, currency=currency)
+@@ -783,6 +852,8 @@ def _describe_contract_request(
+     isin: Optional[str] = None,
+ ) -> str:
+     parts = []
++    if (sec_type or "STK").upper() == "CASH" and _FX_PAIR_PATTERN.match((symbol or "").strip().upper()):
++        parts.append(f"pair {symbol.strip().upper()}")
+     if con_id is not None:
+         parts.append(f"conId {con_id}")
+     if isin:
+@@ -844,6 +915,26 @@ def _qualify_contract(
+     if con_id is not None and resolved.conId != con_id:
+         raise RuntimeError(f"IBKR resolved conId {resolved.conId}, not the requested {description}.")
+ 
++    fx_instrument: Dict[str, object] = {}
++    if normalized_sec_type == "CASH":
++        base, quote, exchange = normalize_fx_request(symbol, exchange, currency, con_id)
++        resolved_symbol = (getattr(resolved, "symbol", "") or "").upper()
++        resolved_currency = (getattr(resolved, "currency", "") or "").upper()
++        if base is not None and (resolved_symbol, resolved_currency) != (base, quote):
++            raise RuntimeError(
++                f"IBKR resolved {resolved_symbol}.{resolved_currency}, not the requested {description}."
++            )
++        if base is None and resolved_currency != quote:
++            raise RuntimeError(
++                f"IBKR resolved {resolved_symbol}.{resolved_currency}, whose quote currency is not {quote}."
++            )
++        fx_instrument = {
++            "pair": f"{resolved_symbol}.{resolved_currency}",
++            "min_tick": _normalize_number(getattr(details, "minTick", None)),
++            "min_size": _normalize_number(getattr(details, "minSize", None)),
++            "size_increment": _normalize_number(getattr(details, "sizeIncrement", None)),
++        }
++
+     resolved_isins = [
+         tag.value for tag in (getattr(details, "secIdList", None) or [])
+         if getattr(tag, "tag", "") == "ISIN" and getattr(tag, "value", "")
+@@ -866,6 +957,7 @@ def _qualify_contract(
+         "description": getattr(details, "descAppend", "") or getattr(details, "longName", "") or None,
+         "isin": resolved_isins[0] if resolved_isins else isin,
+         "valid_exchanges": valid_exchanges,
++        **fx_instrument,
+     }
+     return resolved, instrument
+ 
+@@ -1115,7 +1207,7 @@ def preview_stock_order(
+     is_bracket = take_profit_price is not None or stop_loss_price is not None
+     contract_selector = dict(sec_type=sec_type, con_id=con_id, isin=isin)
+     # Reject a malformed selector before opening a Gateway session.
+-    normalize_contract_request(**contract_selector)
++    validate_contract_selector(symbol, exchange, currency, **contract_selector)
+     with ib_session(profile, timeout=timeout, readonly=False) as ib:
+         if is_bracket:
+             if take_profit_price is None or stop_loss_price is None:
+@@ -1234,7 +1326,7 @@ def submit_stock_order(
+     is_bracket = take_profit_price is not None or stop_loss_price is not None
+     contract_selector = dict(sec_type=sec_type, con_id=con_id, isin=isin)
+     # Reject a malformed selector before opening a Gateway session.
+-    normalize_contract_request(**contract_selector)
++    validate_contract_selector(symbol, exchange, currency, **contract_selector)
+     with ib_session(profile, timeout=timeout, readonly=False) as ib:
+         if is_bracket:
+             if take_profit_price is None or stop_loss_price is None:
+@@ -1641,6 +1733,20 @@ def watch_quote(
+         }
+ 
+ 
++def resolve_what_to_show(sec_type: Optional[str], what_to_show: Optional[str]) -> str:
++    """TRADES stays the default for stocks and bonds; a currency pair has no TRADES history,
++    so CASH defaults to MIDPOINT and refuses TRADES rather than returning no rows."""
++    is_fx = (sec_type or "STK").strip().upper() == "CASH"
++    if what_to_show is None or not what_to_show.strip():
++        return "MIDPOINT" if is_fx else "TRADES"
++    normalized = what_to_show.strip().upper()
++    if is_fx and normalized not in _FX_WHAT_TO_SHOW:
++        raise ValueError(
++            f"CASH pairs have no {normalized} history; use --what-to-show {', '.join(_FX_WHAT_TO_SHOW)}."
++        )
++    return normalized
++
++
+ def get_historical_bars(
+     profile: ProfileConfig,
+     symbol: str,
+@@ -1649,14 +1755,15 @@ def get_historical_bars(
+     end: str = "",
+     duration: str = "1 D",
+     bar_size: str = "5 mins",
+-    what_to_show: str = "TRADES",
++    what_to_show: Optional[str] = None,
+     use_rth: bool = True,
+     timeout: float = 10.0,
+     sec_type: str = "STK",
+     con_id: Optional[int] = None,
+     isin: Optional[str] = None,
+ ) -> Dict[str, object]:
+-    normalize_contract_request(sec_type, con_id, isin)
++    validate_contract_selector(symbol, exchange, currency, sec_type, con_id, isin)
++    what_to_show = resolve_what_to_show(sec_type, what_to_show)
+     with ib_session(profile, timeout=timeout) as ib:
+         qualified_contract, instrument = _qualify_contract(
+             ib, symbol, exchange, currency, sec_type=sec_type, con_id=con_id, isin=isin

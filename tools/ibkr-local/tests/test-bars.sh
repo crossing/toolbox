@@ -88,6 +88,12 @@ run_bars UKT --profile main-live --sec-type BOND --conid 900000001 >/dev/null
 grep -Fq -- '--sec-type BOND --conid 900000001' "$test_root/args" \
   || { printf 'FAIL: --conid was not forwarded on bars\n' >&2; exit 1; }
 
+# A currency pair is forwarded as given; upstream resolves it on IDEALPRO and defaults
+# CASH history to MIDPOINT.
+run_bars GBP.USD --profile main-live --sec-type CASH --conid 12087797 --all-hours >/dev/null
+grep -Fq -- 'bars GBP.USD --sec-type CASH --conid 12087797 --all-hours' "$test_root/args" \
+  || { printf 'FAIL: CASH selector was not forwarded on bars\n' >&2; exit 1; }
+
 with_notice=$(FAKE_IBKR_NOTICE=1 run_bars META --profile main-live)
 [[ "$(jq -r '.bars | length' <<<"$with_notice")" == 2 ]] \
   || { printf 'FAIL: upgrade banner was not stripped before the JSON\n' >&2; exit 1; }
