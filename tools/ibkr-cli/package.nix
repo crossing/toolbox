@@ -37,6 +37,9 @@ let
       # --sec-type/--conid/--isin on buy, sell and bars, so a BOND (e.g. a gilt) can be
       # resolved by conId or ISIN rather than by ticker.
       ./patches/bond-contracts.patch
+      # con_id on every `orders executions` row, so a fill names its instrument exactly
+      # rather than by a ticker that cannot tell one gilt from another.
+      ./patches/execution-contract-id.patch
     ];
   };
 

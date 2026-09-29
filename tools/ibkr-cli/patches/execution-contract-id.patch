@@ -1,0 +1,33 @@
+diff --git a/src/ibkr_cli/ib_service.py b/src/ibkr_cli/ib_service.py
+index 7f0d147..3b0b008 100644
+--- a/src/ibkr_cli/ib_service.py
++++ b/src/ibkr_cli/ib_service.py
+@@ -618,6 +618,17 @@ def get_completed_orders(
+         }
+ 
+ 
++def _execution_con_id(contract: object) -> Optional[int]:
++    value = getattr(contract, "conId", None)
++    if isinstance(value, bool):
++        return None
++    try:
++        con_id = int(value)
++    except (TypeError, ValueError):
++        return None
++    return con_id if con_id > 0 else None
++
++
+ def get_executions(
+     profile: ProfileConfig,
+     timeout: float = 4.0,
+@@ -645,6 +656,10 @@ def get_executions(
+                     "order_id": execution.orderId,
+                     "perm_id": execution.permId,
+                     "client_id": execution.clientId,
++                    # IBKR's contract id is the one identifier that names the instrument
++                    # exactly; symbol/local_symbol cannot tell one gilt from another. conId 0
++                    # is IBKR's "unset", reported as null rather than as a fake identifier.
++                    "con_id": _execution_con_id(contract),
+                     "symbol": contract.symbol,
+                     "local_symbol": contract.localSymbol,
+                     "sec_type": contract.secType,

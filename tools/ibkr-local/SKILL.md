@@ -21,6 +21,11 @@ ibkr positions  --profile main-live
 ibkr executions --profile main-live --json
 ```
 
+Each `executions` row carries `con_id` (IBKR's contract id; `null` when IBKR leaves it
+unset) and `perm_id`. Prefer `perm_id` over `order_id` as an order key: `order_id` is
+per-client-session and repeats across separate `ibkr` invocations, while `perm_id` is
+unique per order across the account.
+
 Profiles select which Gateway (and therefore which account set and API port) to talk
 to. Never guess one — read it from the caller's configuration.
 
