@@ -26,6 +26,12 @@ Flex history options:
   --to YYYY-MM-DD          Last report date, inclusive (requires --from)
   -d, --days DAYS          Lookback ending today (default 365)
 
+Instrument options (bars, order-preview, order-prepare):
+  --sec-type TYPE          STK (default, resolved by ticker) or BOND
+  --conid ID               IBKR contract id; SYMBOL becomes a label only
+  --isin ISIN              Resolve via secIdType=ISIN; SYMBOL becomes a label only
+                           BOND requires --conid or --isin
+
 Commands:
   doctor                   JSON connectivity/config diagnostic
   connect                  JSON TCP/API connectivity test
@@ -49,6 +55,7 @@ Examples:
   ibkr flex --profile main-live --flex-query nav-daily --json
   ibkr flex --kind trades --profile main-live --flex-query tax-activity --account U1234567 --from 2025-04-06 --to 2026-04-05
   ibkr order-preview buy AAPL 1 --profile main-paper --limit 100 --json
+  ibkr order-preview buy TN28 10 --profile main-paper --currency GBP --sec-type BOND --isin GB00BMBL1G81 --type LMT --limit 95
 USAGE
 }
 

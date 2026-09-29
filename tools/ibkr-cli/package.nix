@@ -32,7 +32,12 @@ let
 
   patched-src-with-lock = applyPatches {
     src = src-with-lock;
-    patches = [ ./patches/position-data.patch ];
+    patches = [
+      ./patches/position-data.patch
+      # --sec-type/--conid/--isin on buy, sell and bars, so a BOND (e.g. a gilt) can be
+      # resolved by conId or ISIN rather than by ticker.
+      ./patches/bond-contracts.patch
+    ];
   };
 
   workspace = uv2nix.lib.workspace.loadWorkspace {
@@ -59,6 +64,10 @@ writeShellApplication {
   text = ''
     exec python -m ibkr_cli.app "$@"
   '';
+
+  # The virtualenv holds the patched ibkr_cli package, so checks/ibkr-cli can run the
+  # Python unit tests against exactly what ships.
+  passthru = { inherit env; };
 
   # Keep this grouped with the Gateway-backed IBKR tools. The public flake has
   # intentionally never exported any of them on Darwin.

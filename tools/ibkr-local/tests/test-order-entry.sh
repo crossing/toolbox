@@ -69,9 +69,19 @@ if [[ "${FAKE_PREAMBLE:-0}" == "1" ]]; then
   printf 'A new version 0.7.2 is available (current: 0.7.1). Run "ibkr update" to upgrade.\n'
 fi
 
+sec_type=STK
+con_id=265598
+case " $* " in
+  *' --sec-type BOND '*)
+    sec_type=BOND
+    con_id=${FAKE_BOND_CONID:-900000001}
+    FAKE_ISIN=${FAKE_ISIN:-'"GB00BMBL1G81"'}
+    ;;
+esac
+
 case " $* " in
   *' --preview '*)
-    cat <<'JSON'
+    cat <<JSON
 {
   "profile": "main-live",
   "preview_only": true,
@@ -81,8 +91,9 @@ case " $* " in
   "exchange": "SMART",
   "primary_exchange": "NASDAQ",
   "currency": "USD",
-  "sec_type": "STK",
-  "con_id": 265598,
+  "sec_type": "$sec_type",
+  "con_id": $con_id,
+  "isin": ${FAKE_ISIN:-null},
   "status": "PreSubmitted",
   "commission": 1,
   "min_commission": 1,
@@ -267,6 +278,75 @@ run_lifecycle_tests() {
   printf 'PASS: guarded order submit and cancel lifecycle\n'
 }
 
+# Bonds are named by conId or ISIN. The selector reaches the preview, is recorded in the
+# ticket, and submission is pinned to the conId the preview resolved -- never re-resolved
+# from the ISIN. A plain STK ticker order forwards no selector at all.
+run_bond_tests() {
+  : >"$FAKE_LOG"
+  export FAKE_MODE=success
+  local isin=GB00BMBL1G81 ticket_json ticket_id ticket submit_line
+
+  expect_fail order-prepare buy UKT 100 --profile main-live --account TEST123 --type LMT --limit 90 \
+    --sec-type BOND
+  grep -q 'BOND orders require --conid or --isin' "$test_root/expected.err"
+  expect_fail order-prepare buy UKT 100 --profile main-live --account TEST123 --type LMT --limit 90 \
+    --sec-type OPT --conid 1
+  expect_fail order-prepare buy UKT 100 --profile main-live --account TEST123 --type LMT --limit 90 \
+    --sec-type BOND --isin NOT-AN-ISIN
+  expect_fail order-prepare buy UKT 100 --profile main-live --account TEST123 --type LMT --limit 90 \
+    --sec-type BOND --conid 0
+  [[ ! -s "$FAKE_LOG" ]] || { echo 'FAIL: invalid selector reached upstream' >&2; return 1; }
+
+  # The broker resolved a different instrument than the conId asked for.
+  expect_fail order-prepare buy UKT 100 --profile main-live --account TEST123 --type LMT --limit 90 \
+    --sec-type BOND --conid 900000002
+  grep -q 'did not confirm the requested instrument' "$test_root/expected.err"
+  # ... or a different ISIN than the one requested.
+  FAKE_ISIN='"GB00BMBL1F74"' expect_fail order-prepare buy UKT 100 --profile main-live \
+    --account TEST123 --type LMT --limit 90 --sec-type BOND --isin GB00BMBL1G81
+  grep -q 'did not confirm the requested instrument' "$test_root/expected.err"
+
+  : >"$FAKE_LOG"
+  ticket_json=$(run_cli order-prepare buy UKT 100 --profile main-live --account TEST123 \
+    --currency GBP --sec-type bond --isin "${isin,,}" --type LMT --limit 90)
+  ticket_id=$(jq -er '.ticketId' <<<"$ticket_json")
+  ticket="$XDG_RUNTIME_DIR/ibkr-local/order-tickets/prepared/$ticket_id.json"
+  grep -q -- "--currency GBP --sec-type BOND --isin $isin --type LMT" "$FAKE_LOG"
+  jq -e --arg isin "$isin" '
+    .order.secType == "BOND" and .order.isin == $isin and .order.conId == null
+    and .contract.secType == "BOND" and .contract.conId == 900000001
+    and .contract.isin == $isin
+  ' "$ticket" >/dev/null
+
+  run_cli order-submit "$ticket_id" --confirm "$ticket_id" >/dev/null
+  submit_line=$(grep -- '--submit' "$FAKE_LOG")
+  grep -q -- '--sec-type BOND --conid 900000001 --type LMT' <<<"$submit_line"
+  if grep -q -- '--isin' <<<"$submit_line"; then
+    echo 'FAIL: submit re-resolved the bond from its ISIN' >&2
+    return 1
+  fi
+
+  # A ticket whose recorded contract no longer matches its security type is refused.
+  ticket_id=$(run_cli order-prepare sell UKT 100 --profile main-live --account TEST123 \
+    --currency GBP --sec-type BOND --conid 900000001 --type LMT --limit 90 | jq -er '.ticketId')
+  rewrite_ticket "$ticket_id" '.contract.secType = "STK"'
+  expect_fail order-submit "$ticket_id" --confirm "$ticket_id"
+  [[ "$(grep -c -- '--submit' "$FAKE_LOG")" == 1 ]]
+
+  # A plain stock order is forwarded exactly as before: no selector flags either way.
+  : >"$FAKE_LOG"
+  ticket_id=$(prepare_ticket)
+  jq -e '.order.secType == "STK" and .order.conId == null and .order.isin == null' \
+    "$XDG_RUNTIME_DIR/ibkr-local/order-tickets/prepared/$ticket_id.json" >/dev/null
+  run_cli order-submit "$ticket_id" --confirm "$ticket_id" >/dev/null
+  if grep -q -- '--sec-type\|--conid\|--isin' "$FAKE_LOG"; then
+    echo 'FAIL: a stock order forwarded a selector' >&2
+    return 1
+  fi
+
+  printf 'PASS: bond selector preparation and conId-pinned submission\n'
+}
+
 case "${1:-all}" in
   prepare)
     run_prepare_tests
@@ -274,9 +354,13 @@ case "${1:-all}" in
   lifecycle)
     run_lifecycle_tests
     ;;
+  bond)
+    run_bond_tests
+    ;;
   all)
     run_prepare_tests
     run_lifecycle_tests
+    run_bond_tests
     ;;
   *)
     echo "unknown test group: $1" >&2
