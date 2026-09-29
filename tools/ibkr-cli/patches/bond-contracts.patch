@@ -1,0 +1,539 @@
+diff --git a/src/ibkr_cli/app.py b/src/ibkr_cli/app.py
+index f243ea3..7747811 100644
+--- a/src/ibkr_cli/app.py
++++ b/src/ibkr_cli/app.py
+@@ -887,6 +887,9 @@ def execute_trade_command(
+     trail_percent: Optional[float] = None,
+     take_profit: Optional[float] = None,
+     stop_loss: Optional[float] = None,
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
+ ) -> None:
+     if preview == submit:
+         exit_with_error(
+@@ -917,6 +920,9 @@ def execute_trade_command(
+             trail_percent=trail_percent,
+             take_profit_price=take_profit,
+             stop_loss_price=stop_loss,
++            sec_type=sec_type,
++            con_id=con_id,
++            isin=isin,
+         )
+         if preview:
+             payload = preview_stock_order(selected_profile, **order_kwargs)
+@@ -937,6 +943,9 @@ def execute_trade_command(
+                 "quantity": quantity,
+                 "order_type": order_type,
+                 "account": account,
++                "sec_type": sec_type,
++                "con_id": con_id,
++                "isin": isin,
+             },
+         )
+         return
+@@ -958,11 +967,14 @@ def execute_trade_command(
+ 
+ @app.command()
+ def buy(
+-    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL."),
++    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL. With --conid or --isin it is only a label and is not used to resolve the contract."),
+     quantity: float = typer.Argument(..., help="Order quantity."),
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
++    isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     order_type: str = typer.Option("MKT", "--type", help="Order type: MKT, LMT, STP, STP LMT, or TRAIL."),
+     limit_price: Optional[float] = typer.Option(None, "--limit", help="Limit price (required for LMT / STP LMT)."),
+     stop_price: Optional[float] = typer.Option(None, "--stop", help="Stop trigger price (required for STP / STP LMT, optional for TRAIL)."),
+@@ -983,16 +995,20 @@ def buy(
+         tif, outside_rth, preview, submit, account, timeout, json_output,
+         stop_price=stop_price, trail_amount=trail_amount, trail_percent=trail_percent,
+         take_profit=take_profit, stop_loss=stop_loss,
++        sec_type=sec_type, con_id=con_id, isin=isin,
+     )
+ 
+ 
+ @app.command()
+ def sell(
+-    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL."),
++    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL. With --conid or --isin it is only a label and is not used to resolve the contract."),
+     quantity: float = typer.Argument(..., help="Order quantity."),
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
++    isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     order_type: str = typer.Option("MKT", "--type", help="Order type: MKT, LMT, STP, STP LMT, or TRAIL."),
+     limit_price: Optional[float] = typer.Option(None, "--limit", help="Limit price (required for LMT / STP LMT)."),
+     stop_price: Optional[float] = typer.Option(None, "--stop", help="Stop trigger price (required for STP / STP LMT, optional for TRAIL)."),
+@@ -1013,6 +1029,7 @@ def sell(
+         tif, outside_rth, preview, submit, account, timeout, json_output,
+         stop_price=stop_price, trail_amount=trail_amount, trail_percent=trail_percent,
+         take_profit=take_profit, stop_loss=stop_loss,
++        sec_type=sec_type, con_id=con_id, isin=isin,
+     )
+ 
+ 
+@@ -1177,10 +1194,13 @@ def quote(
+ 
+ @app.command("bars")
+ def bars(
+-    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL."),
++    symbol: str = typer.Argument(..., help="Ticker symbol, for example AAPL. With --conid or --isin it is only a label and is not used to resolve the contract."),
+     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile name to use."),
+     exchange: str = typer.Option("SMART", "--exchange", help="Exchange to use for contract qualification."),
+     currency: str = typer.Option("USD", "--currency", help="Currency to use for contract qualification."),
++    sec_type: str = typer.Option("STK", "--sec-type", help="Security type: STK (default) or BOND. BOND requires --conid or --isin."),
++    con_id: Optional[int] = typer.Option(None, "--conid", help="IBKR contract ID; identifies the instrument instead of SYMBOL."),
++    isin: Optional[str] = typer.Option(None, "--isin", help="ISIN; qualified via secIdType=ISIN instead of SYMBOL."),
+     end: str = typer.Option("", "--end", help="End timestamp, for example '20260317 16:00:00'. Empty means now."),
+     duration: str = typer.Option("1 D", "--duration", help="Historical duration, for example '1 D' or '2 W'."),
+     bar_size: str = typer.Option("5 mins", "--bar-size", help="Bar size, for example '1 min' or '1 day'."),
+@@ -1202,6 +1222,9 @@ def bars(
+             what_to_show=what_to_show,
+             use_rth=use_rth,
+             timeout=timeout,
++            sec_type=sec_type,
++            con_id=con_id,
++            isin=isin,
+         )
+     except Exception as exc:
+         exit_with_error(
+@@ -1214,6 +1237,9 @@ def bars(
+                 "symbol": symbol,
+                 "exchange": exchange,
+                 "currency": currency,
++                "sec_type": sec_type,
++                "con_id": con_id,
++                "isin": isin,
+                 "duration": duration,
+                 "bar_size": bar_size,
+                 "what_to_show": what_to_show,
+diff --git a/src/ibkr_cli/ib_service.py b/src/ibkr_cli/ib_service.py
+index db8aed4..101874e 100644
+--- a/src/ibkr_cli/ib_service.py
++++ b/src/ibkr_cli/ib_service.py
+@@ -679,6 +679,181 @@ def get_executions(
+ 
+ _SUPPORTED_ORDER_TYPES = ("MKT", "LMT", "STP", "STP LMT", "TRAIL")
+ 
++# Security types a caller may request. STK keeps the historical ticker-based lookup; every
++# other type must name the instrument by conId or ISIN, because IBKR does not resolve those
++# by ticker (a gilt's "symbol" matches every gilt).
++SUPPORTED_SEC_TYPES = ("STK", "BOND")
++_IDENTIFIER_REQUIRED_SEC_TYPES = ("BOND",)
++_ISIN_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
++
++
++def _isin_check_digit_ok(isin: str) -> bool:
++    # ISO 6166: expand letters to two digits (A=10 .. Z=35), then Luhn over the whole string.
++    digits = "".join(str(int(char, 36)) for char in isin)
++    total = 0
++    for index, char in enumerate(reversed(digits)):
++        value = int(char)
++        if index % 2 == 1:
++            value *= 2
++            if value > 9:
++                value -= 9
++        total += value
++    return total % 10 == 0
++
++
++def normalize_contract_request(
++    sec_type: Optional[str] = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> Tuple[str, Optional[int], Optional[str]]:
++    """Validate and normalise the instrument selector before any Gateway round trip."""
++    normalized_sec_type = (sec_type or "STK").strip().upper()
++    if normalized_sec_type not in SUPPORTED_SEC_TYPES:
++        types = ", ".join(SUPPORTED_SEC_TYPES)
++        raise ValueError(f"Unsupported security type '{sec_type}'. Use one of: {types}.")
++    if con_id is not None and con_id <= 0:
++        raise ValueError("--conid must be a positive integer.")
++    normalized_isin: Optional[str] = None
++    if isin is not None:
++        normalized_isin = isin.strip().upper()
++        if not _ISIN_PATTERN.match(normalized_isin) or not _isin_check_digit_ok(normalized_isin):
++            raise ValueError(f"'{isin}' is not a valid ISIN.")
++    if normalized_sec_type in _IDENTIFIER_REQUIRED_SEC_TYPES and con_id is None and normalized_isin is None:
++        raise ValueError(
++            f"{normalized_sec_type} contracts must be identified with --conid or --isin; "
++            "IBKR does not resolve them by ticker."
++        )
++    return normalized_sec_type, con_id, normalized_isin
++
++
++def _build_contract(
++    symbol: str,
++    exchange: str,
++    currency: str,
++    sec_type: Optional[str] = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> object:
++    try:
++        from ib_async import Contract, Stock
++    except ModuleNotFoundError as exc:
++        raise RuntimeError(
++            "ib_async is not installed. Reinstall the project with Python 3.10+ to enable IBKR API commands."
++        ) from exc
++
++    normalized_sec_type, con_id, isin = normalize_contract_request(sec_type, con_id, isin)
++    if normalized_sec_type == "STK" and con_id is None and isin is None:
++        # Unchanged historical behaviour: a stock resolved by ticker.
++        return Stock(symbol=symbol.upper(), exchange=exchange, currency=currency)
++
++    # Identifier-based lookup. The positional symbol is deliberately left out: a caller's
++    # label must never widen or redirect which instrument IBKR resolves.
++    fields: Dict[str, object] = dict(secType=normalized_sec_type, currency=currency)
++    if con_id is not None:
++        fields["conId"] = con_id
++    if isin is not None:
++        fields["secIdType"] = "ISIN"
++        fields["secId"] = isin
++    else:
++        # IBKR finds no ISIN match once an exchange is named (even SMART), so the exchange
++        # is only sent with a conId and is otherwise applied after resolution.
++        fields["exchange"] = exchange
++    return Contract(**fields)
++
++
++def _describe_contract_request(
++    symbol: str,
++    sec_type: Optional[str] = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> str:
++    parts = []
++    if con_id is not None:
++        parts.append(f"conId {con_id}")
++    if isin:
++        parts.append(f"ISIN {isin.strip().upper()}")
++    if not parts:
++        return f"symbol '{symbol}'"
++    return f"{(sec_type or 'STK').upper()} " + " / ".join(parts)
++
++
++def _qualify_contract(
++    ib: object,
++    symbol: str,
++    exchange: str,
++    currency: str,
++    sec_type: Optional[str] = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> Tuple[object, Dict[str, object]]:
++    """Resolve the requested instrument to exactly one contract.
++
++    Returns the contract and extra payload fields describing it. A stock named by ticker
++    is qualified exactly as before and adds no fields. An identifier-based request is
++    resolved from its contract details, because IBKR returns bonds with no symbol or
++    local symbol: the description (for example "UKT 0 1/8 01/31/28") and ISIN are the
++    only human-checkable proof of which instrument a preview is for.
++    """
++    normalized_sec_type, con_id, isin = normalize_contract_request(sec_type, con_id, isin)
++    contract = _build_contract(symbol, exchange, currency, sec_type=normalized_sec_type, con_id=con_id, isin=isin)
++    description = _describe_contract_request(symbol, normalized_sec_type, con_id, isin)
++
++    if normalized_sec_type == "STK" and con_id is None and isin is None:
++        qualified = ib.qualifyContracts(contract)
++        # ib_async returns [None] (not []) for an unknown or ambiguous contract.
++        resolved = qualified[0] if qualified else None
++        if resolved is None or not getattr(resolved, "conId", None):
++            raise RuntimeError(f"Unable to qualify contract for {description}.")
++        return resolved, {}
++
++    details_list = ib.reqContractDetails(contract) or []
++    matches = [
++        details for details in details_list
++        if getattr(getattr(details, "contract", None), "secType", None) == normalized_sec_type
++    ]
++    if not matches:
++        other_types = sorted({getattr(d.contract, "secType", "?") for d in details_list if d.contract})
++        if other_types:
++            raise RuntimeError(
++                f"IBKR resolved a {', '.join(other_types)} contract, not the requested {description}."
++            )
++        raise RuntimeError(f"Unable to qualify contract for {description}.")
++    if len(matches) > 1:
++        con_ids = ", ".join(str(details.contract.conId) for details in matches)
++        raise RuntimeError(f"Ambiguous contract for {description}: conIds {con_ids}. Pass --conid.")
++
++    details = matches[0]
++    resolved = details.contract
++    if not getattr(resolved, "conId", None):
++        raise RuntimeError(f"Unable to qualify contract for {description}.")
++    if con_id is not None and resolved.conId != con_id:
++        raise RuntimeError(f"IBKR resolved conId {resolved.conId}, not the requested {description}.")
++
++    resolved_isins = [
++        tag.value for tag in (getattr(details, "secIdList", None) or [])
++        if getattr(tag, "tag", "") == "ISIN" and getattr(tag, "value", "")
++    ]
++    if isin is not None and resolved_isins and isin not in resolved_isins:
++        raise RuntimeError(
++            f"IBKR resolved ISIN {', '.join(resolved_isins)}, not the requested {description}."
++        )
++
++    valid_exchanges = [value for value in (getattr(details, "validExchanges", "") or "").split(",") if value]
++    if exchange:
++        if valid_exchanges and exchange not in valid_exchanges:
++            raise RuntimeError(
++                f"Exchange '{exchange}' is not valid for {description}; "
++                f"use one of: {', '.join(valid_exchanges)}."
++            )
++        resolved.exchange = exchange
++
++    instrument = {
++        "description": getattr(details, "descAppend", "") or getattr(details, "longName", "") or None,
++        "isin": resolved_isins[0] if resolved_isins else isin,
++        "valid_exchanges": valid_exchanges,
++    }
++    return resolved, instrument
++
+ 
+ def _prepare_stock_order(
+     ib: object,
+@@ -695,9 +870,12 @@ def _prepare_stock_order(
+     stop_price: Optional[float] = None,
+     trail_stop_price: Optional[float] = None,
+     trail_percent: Optional[float] = None,
+-) -> tuple[List[str], str, object, object]:
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> tuple[List[str], str, object, object, Dict[str, object]]:
+     try:
+-        from ib_async import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Stock
++        from ib_async import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder
+     except ModuleNotFoundError as exc:
+         raise RuntimeError(
+             "ib_async is not installed. Reinstall the project with Python 3.10+ to enable IBKR API commands."
+@@ -750,13 +928,11 @@ def _prepare_stock_order(
+     if normalized_order_type != "TRAIL" and (trail_stop_price is not None or trail_percent is not None):
+         raise ValueError("--trail-amount and --trail-percent can only be used with --type TRAIL.")
+ 
++    normalize_contract_request(sec_type, con_id, isin)
+     managed_accounts, selected_account = _resolve_account(ib, account)
+-    contract = Stock(symbol=symbol.upper(), exchange=exchange, currency=currency)
+-    qualified = ib.qualifyContracts(contract)
+-    if not qualified:
+-        raise RuntimeError(f"Unable to qualify contract for symbol '{symbol}'.")
+-
+-    qualified_contract = qualified[0]
++    qualified_contract, instrument = _qualify_contract(
++        ib, symbol, exchange, currency, sec_type=sec_type, con_id=con_id, isin=isin
++    )
+     common_kwargs = dict(tif=normalized_tif, outsideRth=outside_rth, account=selected_account)
+ 
+     if normalized_order_type == "LMT":
+@@ -781,7 +957,7 @@ def _prepare_stock_order(
+     else:
+         order = MarketOrder(normalized_action, quantity, **common_kwargs)
+ 
+-    return managed_accounts, selected_account, qualified_contract, order
++    return managed_accounts, selected_account, qualified_contract, order, instrument
+ 
+ 
+ def _prepare_bracket_order(
+@@ -798,9 +974,12 @@ def _prepare_bracket_order(
+     account: Optional[str],
+     take_profit_price: float,
+     stop_loss_price: float,
+-) -> tuple[List[str], str, object, list]:
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
++) -> tuple[List[str], str, object, list, Dict[str, object]]:
+     try:
+-        from ib_async import LimitOrder, MarketOrder, StopOrder, Stock
++        from ib_async import LimitOrder, MarketOrder, StopOrder
+     except ModuleNotFoundError as exc:
+         raise RuntimeError(
+             "ib_async is not installed. Reinstall the project with Python 3.10+ to enable IBKR API commands."
+@@ -824,13 +1003,11 @@ def _prepare_bracket_order(
+     if stop_loss_price <= 0:
+         raise ValueError("--stop-loss price must be positive.")
+ 
++    normalize_contract_request(sec_type, con_id, isin)
+     managed_accounts, selected_account = _resolve_account(ib, account)
+-    contract = Stock(symbol=symbol.upper(), exchange=exchange, currency=currency)
+-    qualified = ib.qualifyContracts(contract)
+-    if not qualified:
+-        raise RuntimeError(f"Unable to qualify contract for symbol '{symbol}'.")
+-
+-    qualified_contract = qualified[0]
++    qualified_contract, instrument = _qualify_contract(
++        ib, symbol, exchange, currency, sec_type=sec_type, con_id=con_id, isin=isin
++    )
+     common_kwargs = dict(tif=normalized_tif, outsideRth=outside_rth, account=selected_account)
+ 
+     # Parent order
+@@ -848,7 +1025,7 @@ def _prepare_bracket_order(
+     stop_loss = StopOrder(reverse_action, quantity, stop_loss_price, **common_kwargs)
+     stop_loss.transmit = True  # last child transmits the whole bracket
+ 
+-    return managed_accounts, selected_account, qualified_contract, [parent, take_profit, stop_loss]
++    return managed_accounts, selected_account, qualified_contract, [parent, take_profit, stop_loss], instrument
+ 
+ 
+ def _trade_payload(
+@@ -916,13 +1093,19 @@ def preview_stock_order(
+     trail_percent: Optional[float] = None,
+     take_profit_price: Optional[float] = None,
+     stop_loss_price: Optional[float] = None,
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
+ ) -> Dict[str, object]:
+     is_bracket = take_profit_price is not None or stop_loss_price is not None
++    contract_selector = dict(sec_type=sec_type, con_id=con_id, isin=isin)
++    # Reject a malformed selector before opening a Gateway session.
++    normalize_contract_request(**contract_selector)
+     with ib_session(profile, timeout=timeout, readonly=False) as ib:
+         if is_bracket:
+             if take_profit_price is None or stop_loss_price is None:
+                 raise ValueError("Bracket orders require both --take-profit and --stop-loss.")
+-            managed_accounts, selected_account, qualified_contract, orders = _prepare_bracket_order(
++            managed_accounts, selected_account, qualified_contract, orders, instrument = _prepare_bracket_order(
+                 ib,
+                 action=action,
+                 symbol=symbol,
+@@ -936,11 +1119,12 @@ def preview_stock_order(
+                 account=account,
+                 take_profit_price=take_profit_price,
+                 stop_loss_price=stop_loss_price,
++                **contract_selector,
+             )
+             order = orders[0]  # preview the parent order
+             order.transmit = True  # override for whatIfOrder preview
+         else:
+-            managed_accounts, selected_account, qualified_contract, order = _prepare_stock_order(
++            managed_accounts, selected_account, qualified_contract, order, instrument = _prepare_stock_order(
+                 ib,
+                 action=action,
+                 symbol=symbol,
+@@ -955,6 +1139,7 @@ def preview_stock_order(
+                 stop_price=stop_price,
+                 trail_stop_price=trail_stop_price,
+                 trail_percent=trail_percent,
++                **contract_selector,
+             )
+ 
+         matcher = lambda current_contract: current_contract is not None and getattr(current_contract, "conId", None) == qualified_contract.conId
+@@ -973,6 +1158,7 @@ def preview_stock_order(
+             "currency": qualified_contract.currency,
+             "sec_type": qualified_contract.secType,
+             "con_id": qualified_contract.conId,
++            **instrument,
+             "action": order.action,
+             "quantity": _normalize_number(quantity),
+             "order_type": order.orderType,
+@@ -1026,13 +1212,19 @@ def submit_stock_order(
+     trail_percent: Optional[float] = None,
+     take_profit_price: Optional[float] = None,
+     stop_loss_price: Optional[float] = None,
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
+ ) -> Dict[str, object]:
+     is_bracket = take_profit_price is not None or stop_loss_price is not None
++    contract_selector = dict(sec_type=sec_type, con_id=con_id, isin=isin)
++    # Reject a malformed selector before opening a Gateway session.
++    normalize_contract_request(**contract_selector)
+     with ib_session(profile, timeout=timeout, readonly=False) as ib:
+         if is_bracket:
+             if take_profit_price is None or stop_loss_price is None:
+                 raise ValueError("Bracket orders require both --take-profit and --stop-loss.")
+-            managed_accounts, selected_account, qualified_contract, orders = _prepare_bracket_order(
++            managed_accounts, selected_account, qualified_contract, orders, instrument = _prepare_bracket_order(
+                 ib,
+                 action=action,
+                 symbol=symbol,
+@@ -1046,6 +1238,7 @@ def submit_stock_order(
+                 account=account,
+                 take_profit_price=take_profit_price,
+                 stop_loss_price=stop_loss_price,
++                **contract_selector,
+             )
+             with _capture_ib_errors(ib) as raw_errors:
+                 with _suppress_ib_async_logs():
+@@ -1060,14 +1253,17 @@ def submit_stock_order(
+                     trades = [parent_trade, tp_trade, sl_trade]
+                     ib.waitOnUpdate(timeout=min(timeout, 0.75))
+ 
+-            parent_payload = _trade_payload(trades[0], managed_accounts, selected_account, raw_errors, "submit")
++            parent_payload = {
++                **_trade_payload(trades[0], managed_accounts, selected_account, raw_errors, "submit"),
++                **instrument,
++            }
+             parent_payload["bracket"] = {
+                 "take_profit": _trade_payload(trades[1], managed_accounts, selected_account, [], "submit"),
+                 "stop_loss": _trade_payload(trades[2], managed_accounts, selected_account, [], "submit"),
+             }
+             return parent_payload
+         else:
+-            managed_accounts, selected_account, qualified_contract, order = _prepare_stock_order(
++            managed_accounts, selected_account, qualified_contract, order, instrument = _prepare_stock_order(
+                 ib,
+                 action=action,
+                 symbol=symbol,
+@@ -1082,6 +1278,7 @@ def submit_stock_order(
+                 stop_price=stop_price,
+                 trail_stop_price=trail_stop_price,
+                 trail_percent=trail_percent,
++                **contract_selector,
+             )
+ 
+             with _capture_ib_errors(ib) as raw_errors:
+@@ -1089,7 +1286,7 @@ def submit_stock_order(
+                     trade = ib.placeOrder(qualified_contract, order)
+                     ib.waitOnUpdate(timeout=min(timeout, 0.75))
+ 
+-            return _trade_payload(trade, managed_accounts, selected_account, raw_errors, "submit")
++            return {**_trade_payload(trade, managed_accounts, selected_account, raw_errors, "submit"), **instrument}
+ 
+ 
+ def cancel_open_order(
+@@ -1440,21 +1637,15 @@ def get_historical_bars(
+     what_to_show: str = "TRADES",
+     use_rth: bool = True,
+     timeout: float = 10.0,
++    sec_type: str = "STK",
++    con_id: Optional[int] = None,
++    isin: Optional[str] = None,
+ ) -> Dict[str, object]:
+-    try:
+-        from ib_async import Stock
+-    except ModuleNotFoundError as exc:
+-        raise RuntimeError(
+-            "ib_async is not installed. Reinstall the project with Python 3.10+ to enable IBKR API commands."
+-        ) from exc
+-
++    normalize_contract_request(sec_type, con_id, isin)
+     with ib_session(profile, timeout=timeout) as ib:
+-        contract = Stock(symbol=symbol.upper(), exchange=exchange, currency=currency)
+-        qualified = ib.qualifyContracts(contract)
+-        if not qualified:
+-            raise RuntimeError(f"Unable to qualify contract for symbol '{symbol}'.")
+-
+-        qualified_contract = qualified[0]
++        qualified_contract, instrument = _qualify_contract(
++            ib, symbol, exchange, currency, sec_type=sec_type, con_id=con_id, isin=isin
++        )
+         matcher = lambda current_contract: current_contract is not None and getattr(current_contract, "conId", None) == qualified_contract.conId
+         with _capture_ib_errors(ib, matcher) as raw_errors:
+             with _suppress_ib_async_logs():
+@@ -1498,6 +1689,7 @@ def get_historical_bars(
+             "currency": qualified_contract.currency,
+             "sec_type": qualified_contract.secType,
+             "con_id": qualified_contract.conId,
++            **instrument,
+             "end": end or "",
+             "duration": duration,
+             "bar_size": bar_size,

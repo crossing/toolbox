@@ -79,6 +79,15 @@ if grep -Fq -- '--account' "$test_root/args"; then
   exit 1
 fi
 
+# A bond is named by conId or ISIN; the selector flags must reach upstream untouched.
+run_bars UKT --profile main-live --currency GBP --sec-type BOND --isin GB00BMBL1G81 \
+  --what-to-show MIDPOINT >/dev/null
+grep -Fq -- '--sec-type BOND --isin GB00BMBL1G81' "$test_root/args" \
+  || { printf 'FAIL: bond selector was not forwarded on bars\n' >&2; exit 1; }
+run_bars UKT --profile main-live --sec-type BOND --conid 900000001 >/dev/null
+grep -Fq -- '--sec-type BOND --conid 900000001' "$test_root/args" \
+  || { printf 'FAIL: --conid was not forwarded on bars\n' >&2; exit 1; }
+
 with_notice=$(FAKE_IBKR_NOTICE=1 run_bars META --profile main-live)
 [[ "$(jq -r '.bars | length' <<<"$with_notice")" == 2 ]] \
   || { printf 'FAIL: upgrade banner was not stripped before the JSON\n' >&2; exit 1; }

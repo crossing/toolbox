@@ -65,6 +65,37 @@ The tool enforces a preview-then-confirm flow. Preserve it:
 Never script around the preview step, never batch orders to avoid repeated
 confirmation, and never infer a quantity the user did not state.
 
+### Bonds and other identifier-based instruments
+
+`bars`, `order-preview` and `order-prepare` take `--sec-type STK|BOND` (default `STK`) plus
+`--conid ID` and/or `--isin ISIN`. A bond (for example a UK gilt) must be named by conId or
+ISIN; IBKR does not resolve bonds by ticker. With either identifier the positional SYMBOL
+is only a label. Pass the currency the bond is denominated in (`--currency GBP` for a gilt).
+
+```bash
+ibkr order-preview buy TN28 10 --profile main-paper --account U00000001 \
+  --currency GBP --sec-type BOND --isin GB00BMBL1G81 --type LMT --limit 95
+```
+
+IBKR returns bond contracts with an empty `symbol`, `local_symbol` and `currency`, so the
+preview adds `description` (for example `UKT 0 1/8 01/31/28`), `isin` and
+`valid_exchanges`. Show the user `description`, `isin` and `con_id` before asking for
+approval; the positional SYMBOL is only your label.
+
+Units: the limit is a price per 100 nominal. The quantity unit is not documented by the
+API; a live gilt what-if scaled its margin and accrued-interest effect as if one unit were
+1,000 of nominal. Check the preview's margin and equity change against the intended size
+before anything is prepared.
+
+A prepared bond ticket records the requested selector and the previewed contract;
+`order-submit` sends it by the previewed conId, so the order can only reach the
+instrument that was previewed.
+
+With `--isin`, the lookup is sent without an exchange (IBKR matches no ISIN once one is
+named) and `--exchange` is then checked against the bond's valid exchanges and applied
+for routing. `bars` for a bond returns no rows with the default `TRADES` (IBKR error
+162); use `--what-to-show MIDPOINT`, `BID` or `ASK`.
+
 ## Gateway not responding
 
 The Gateway needs to be running and authenticated. If a command fails to connect, use

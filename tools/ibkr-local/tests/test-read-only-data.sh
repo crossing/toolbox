@@ -87,6 +87,18 @@ with_notice=$(run_wrapper 1)
 [[ "$(jq -r '.rows[0].account' <<<"$with_notice")" == U00000002 ]] \
   || { printf 'FAIL: wrong account with update notice\n' >&2; exit 1; }
 
+# order-preview forwards the bond selector untouched and still appends --preview.
+PATH="$test_root/bin:$PATH" \
+  IBKR_UPSTREAM="$test_root/bin/ibkr" \
+  IBKR_LOCAL_CONFIG_DIR="$test_root/config" \
+  IBKR_LOCAL_PROFILES="$test_root/config/profiles.json" \
+  FAKE_IBKR_ARGS="$test_root/args" \
+  bash "$cli" order-preview buy UKT 100 --profile main-live --account U00000002 \
+    --currency GBP --sec-type BOND --isin GB00BMBL1G81 --type LMT --limit 90 >/dev/null
+grep -Fq -- 'buy UKT 100 --currency GBP --sec-type BOND --isin GB00BMBL1G81 --type LMT --limit 90 --preview --account U00000002' \
+  "$test_root/args" \
+  || { printf 'FAIL: bond selector was not forwarded on order-preview\n' >&2; exit 1; }
+
 if bash "$cli" order-preview buy AAPL 1 --profile main-live --submit >/dev/null 2>&1; then
   printf 'FAIL: order mutation was not blocked\n' >&2
   exit 1

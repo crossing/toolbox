@@ -46,6 +46,21 @@ order_positive_number() {
   jq -en --arg value "$1" '$value | tonumber | . > 0' >/dev/null 2>&1
 }
 
+# Instrument selector. STK by ticker is the historical default and forwards nothing extra
+# upstream; any other security type must name the instrument by conId or ISIN, because
+# IBKR does not resolve bonds by ticker. The upstream CLI re-validates (including the ISIN
+# check digit) and refuses a resolved contract whose conId or secType differs.
+order_validate_selector() {
+  local sec_type=$1 con_id=$2 isin=$3
+  [[ "$sec_type" == "STK" || "$sec_type" == "BOND" ]] \
+    || die "unsupported --sec-type: $sec_type (use STK or BOND)"
+  [[ -z "$con_id" || "$con_id" =~ ^[1-9][0-9]*$ ]] || die "--conid must be a positive integer"
+  [[ -z "$isin" || "$isin" =~ ^[A-Z]{2}[A-Z0-9]{9}[0-9]$ ]] || die "--isin is not a valid ISIN: $isin"
+  if [[ "$sec_type" != "STK" && -z "$con_id" && -z "$isin" ]]; then
+    die "$sec_type orders require --conid or --isin"
+  fi
+}
+
 cmd_order_prepare() {
   require_config
 
@@ -59,6 +74,7 @@ cmd_order_prepare() {
 
   local profile="" account="" order_type="LMT" limit_price=""
   local exchange="SMART" currency="USD" tif="DAY" outside_rth=0
+  local sec_type="STK" con_id="" isin=""
   while (($#)); do
     case "$1" in
       -p|--profile)
@@ -91,6 +107,21 @@ cmd_order_prepare() {
         currency=$2
         shift 2
         ;;
+      --sec-type)
+        (($# >= 2)) || die "$1 requires a value"
+        sec_type=${2^^}
+        shift 2
+        ;;
+      --conid)
+        (($# >= 2)) || die "$1 requires a value"
+        con_id=$2
+        shift 2
+        ;;
+      --isin)
+        (($# >= 2)) || die "$1 requires a value"
+        isin=${2^^}
+        shift 2
+        ;;
       --tif)
         (($# >= 2)) || die "$1 requires a value"
         tif=$2
@@ -116,6 +147,14 @@ cmd_order_prepare() {
   [[ "$outside_rth" == "0" ]] || die "guarded order entry currently blocks outside-RTH orders"
   [[ -n "$limit_price" ]] || die "LMT orders require --limit"
   order_positive_number "$limit_price" || die "limit price must be positive"
+  order_validate_selector "$sec_type" "$con_id" "$isin"
+
+  local -a selector_args=()
+  if [[ "$sec_type" != "STK" || -n "$con_id" || -n "$isin" ]]; then
+    selector_args+=(--sec-type "$sec_type")
+    [[ -z "$con_id" ]] || selector_args+=(--conid "$con_id")
+    [[ -z "$isin" ]] || selector_args+=(--isin "$isin")
+  fi
 
   local policy
   if ! policy=$(order_policy_json "$profile"); then
@@ -136,6 +175,7 @@ cmd_order_prepare() {
       "$side" "$symbol" "$quantity" \
       --profile "$ibkr_profile" --account "$account" \
       --exchange "$exchange" --currency "$currency" \
+      "${selector_args[@]}" \
       --type "$order_type" --limit "$limit_price" --tif "$tif" \
       --preview --json
   ); then
@@ -150,6 +190,13 @@ cmd_order_prepare() {
     .preview_only == true and .selected_account == $account
   ' <<<"$preview" >/dev/null \
     || die "IBKR preview did not confirm the requested account"
+  jq -e --arg sec_type "$sec_type" --arg con_id "$con_id" --arg isin "$isin" '
+    .sec_type == $sec_type
+    and (.con_id | type == "number" and . > 0)
+    and ($con_id == "" or .con_id == ($con_id | tonumber))
+    and ($isin == "" or .isin == $isin)
+  ' <<<"$preview" >/dev/null \
+    || die "IBKR preview did not confirm the requested instrument"
 
   local ticket_root prepared_dir claimed_dir ticket_id created_at expires_at
   local tmp final_tmp checksum ticket
@@ -181,6 +228,9 @@ cmd_order_prepare() {
     --arg quantity "$quantity" \
     --arg exchange "$exchange" \
     --arg currency "$currency" \
+    --arg sec_type "$sec_type" \
+    --arg con_id "$con_id" \
+    --arg isin "$isin" \
     --arg order_type "$order_type" \
     --arg limit_price "$limit_price" \
     --arg tif "$tif" \
@@ -200,6 +250,9 @@ cmd_order_prepare() {
           quantity: ($quantity | tonumber),
           exchange: $exchange,
           currency: $currency,
+          secType: $sec_type,
+          conId: (if $con_id == "" then null else ($con_id | tonumber) end),
+          isin: (if $isin == "" then null else $isin end),
           orderType: $order_type,
           limitPrice: ($limit_price | tonumber),
           tif: $tif,
@@ -212,7 +265,9 @@ cmd_order_prepare() {
           primaryExchange: $preview.primary_exchange,
           currency: $preview.currency,
           secType: $preview.sec_type,
-          conId: $preview.con_id
+          conId: $preview.con_id,
+          description: ($preview.description // null),
+          isin: ($preview.isin // null)
         },
         preview: {
           previewOnly: $preview.preview_only,
@@ -315,6 +370,12 @@ order_validate_ticket() {
     and .order.outsideRth == false
     and (.order.quantity | type == "number" and . > 0)
     and (.order.limitPrice | type == "number" and . > 0)
+    and ((.order.secType // "STK") as $sec_type
+      | ($sec_type == "STK" or $sec_type == "BOND")
+      and (($sec_type == "STK" and .order.conId == null and .order.isin == null)
+        or (.contract.secType == $sec_type
+          and (.contract.conId | type == "number" and . > 0)
+          and (.order.conId == null or .order.conId == .contract.conId))))
   ' "$ticket" >/dev/null || die "prepared order ticket is malformed"
 
   checksum=$(jq -er '.checksum' "$ticket")
@@ -397,6 +458,18 @@ cmd_order_submit() {
   limit_price=$(jq -r '.order.limitPrice' "$claimed")
   tif=$(jq -r '.order.tif' "$claimed")
 
+  # An identifier-based ticket is submitted by the conId its preview resolved, so the order
+  # can only reach the exact instrument the owner saw previewed. A plain STK ticker ticket
+  # is submitted exactly as before.
+  local -a selector_args=()
+  if jq -e '(.order.secType // "STK") != "STK" or .order.conId != null or .order.isin != null' \
+    "$claimed" >/dev/null; then
+    selector_args=(
+      --sec-type "$(jq -r '.order.secType' "$claimed")"
+      --conid "$(jq -r '.contract.conId' "$claimed")"
+    )
+  fi
+
   local output exit_status
   set +e
   output=$(
@@ -404,6 +477,7 @@ cmd_order_submit() {
       "$action" "$symbol" "$quantity" \
       --profile "$ibkr_profile" --account "$account" \
       --exchange "$exchange" --currency "$currency" \
+      "${selector_args[@]}" \
       --type "$order_type" --limit "$limit_price" --tif "$tif" \
       --submit --json 2>&1
   )
