@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS settings (
 export class VaultStore {
   constructor(private sql: SqlLike) {
     this.sql.exec(VAULT_SCHEMA);
+    // Round 1 (PR #37) kept signed-URL PUT claims in each user's vault; grants
+    // now live in their own shards (files/http.ts grantStoreFor), so the old
+    // table is dead. Dropping it is idempotent and costs one no-op statement
+    // per vault start; delete this line once every vault has started once.
+    this.sql.exec("DROP TABLE IF EXISTS file_url_claims");
   }
 
   // Explicit toggles override the code-side defaults; unknown services in

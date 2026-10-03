@@ -12,10 +12,12 @@
 //                          calling tool asks for confirm before it gets here.
 //   freeagent:<target>/<id> PUT of { attachment: { data, file_name, content_type } },
 //                          the shape the freeagent CLI's `attach` commands send.
+//                          The record that comes back is sanitized: no presigned
+//                          attachment URLs reach the caller.
 
 import { DRIVE, FILE_FIELDS } from "../drive";
 import { draftAttachRoom, loadDraftForAttach, saveDraftWithAttachment, type DraftForAttach } from "../gmail";
-import { FREEAGENT_BASE_URL } from "../freeagentapi";
+import { FREEAGENT_BASE_URL, FreeAgentApiError, sanitizeFreeagent } from "../freeagentapi";
 import { bytesToBase64 } from "../mime";
 import { formatRef } from "./refs";
 import { bridgeFailure, bytesStream, type FileContext } from "./sources";
@@ -255,8 +257,22 @@ class FreeAgentSink implements Sink {
     const bytes = await readAll(body, this.cap, `"${meta.name}"`);
     const url = `${FREEAGENT_BASE_URL}/${FREEAGENT_RESOURCES[this.ref.target].path}/${this.ref.id}`;
     const client = await this.ctx.freeagent();
-    const result = await client.putUrl(url, freeagentAttachmentBody(this.ref.target, meta, bytes, this.opts.description));
-    return { name: meta.name, size: bytes.byteLength, result };
+    let result: unknown;
+    try {
+      result = await client.putUrl(url, freeagentAttachmentBody(this.ref.target, meta, bytes, this.opts.description));
+    } catch (err) {
+      // FreeAgent's own words ("attachable is locked") do not say what to do.
+      if (err instanceof FreeAgentApiError && err.status === 422 && /locked/i.test(err.message)) {
+        throw new FileError(
+          422,
+          `FreeAgent ${this.ref.target} ${this.ref.id} is in a locked accounting period and refuses attachments ` +
+            `(${err.message}). Attach to a record in an open period, or unlock the period in FreeAgent first.`,
+        );
+      }
+      throw err;
+    }
+    // The client sanitizes already; this keeps the guarantee local to the sink.
+    return { name: meta.name, size: bytes.byteLength, result: sanitizeFreeagent(result) };
   }
 }
 

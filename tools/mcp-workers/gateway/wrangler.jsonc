@@ -49,6 +49,7 @@
   // staged files older than 7 days go to the Drive trash. 03:17 UTC, off the hour.
   "triggers": { "crons": ["17 3 * * *"] },
   // Invocation logs record request URLs, so /files/<token> bearer URLs land in
-  // Workers Logs: an accepted exposure, see docs/mcp-workers-infra.md.
+  // Workers Logs (an opaque id, but live for 15 minutes): an accepted
+  // exposure, see docs/mcp-workers-infra.md.
   "observability": { "enabled": true }
 }

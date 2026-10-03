@@ -211,26 +211,107 @@ export class FreeAgentClient {
     private baseUrl: string = FREEAGENT_BASE_URL,
   ) {}
 
+  // Every body these return has been through sanitizeFreeagent: FreeAgent
+  // embeds presigned, expiring file URLs in attachment objects, and those
+  // must never reach the model. Only openAttachment reads one, internally.
+
   async get(path: string, params?: Record<string, string | undefined>): Promise<unknown> {
-    const url = new URL(this.baseUrl + path);
-    for (const [key, value] of Object.entries(params ?? {})) {
-      if (value !== undefined && value !== "") url.searchParams.set(key, value);
-    }
-    return this.request("GET", url);
+    return sanitizeFreeagent((await this.request("GET", this.pathUrl(path, params))).body);
+  }
+
+  /**
+   * One page of a list endpoint, with what FreeAgent's pagination headers say
+   * about the rest: the Link header's rel="next"/"last" page numbers and
+   * X-Total-Count, each null when absent.
+   */
+  async getPage(path: string, params?: Record<string, string | undefined>): Promise<FreeAgentPage> {
+    const { body, headers } = await this.request("GET", this.pathUrl(path, params));
+    const links = parseLinkHeader(headers.get("link"));
+    const total = Number(headers.get("x-total-count"));
+    return {
+      body: sanitizeFreeagent(body),
+      nextPage: links.next ?? null,
+      lastPage: links.last ?? null,
+      total: headers.has("x-total-count") && Number.isFinite(total) ? total : null,
+    };
   }
 
   async getUrl(rawUrl: string): Promise<unknown> {
-    return this.request("GET", this.apiUrl(rawUrl));
+    return sanitizeFreeagent((await this.request("GET", this.apiUrl(rawUrl))).body);
   }
 
   async postJson(path: string, body: unknown): Promise<unknown> {
-    return this.request("POST", new URL(this.baseUrl + path), body);
+    return sanitizeFreeagent((await this.request("POST", new URL(this.baseUrl + path), body)).body);
   }
 
   // PUT/DELETE take API URLs the model supplied (FreeAgent's canonical
   // resource identifiers), so they go through the same host guard as getUrl.
   async putUrl(rawUrl: string, body: unknown): Promise<unknown> {
-    return this.request("PUT", this.apiUrl(rawUrl), body);
+    return sanitizeFreeagent((await this.request("PUT", this.apiUrl(rawUrl), body)).body);
+  }
+
+  /** An attachment's metadata, sanitized; takes an attachment id or its API URL. */
+  async getAttachment(idOrUrl: string): Promise<FreeAgentAttachment> {
+    const raw = await this.rawAttachment(attachmentUrl(idOrUrl));
+    return sanitizeFreeagent(raw) as FreeAgentAttachment;
+  }
+
+  /**
+   * An attachment's bytes, streamed. Reads the metadata afresh for a
+   * content_src (presigned, about 30 s to live) and fetches it without the
+   * bearer token — it is a storage URL, not an API one. Neither the URL nor
+   * anything derived from it leaves this method.
+   */
+  async openAttachment(idOrUrl: string): Promise<{ attachment: FreeAgentAttachment; body: ReadableStream<Uint8Array> }> {
+    const url = attachmentUrl(idOrUrl);
+    const raw = (await this.rawAttachment(url)) as Record<string, unknown>;
+    const src = raw.content_src;
+    let parsed: URL | undefined;
+    try {
+      parsed = typeof src === "string" ? new URL(src) : undefined;
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed || parsed.protocol !== "https:") {
+      throw new FreeAgentApiError(502, "FreeAgent returned no downloadable content for this attachment");
+    }
+    let response: Response;
+    try {
+      response = await this.fetcher(parsed.toString(), { method: "GET" });
+    } catch {
+      throw new FreeAgentApiError(502, "FreeAgent attachment storage unreachable");
+    }
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => {});
+      throw new FreeAgentApiError(
+        response.status === 200 ? 502 : response.status,
+        `FreeAgent attachment download failed (status ${response.status})`,
+      );
+    }
+    return { attachment: sanitizeFreeagent(raw) as FreeAgentAttachment, body: response.body };
+  }
+
+  async deleteAttachment(idOrUrl: string): Promise<{ deleted: true; id: string }> {
+    const url = attachmentUrl(idOrUrl);
+    await this.request("DELETE", new URL(url));
+    return { deleted: true, id: url.slice(url.lastIndexOf("/") + 1) };
+  }
+
+  private async rawAttachment(url: string): Promise<Record<string, unknown>> {
+    const { body } = await this.request("GET", new URL(url));
+    const attachment = (body as { attachment?: unknown })?.attachment;
+    if (!attachment || typeof attachment !== "object") {
+      throw new FreeAgentApiError(502, "FreeAgent returned no attachment object");
+    }
+    return attachment as Record<string, unknown>;
+  }
+
+  private pathUrl(path: string, params?: Record<string, string | undefined>): URL {
+    const url = new URL(this.baseUrl + path);
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value !== undefined && value !== "") url.searchParams.set(key, value);
+    }
+    return url;
   }
 
   async deleteUrl(rawUrl: string): Promise<void> {
@@ -244,7 +325,7 @@ export class FreeAgentClient {
     return new URL(rawUrl);
   }
 
-  private async request(method: string, url: URL, body?: unknown): Promise<unknown> {
+  private async request(method: string, url: URL, body?: unknown): Promise<{ body: unknown; headers: Headers }> {
     const token = await this.tokens.token();
     const response = await this.fetcher(url.toString(), {
       method,
@@ -258,9 +339,9 @@ export class FreeAgentClient {
     });
     const text = await response.text();
     if (!response.ok) throw new FreeAgentApiError(response.status, errorMessage(response.status, text));
-    if (text === "") return {};
+    if (text === "") return { body: {}, headers: response.headers };
     try {
-      return JSON.parse(text);
+      return { body: JSON.parse(text), headers: response.headers };
     } catch {
       throw new FreeAgentApiError(response.status, "unparseable FreeAgent API response");
     }
@@ -281,4 +362,101 @@ export async function fetchCompanySubdomain(client: FreeAgentClient): Promise<st
   const body = (await client.get("/company")) as { company?: { subdomain?: unknown } };
   const subdomain = body?.company?.subdomain;
   return typeof subdomain === "string" ? subdomain : "";
+}
+
+// ---- pagination -------------------------------------------------------------
+
+export interface FreeAgentPage {
+  /** The page's JSON, sanitized. */
+  body: unknown;
+  /** Link rel="next" page number; null on the last page or when FreeAgent sent no Link header. */
+  nextPage: number | null;
+  /** Link rel="last" page number, when given. */
+  lastPage: number | null;
+  /** X-Total-Count, when given. */
+  total: number | null;
+}
+
+/** Page numbers per rel from an RFC 8288 Link header (`<url?page=2>; rel="next", ...`). */
+export function parseLinkHeader(header: string | null): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!header) return out;
+  for (const part of header.split(",")) {
+    const match = /<([^>]*)>\s*;\s*rel="?([a-z]+)"?/i.exec(part.trim());
+    if (!match) continue;
+    let page: number;
+    try {
+      page = Number(new URL(match[1]!).searchParams.get("page") ?? "1");
+    } catch {
+      continue;
+    }
+    if (Number.isInteger(page) && page > 0) out[match[2]!.toLowerCase()] = page;
+  }
+  return out;
+}
+
+// ---- sanitizing -------------------------------------------------------------
+
+// Presigned storage URLs (S3 and look-alikes) carry their credential in the
+// query string; any string field shaped like one is dropped wherever it is.
+const PRESIGNED = /^https?:\/\/[^\s]*[?&](X-Amz-Signature|X-Amz-Credential|Signature|Expires|AWSAccessKeyId|sig|se)=/i;
+// Attachment fields that exist only to describe the expiring URLs.
+const URL_ONLY_FIELDS = new Set(["expires_at"]);
+// Lock state leads each record so a reader sees it before the detail.
+const LEADING_FIELDS = ["url", "is_locked", "locked_reason", "locked_attributes"];
+
+export interface FreeAgentAttachment {
+  id?: string;
+  url?: string;
+  file_name?: string;
+  content_type?: string;
+  file_size?: number;
+  description?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * A FreeAgent response made safe to hand to a model: every content_src,
+ * content_src_medium and content_src_small removed at any depth, along with
+ * any other string that is a presigned URL, and an attachment's expires_at
+ * (it dates only those URLs). Attachments gain their numeric `id`; records
+ * carrying is_locked list it (and locked_reason) right after `url`.
+ */
+export function sanitizeFreeagent(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((v) => !(typeof v === "string" && PRESIGNED.test(v)))
+      .map((v) => sanitizeFreeagent(v, key));
+  }
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const isAttachment = key === "attachment" || key === "attachments" || "content_src" in record;
+  const out: Record<string, unknown> = {};
+  const keys = Object.keys(record);
+  const ordered = [...LEADING_FIELDS.filter((k) => k in record), ...keys.filter((k) => !LEADING_FIELDS.includes(k))];
+  if (isAttachment && typeof record.url === "string" && !("id" in record)) {
+    const id = /\/attachments\/(\d+)$/.exec(record.url)?.[1];
+    if (id) out.id = id;
+  }
+  for (const k of ordered) {
+    const v = record[k];
+    if (/^content_src/.test(k)) continue;
+    if (isAttachment && URL_ONLY_FIELDS.has(k)) continue;
+    if (typeof v === "string" && PRESIGNED.test(v)) continue;
+    out[k] = sanitizeFreeagent(v, k);
+  }
+  return out;
+}
+
+const ATTACHMENT_URL = /^https:\/\/api\.freeagent\.com\/v2\/attachments\/(\d{1,20})$/;
+
+/** The API URL for an attachment given its numeric id or that URL itself; anything else is refused. */
+export function attachmentUrl(idOrUrl: string): string {
+  const trimmed = idOrUrl.trim();
+  if (/^\d{1,20}$/.test(trimmed)) return `${FREEAGENT_BASE_URL}/attachments/${trimmed}`;
+  if (ATTACHMENT_URL.test(trimmed)) return trimmed;
+  throw new FreeAgentApiError(
+    400,
+    `attachment_id must be a FreeAgent attachment id or its API URL (${FREEAGENT_BASE_URL}/attachments/<id>)`,
+  );
 }

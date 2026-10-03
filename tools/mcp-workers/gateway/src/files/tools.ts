@@ -35,7 +35,7 @@ export function fileContextFor(ctx: GatewayToolContext): FileContext {
 }
 
 const SOURCE_REFS =
-  "Source refs: drive:<fileId> · gmail:<messageId>/<attachmentId> · wa:<chatJid>/<messageId>. " +
+  "Source refs: drive:<fileId> · gmail:<messageId>/<attachmentId> · wa:<chatJid>/<messageId> · freeagent:attachment/<id>. " +
   "Append ?account=<label> to a drive: or gmail: ref to pick a linked account (gateway_list_accounts); " +
   "without it each service's default account is used.";
 
@@ -82,10 +82,10 @@ export function registerFileReadTools(server: McpServer, ctx: GatewayToolContext
       description:
         "A signed URL that downloads one file with plain curl, for a sandbox that cannot call MCP tools with bytes. " +
         `Returns {ref, url, expires_at, curl}; run the curl line with <path> replaced. The URL is a bearer credential valid for 15 minutes — do not paste it anywhere public. ${SOURCE_REFS} ` +
-        "Drive files are served directly (Docs/Slides as PDF, Sheets as xlsx). Gmail and WhatsApp refs are first copied into the Drive _Transit folder (needs write access); the returned ref is that copy, which is trashed after 7 days. " +
+        "Drive files are served directly (Docs/Slides as PDF, Sheets as xlsx). Any other ref (gmail:, wa:, freeagent:attachment/) is first copied into the Drive _Transit folder (needs write access); the returned ref is that copy, which is trashed after 7 days. " +
         "The sandbox must be allowed to reach the gateway host (egress allowlist).",
       inputSchema: { ref: z.string().describe("Source ref to download") },
-      // Not read-only: a gmail: or wa: ref is staged into Drive, which a
+      // Not read-only: a non-Drive ref (gmail:, wa:, freeagent:) is staged into Drive, which a
       // client auto-approving read-only tools must not do unasked. It stays
       // registered with the reads so a read-only session can still fetch
       // drive: refs; the staging branch checks the write grant itself.
@@ -119,7 +119,7 @@ export function registerFileReadTools(server: McpServer, ctx: GatewayToolContext
           // Staging writes a Drive file, so it needs the write grant even
           // though this tool is otherwise a read.
           if (!ctx.canWrite) {
-            throw new FileError(403, "downloading a gmail: or wa: ref stages it in Drive first, which needs write access; ask for a drive: ref instead");
+            throw new FileError(403, `downloading a ${parsed.kind.split("-")[0]}: ref stages it in Drive first, which needs write access; ask for a drive: ref instead`);
           }
           const result = await transfer(parsed, { kind: "drive-folder", parentId: TRANSIT_FOLDER }, files);
           await ctx.audit("file_download_url", `staged ${result.from} -> ${result.ref ?? "?"}`, "ok").catch(() => {});

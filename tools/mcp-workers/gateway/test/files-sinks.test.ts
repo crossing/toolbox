@@ -262,3 +262,71 @@ describe("gmail draft sink", () => {
     expect(cancelled).toBe(true);
   });
 });
+
+describe("freeagent attachments through transfer", () => {
+  const attachment = { id: "901", url: "https://api.freeagent.com/v2/attachments/901", file_name: "bill.pdf", content_type: PDF, file_size: 3 };
+
+  it("streams a FreeAgent attachment into a Drive folder", async () => {
+    const { client, calls } = drive({ id: "FAKEunused", parents: [] });
+    const freeagent = {
+      getAttachment: async () => attachment,
+      openAttachment: async () => ({ attachment, body: new Response(bytes("abc")).body! }),
+    };
+    const result = await transfer(
+      { kind: "freeagent-attachment", id: "901" },
+      { kind: "drive-folder", parentId: DEST },
+      fakeContext({ drive: client, freeagent }),
+    );
+    expect(result).toMatchObject({ from: "freeagent:attachment/901", to: `drive:folder/${DEST}`, mode: "streamed", ref: "drive:FAKEup01" });
+    expect(text(calls.find((c) => c.op === "uploadToSession")!.bytes!)).toBe("abc");
+  });
+
+  it("refuses an attachment over the sink's cap before downloading it", async () => {
+    let opened = false;
+    const freeagent = {
+      getAttachment: async () => ({ ...attachment, file_size: FILE_CAPS.whatsappSend + 1 }),
+      openAttachment: async () => {
+        opened = true;
+        throw new Error("must not download");
+      },
+    };
+    await expect(
+      transfer({ kind: "freeagent-attachment", id: "901" }, { kind: "wa-send", recipient: "447700900000" }, fakeContext({ freeagent })),
+    ).rejects.toMatchObject({ status: 413 });
+    expect(opened).toBe(false);
+  });
+
+  it("returns the attached record without presigned URLs", async () => {
+    const presigned = "https://storage.example.test/a.pdf?X-Amz-Credential=FAKE&X-Amz-Signature=FAKE";
+    const freeagent = {
+      async putUrl() {
+        return {
+          bill: {
+            url: "https://api.freeagent.com/v2/bills/123",
+            is_locked: false,
+            attachment: { url: "https://api.freeagent.com/v2/attachments/5", content_src: presigned, content_src_medium: presigned, content_src_small: presigned, file_name: "a.pdf" },
+          },
+        };
+      },
+    };
+    const sink = makeSink({ kind: "freeagent", target: "bill", id: "123" }, fakeContext({ freeagent }));
+    const result = await sink.put({ name: "a.pdf", mimeType: PDF, size: 1 }, bytes("a"));
+    expect(JSON.stringify(result)).not.toMatch(/content_src|X-Amz|storage\.example/);
+    expect((result.result as { bill: { attachment: unknown } }).bill.attachment).toEqual({
+      id: "5",
+      url: "https://api.freeagent.com/v2/attachments/5",
+      file_name: "a.pdf",
+    });
+  });
+
+  it("explains a locked-period refusal", async () => {
+    const { FreeAgentApiError } = await import("../src/freeagentapi");
+    const freeagent = {
+      async putUrl() {
+        throw new FreeAgentApiError(422, 'FreeAgent API error (status 422): [{"message":"attachable is locked"}]');
+      },
+    };
+    const sink = makeSink({ kind: "freeagent", target: "bill", id: "123" }, fakeContext({ freeagent }));
+    await expect(sink.put({ name: "a.pdf", mimeType: PDF, size: 1 }, bytes("a"))).rejects.toThrow(/locked accounting period/);
+  });
+});

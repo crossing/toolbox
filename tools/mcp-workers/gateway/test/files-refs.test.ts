@@ -22,6 +22,7 @@ describe("parseSourceRef", () => {
       messageId: "FAKEMSG0001",
     });
     expect(parseSourceRef("wa:120363000000000000@g.us/FAKEMSG0002").kind).toBe("wa");
+    expect(parseSourceRef("freeagent:attachment/901")).toEqual({ kind: "freeagent-attachment", id: "901" });
   });
 
   it("keeps a + in an account label rather than reading it as a space", () => {
@@ -50,7 +51,11 @@ describe("parseSourceRef", () => {
     ["wa:447700900000@s.whatsapp.net/bad id", /not a WhatsApp message id/],
     ["wa:447700900000@s.whatsapp.net/FAKEMSG0001?account=x", /take no \?account=/],
     ["wa:send/447700900000", /is a sink/],
-    ["freeagent:bill/123", /destination only/],
+    ["freeagent:bill/123", /is a sink/],
+    ["freeagent:attachment/abc", /not a FreeAgent attachment id/],
+    ["freeagent:attachment", /freeagent:attachment\/<id>/],
+    ["freeagent:invoice/1", /FreeAgent sources are freeagent:attachment/],
+    ["freeagent:attachment/1?account=x", /take no \?account=/],
   ])("rejects %j", (ref, message) => {
     expect(() => parseSourceRef(ref)).toThrow(message);
     expect(() => parseSourceRef(ref)).toThrow(FileError);
@@ -93,6 +98,7 @@ describe("parseSinkRef", () => {
     ["freeagent:invoice/1", /bill, explanation or expense/],
     ["freeagent:bill/abc", /not a FreeAgent id/],
     ["freeagent:bill/1?account=x", /take no \?account=/],
+    ["freeagent:attachment/901", /is a source/],
     ["dropbox:folder/x", /unknown scheme/],
   ])("rejects %j", (ref, message) => {
     expect(() => parseSinkRef(ref)).toThrow(message);
@@ -105,6 +111,7 @@ describe("formatRef", () => {
     "drive:FAKEfile01?account=work@example.com",
     "gmail:fakemsg0001/FAKE_att-01?account=me@example.org",
     "wa:447700900000@s.whatsapp.net/FAKEMSG0001",
+    "freeagent:attachment/901",
   ])("round-trips source %s", (ref) => {
     expect(formatRef(parseSourceRef(ref))).toBe(ref);
   });

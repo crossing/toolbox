@@ -6,10 +6,11 @@
 //   curl -sI .../files/healthcheck   204, no token: proves the host is reachable
 //
 // The token (files/signed.ts) is the whole credential, so this route sits in
-// front of the OAuth provider. Beyond the signature it re-checks only what an
-// owner would reach for after a leak: the user is still on ALLOWED_EMAILS and
-// the Files service is still on (Drive's own toggle is checked with the
-// client). Both bite before the PUT claim and before any Drive call, so
+// front of the OAuth provider. It is opaque — an id and a MAC — and names a
+// grant held server-side (grantStoreFor below). Beyond the MAC and the grant's
+// expiry and method, the route re-checks only what an owner would reach for
+// after a leak: the user is still on ALLOWED_EMAILS and the Files service is
+// still on (Drive's own toggle is checked with the client). Both bite before the PUT claim and before any Drive call, so
 // switching Files off kills every URL already issued. What a token binds:
 //
 //   GET  target = "<driveFileId>" or "<driveFileId>;export=<mime>" for a Google
@@ -17,14 +18,11 @@
 //        signed; a file that has since grown past it is refused.
 //   PUT  target = the Drive file id of a placeholder the issuing tool created
 //        in `_Transit`. The resumable session is opened here, at request time,
-//        against that file — never carried in the token, because a session URI
-//        is an uncapped upload credential and token payloads are readable.
+//        against that file — never stored in the grant, because a session URI
+//        is an uncapped upload credential.
 //
-// PUT is single-use. The marker is a row in the user's vault Durable Object,
-// not a KV key: a DO answers check-and-set atomically and consistently, while
-// KV is eventually consistent across locations for up to a minute, which is
-// exactly the window a replay would use. Rows are pruned on every claim once
-// their token has expired, so the table stays at "URLs live right now".
+// PUT is single-use: the grant's `used` flag is set by an atomic claim in the
+// grant store (see grantStoreFor for why that is a Durable Object, not KV).
 // The claim happens before any bytes move: a failed upload burns the URL, and
 // the caller asks for a fresh one rather than this route guessing whether
 // Drive kept a partial write.
@@ -32,7 +30,8 @@
 // Every response is no-store and no-referrer (the token is in the path), and
 // no error ever echoes the token, a session URI, or a Google error body. The
 // path does still reach Cloudflare's Workers Logs, which record each request
-// URL; docs/mcp-workers-infra.md records that as a known exposure.
+// URL: only an opaque id now, but still a bearer credential until it expires;
+// docs/mcp-workers-infra.md records that as a known exposure.
 
 import type { Fetcher } from "@toolbox/mcp-shared";
 import { decryptJson, importVaultKey } from "../crypto";
@@ -43,7 +42,14 @@ import type { VaultBlob } from "../manage";
 import { GOOGLE_ACCOUNT_SERVICE, SERVICES } from "../registry";
 import { NoLinkedAccountError, ServiceDisabledError } from "../toolutil";
 import { formatRef } from "./refs";
-import { verifyToken, type FileUrlMethod, type FileUrlPayload, type VerifyFailure } from "./signed";
+import {
+  verifyToken,
+  type FileGrantStore,
+  type FileUrlGrant,
+  type FileUrlMethod,
+  type StoredGrant,
+  type VerifyFailure,
+} from "./signed";
 import { FILE_CAPS, FileError } from "./types";
 
 export const FILES_PREFIX = "/files/";
@@ -98,26 +104,46 @@ const VERIFY_STATUS: Record<VerifyFailure, [number, string]> = {
   "wrong-method": [405, "file URL does not allow this method"],
 };
 
-// ---- single-use markers ----------------------------------------------------
+// ---- the grant store ----------------------------------------------------------
 
-/** The slice of SqlStorage the claim table needs; node:sqlite fits in tests. */
-export interface ClaimSql {
-  exec(query: string, ...bindings: unknown[]): { toArray(): Record<string, unknown>[] };
+/** How many Durable Object instances the grants spread over. */
+const GRANT_SHARDS = 8;
+const GRANT_STORE_PREFIX = "files-url-grants/";
+const JTI_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/** The DO name holding `jti`'s grant; a pure function of the jti, so lookup needs nothing else. */
+export function grantShardName(jti: string): string {
+  const index = Math.max(0, JTI_ALPHABET.indexOf(jti.charAt(0)));
+  return `${GRANT_STORE_PREFIX}${index % GRANT_SHARDS}`;
 }
 
-const CLAIM_SCHEMA = `CREATE TABLE IF NOT EXISTS file_url_claims (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL)`;
-
 /**
- * Record `jti` as used; true the first time, false on every later sight.
- * Runs inside the vault DO, whose single thread makes it atomic.
+ * Grants live in UserVault instances named "files-url-grants/<shard>", not in
+ * KV and not in the owner's own vault:
+ *
+ * - Durable Object, not KV: the PUT claim must be a strictly consistent
+ *   check-and-set. A DO runs one request at a time over its SQLite, so
+ *   claimGrant's UPDATE … WHERE used = 0 succeeds for exactly one caller; KV is
+ *   eventually consistent across locations for up to a minute, exactly the
+ *   window a replay would use, and has no compare-and-swap.
+ * - Keyed by jti shard, not by user: the route must find the grant before it
+ *   knows the user (the token no longer says), so the DO name is derived from
+ *   the jti alone.
+ * - The UserVault class, not a new one: it already exposes the three grant
+ *   methods, and reusing its namespace adds no binding and no migration. The
+ *   names cannot meet a real vault: vaultFor names are allowlisted emails,
+ *   which contain "@"; these never do. A shard instance's own VaultStore
+ *   tables stay empty.
  */
-export function claimFileUrl(sql: ClaimSql, jti: string, exp: number, now: number = Date.now()): boolean {
-  sql.exec(CLAIM_SCHEMA);
-  sql.exec("DELETE FROM file_url_claims WHERE exp < ?", now);
-  const rows = sql
-    .exec("INSERT INTO file_url_claims (jti, exp) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING RETURNING jti", jti, exp)
-    .toArray();
-  return rows.length === 1;
+export function grantStoreFor(env: Env): FileGrantStore {
+  const shard = (jti: string) => env.USER_VAULT.get(env.USER_VAULT.idFromName(grantShardName(jti)));
+  return {
+    put: async (jti, grant, now) => {
+      await shard(jti).putFileGrant(jti, grant, now);
+    },
+    get: async (jti, now) => (await shard(jti).getFileGrant(jti, now)) as StoredGrant | null,
+    claim: async (jti, now) => shard(jti).claimFileGrant(jti, now),
+  };
 }
 
 // ---- Google client outside a session -----------------------------------------
@@ -151,6 +177,27 @@ export async function googleClientForUser(
   return new GoogleClient(source, fetcher);
 }
 
+/** The slice of the user's vault that resolves which linked account a service uses. */
+export interface AccountResolver {
+  getAccountForService(
+    accountService: string,
+    service: string,
+    label?: string,
+  ): Promise<{ label: string } | null> | { label: string } | null;
+}
+
+/**
+ * The Drive account label a signed-URL grant is pinned to. `account` null
+ * means "the user's Drive account" — its pin, else the namespace default —
+ * resolved now, at issue time: the default can change on /manage before the
+ * URL is redeemed, and the grant must name the account the tool used.
+ */
+export async function pinDriveAccount(vault: AccountResolver, account: string | null): Promise<string> {
+  const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, "drive", account ?? undefined);
+  if (!acct) throw new NoLinkedAccountError("drive", account ?? undefined);
+  return acct.label;
+}
+
 // ---- the route ----------------------------------------------------------------
 
 export interface FilesDeps {
@@ -176,8 +223,8 @@ export function contentDisposition(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
-function driveClient(env: Env, payload: FileUrlPayload, deps: FilesDeps): Promise<GoogleClient> {
-  return googleClientForUser(env, payload.userId, "drive", payload.account ?? undefined, deps.fetcher);
+function driveClient(env: Env, grant: FileUrlGrant, deps: FilesDeps): Promise<GoogleClient> {
+  return googleClientForUser(env, grant.userId, "drive", grant.account ?? undefined, deps.fetcher);
 }
 
 async function driveMeta(client: GoogleClient, fileId: string): Promise<DriveFile> {
@@ -187,9 +234,9 @@ async function driveMeta(client: GoogleClient, fileId: string): Promise<DriveFil
   })) as DriveFile;
 }
 
-async function handleGet(env: Env, payload: FileUrlPayload, deps: FilesDeps, headOnly: boolean): Promise<Response> {
-  const { fileId, exportMime } = parseGetTarget(payload.target);
-  const client = await driveClient(env, payload, deps);
+async function handleGet(env: Env, grant: FileUrlGrant, deps: FilesDeps, headOnly: boolean): Promise<Response> {
+  const { fileId, exportMime } = parseGetTarget(grant.target);
+  const client = await driveClient(env, grant, deps);
   const meta = await driveMeta(client, fileId);
   const native = (meta.mimeType ?? "").startsWith("application/vnd.google-apps.");
   const name = meta.name ?? fileId;
@@ -206,8 +253,8 @@ async function handleGet(env: Env, payload: FileUrlPayload, deps: FilesDeps, hea
   }
 
   const size = Number(meta.size ?? "0");
-  if (size > payload.maxBytes) {
-    throw new FileError(409, `file is ${size} bytes, larger than the ${payload.maxBytes} it had when this URL was issued`);
+  if (size > grant.maxBytes) {
+    throw new FileError(409, `file is ${size} bytes, larger than the ${grant.maxBytes} it had when this URL was issued`);
   }
   headers["content-type"] = meta.mimeType || "application/octet-stream";
   headers["content-length"] = String(size);
@@ -219,7 +266,16 @@ async function handleGet(env: Env, payload: FileUrlPayload, deps: FilesDeps, hea
   return new Response(body, { status: 200, headers });
 }
 
-async function handlePut(request: Request, env: Env, payload: FileUrlPayload, deps: FilesDeps): Promise<Response> {
+async function handlePut(
+  request: Request,
+  env: Env,
+  jti: string,
+  grant: FileUrlGrant,
+  used: boolean,
+  deps: FilesDeps,
+): Promise<Response> {
+  const spent = () => fail(410, "file URL has already been used; ask for a new one");
+  if (used) return spent();
   // Size first, before the URL is spent: a client that forgot Content-Length
   // (chunked upload) or picked the wrong file can retry with the same URL.
   const declared = request.headers.get("content-length");
@@ -227,14 +283,17 @@ async function handlePut(request: Request, env: Env, payload: FileUrlPayload, de
     return fail(411, "Content-Length is required (curl -T sends it; chunked uploads are not accepted)");
   }
   const size = Number(declared);
-  const limit = Math.min(payload.maxBytes, FILE_CAPS.signedPut);
+  const limit = Math.min(grant.maxBytes, FILE_CAPS.signedPut);
   if (size > limit) return fail(413, `upload is ${size} bytes; this URL accepts at most ${limit}`);
 
-  const claimed = await vaultFor(env, payload.userId).claimFileUrl(payload.jti, payload.exp);
-  if (!claimed) return fail(410, "file URL has already been used; ask for a new one");
+  // The client is built before the claim (a vault lookup, no network): an
+  // account unlinked since the URL was issued is refused without burning it.
+  const client = await driveClient(env, grant, deps);
 
-  const client = await driveClient(env, payload, deps);
-  const fileId = payload.target;
+  // The atomic step: of any number of concurrent PUTs, exactly one gets true.
+  if (!(await grantStoreFor(env).claim(jti, (deps.now ?? Date.now)()))) return spent();
+
+  const fileId = grant.target;
   const meta = await driveMeta(client, fileId);
   const session = await client.startResumableUpload({}, meta.mimeType || "application/octet-stream", size, {
     fileId,
@@ -242,7 +301,7 @@ async function handlePut(request: Request, env: Env, payload: FileUrlPayload, de
   });
   const body = request.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() });
   const uploaded = (await client.uploadToSession(session, body, size)) as DriveFile;
-  const ref = formatRef({ kind: "drive", fileId, ...(payload.account !== null && { account: payload.account }) });
+  const ref = formatRef({ kind: "drive", fileId, ...(grant.account !== null && { account: grant.account }) });
   return json(200, {
     ref,
     name: uploaded.name ?? meta.name,
@@ -287,7 +346,12 @@ export async function handleFilesRequest(request: Request, env: Env, deps: Files
   else return fail(405, "method not allowed", { allow: "GET, HEAD, PUT" });
 
   if (!env.FILES_URL_KEY) return fail(503, "file URLs are not configured on this gateway");
-  const verified = await verifyToken(env.FILES_URL_KEY, token, verifyAs, deps.now);
+  let verified: Awaited<ReturnType<typeof verifyToken>>;
+  try {
+    verified = await verifyToken(env.FILES_URL_KEY, grantStoreFor(env), token, verifyAs, deps.now);
+  } catch {
+    return fail(500, "file transfer failed");
+  }
   if (!verified.ok) {
     const [status, message] = VERIFY_STATUS[verified.reason];
     return fail(status, message, verified.reason === "wrong-method" ? { allow: verifyAs === "GET" ? "PUT" : "GET, HEAD" } : {});
@@ -296,15 +360,15 @@ export async function handleFilesRequest(request: Request, env: Env, deps: Files
   try {
     // Revocation: an owner who pulls an email or switches Files off after a
     // leak expects issued URLs to stop now, not at their expiry.
-    const payload = verified.payload;
-    if (!emailAllowed(payload.userId, env.ALLOWED_EMAILS ?? "")) return fail(403, "file URL is not valid");
+    const { jti, grant, used } = verified;
+    if (!emailAllowed(grant.userId, env.ALLOWED_EMAILS ?? "")) return fail(403, "file URL is not valid");
     const filesDef = SERVICES.find((svc) => svc.id === "files");
-    if (!(await vaultFor(env, payload.userId).isServiceEnabled("files", filesDef?.defaultEnabled ?? true))) {
+    if (!(await vaultFor(env, grant.userId).isServiceEnabled("files", filesDef?.defaultEnabled ?? true))) {
       throw new ServiceDisabledError("files");
     }
     return verifyAs === "PUT"
-      ? await handlePut(request, env, verified.payload, deps)
-      : await handleGet(env, verified.payload, deps, method === "HEAD");
+      ? await handlePut(request, env, jti, grant, used, deps)
+      : await handleGet(env, grant, deps, method === "HEAD");
   } catch (err) {
     return errorResponse(err);
   }

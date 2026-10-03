@@ -234,3 +234,60 @@ describe("whatsapp source", () => {
     await expect(makeSource(ref, fakeContext({ whatsapp })).stat()).rejects.toThrow("inline cap is 32 KB");
   });
 });
+
+describe("freeagent attachment source", () => {
+  function fakeFreeagent(content: Uint8Array, statedSize: number) {
+    const calls: string[] = [];
+    let cancelled = false;
+    const attachment = { id: "901", url: "https://api.freeagent.com/v2/attachments/901", file_name: "bill.pdf", content_type: PDF, file_size: statedSize };
+    const client = {
+      async getAttachment(id: string) {
+        calls.push(`get ${id}`);
+        return attachment;
+      },
+      async openAttachment(id: string) {
+        calls.push(`open ${id}`);
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            // Two chunks, so a cap can bite mid-stream.
+            const half = Math.ceil(content.byteLength / 2);
+            controller.enqueue(content.slice(0, half));
+            controller.enqueue(content.slice(half));
+            controller.close();
+          },
+          cancel() {
+            cancelled = true;
+          },
+        });
+        return { attachment, body };
+      },
+    };
+    return { client, calls, wasCancelled: () => cancelled };
+  }
+
+  it("stats from metadata and streams a fresh download on open", async () => {
+    const fa = fakeFreeagent(bytes("%PDF-"), 5);
+    const source = makeSource({ kind: "freeagent-attachment", id: "901" }, fakeContext({ freeagent: fa.client }));
+    expect(await source.stat()).toEqual({ name: "bill.pdf", mimeType: PDF, size: 5 });
+    expect(fa.calls).toEqual(["get 901"]);
+    const opened = await source.open();
+    expect(await readBody(opened.body)).toBe("%PDF-");
+    expect(fa.calls).toEqual(["get 901", "open 901"]);
+  });
+
+  it("cuts the stream at the sink's cap when the stated size was too small", async () => {
+    const fa = fakeFreeagent(new Uint8Array(FILE_CAPS.whatsappSend + 10), 3);
+    const source = makeSource({ kind: "freeagent-attachment", id: "901" }, fakeContext({ freeagent: fa.client }), { cap: "whatsappSend" });
+    const opened = await source.open();
+    const err = await new Response(opened.body).arrayBuffer().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FileError);
+    expect(err).toMatchObject({ status: 413 });
+  });
+
+  it("refuses at open, releasing the download, when the fresh size is over the cap", async () => {
+    const fa = fakeFreeagent(bytes("x"), FILE_CAPS.whatsappSend + 1);
+    const source = makeSource({ kind: "freeagent-attachment", id: "901" }, fakeContext({ freeagent: fa.client }), { cap: "whatsappSend" });
+    await expect(source.open()).rejects.toMatchObject({ status: 413 });
+    expect(fa.wasCancelled()).toBe(true);
+  });
+});

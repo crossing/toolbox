@@ -105,3 +105,14 @@ describe("VaultStore services and audit", () => {
     expect(vault.listAudit(2).map((e) => e.tool)).toEqual(["c", "b"]);
   });
 });
+
+describe("VaultStore schema", () => {
+  it("drops the round-1 file_url_claims table on start", () => {
+    const sql = makeFakeSql();
+    sql.exec("CREATE TABLE file_url_claims (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL)");
+    sql.exec("INSERT INTO file_url_claims (jti, exp) VALUES (?, ?)", "FAKEjti", 1);
+    new VaultStore(sql);
+    const tables = sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'file_url_claims'").toArray();
+    expect(tables).toEqual([]);
+  });
+});
