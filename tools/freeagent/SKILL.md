@@ -1,6 +1,6 @@
 ---
 name: freeagent
-description: Manage FreeAgent bills, bank transactions, and explanations. Prefer the MCP gateway's freeagent_* tools; this skill also documents the freeagent CLI, which is the fallback for attaching receipts.
+description: Manage FreeAgent bills, bank transactions, explanations and their attachments. Prefer the MCP gateway's freeagent_* tools and file_transfer; this skill also documents the freeagent CLI, the fallback for attaching a file that only exists on local disk.
 ---
 
 # FreeAgent Skill
@@ -13,16 +13,16 @@ and the **`freeagent` CLI** (fallback).
 - When you need to list or create bills in FreeAgent.
 - When you need to see unexplained bank transactions.
 - When you need to reconcile a transaction by adding an explanation.
-- When you need to attach a receipt or invoice (PDF/Image) to a bill or a transaction
-  explanation — CLI only, see below.
+- When you need to attach a receipt or invoice (PDF/Image) to a bill, expense or
+  transaction explanation, read an attachment, or remove one — see Attachments below.
 
 ## Prefer the MCP gateway
 
 The hosted MCP gateway (connector "Gateway", `https://mcp.xing.works/mcp`) exposes
-sixteen `freeagent_*` tools. Use them by default: they hold their own FreeAgent tokens,
+eighteen `freeagent_*` tools. Use them by default: they hold their own FreeAgent tokens,
 so they cost no 1Password authorization, reads and writes both execute directly, and
-every write is recorded in the gateway's audit log. `freeagent_explanation_delete` is
-destructive and takes `confirm: true`.
+every write is recorded in the gateway's audit log. `freeagent_explanation_delete` and
+`freeagent_attachment_delete` are destructive and take `confirm: true`.
 
 | Task | Gateway tool | CLI equivalent |
 |------|--------------|----------------|
@@ -38,10 +38,49 @@ destructive and takes `confirm: true`.
 | Balance sheet / P&L / trial balance | `freeagent_balance_sheet`, `freeagent_profit_and_loss`, `freeagent_trial_balance` | `freeagent balance-sheet\|profit-and-loss\|trial-balance` |
 | Look up contacts, categories, users | `freeagent_contacts_list`, `freeagent_categories_list`, `freeagent_users_list` | — (not in the CLI) |
 | **Attach a file** | `file_transfer` to `freeagent:bill\|explanation\|expense/<id>` (see below) | `freeagent bills\|explanations attach` |
+| Show an attachment's metadata | `freeagent_attachment_get` | — |
+| Copy an attachment out (e.g. to Drive) | `file_transfer` from `freeagent:attachment/<id>` | — |
+| Delete an attachment | `freeagent_attachment_delete` (`confirm: true`) | — |
 
 Gateway tools take snake_case arguments matching the CLI flags (`bank_account`,
 `from_date`, `sales_tax_rate`, `ec_status`, `paid_bill`, `transfer_account`), and API
 URLs rather than ids, exactly as the CLI does.
+
+### Paging and filters
+
+`freeagent_bills_list`, `freeagent_expenses_list`, `freeagent_bank_transactions_list` and
+`freeagent_contacts_list` return one page at a time:
+
+```
+{ bills: [...], page: 1, per_page: 25, next_page: 2, order: "newest", total: 412 }
+```
+
+| Argument | Tools | Notes |
+|---|---|---|
+| `page`, `per_page` | all four | `per_page` is 1-100. Defaults: 25 for bills, 100 for the rest. |
+| `next_page` (result) | all four | `null` on the last page. Pass it back as `page` to continue. |
+| `sort` | bills, expenses, bank transactions | `newest` (default), `oldest`, or `upstream` (FreeAgent's own order, not by date; one request). |
+| `sort` | contacts | FreeAgent's own: `name` (default), `created_at`, `updated_at`; `-` prefix for descending. |
+| `view` | all four | Bills: `all`, `open`, `overdue`, `open_or_overdue`, `open_or_overdue_payments`, `open_or_overdue_refunds`, `paid`, `recurring`, `hire_purchase`, `cis`. Expenses: `recent`, `recurring`. Bank transactions: `all`, `unexplained`, `explained`, `manual`, `imported`, `marked_for_review`. |
+| `from_date`, `to_date` | bills, expenses, bank transactions | `YYYY-MM-DD`. |
+| `updated_since` | all four | ISO 8601 timestamp. |
+| `contact` | bills | Contact API URL or bare id. |
+
+FreeAgent documents no order for bills, expenses or bank transactions, and its live order
+is not by date: an unfiltered bills call returned the 25 oldest (2010), and expenses come
+back interleaved across years. So for `newest` and `oldest` the gateway reads every
+matching record (pages of 100, up to 1000 records), sorts on `dated_on` and returns the
+requested page; `total` is the matching count. Past 1000 matches it returns FreeAgent's own
+page with `order: "upstream"` and a `note` — narrow with `from_date`/`to_date` or `view`.
+If a record is added or removed while the list is read, the page carries a `note` saying so.
+
+### Locked periods
+
+Records in a locked accounting period carry `is_locked: true` and a `locked_reason`. Every
+gateway read puts these first in each record. A locked record refuses edits and
+attachments: FreeAgent answers `422 attachable is locked`, and `file_transfer` turns that
+into an error that names the lock. A paid bill in an open period still takes attachments.
+Check `is_locked` before attaching.
 
 ### Attachments
 
@@ -53,16 +92,23 @@ reach (Drive, Gmail, WhatsApp) server-side with the `gateway-files` skill:
 file_transfer from=gmail:<messageId>/<attachmentId> to=freeagent:bill/<id> description="Receipt"
 ```
 
-That path caps attachments at 5 MB and has not yet been exercised against live
-FreeAgent; read the record back to confirm the attachment landed. For a local file, or
-when the gateway path fails, attach through the CLI:
+The cap is 5 MB. Read the record back to confirm the attachment landed; its `attachment`
+shows `id`, `file_name`, `content_type` and `file_size`. FreeAgent's expiring download
+URLs (`content_src*`) are never returned. To get the bytes out, use
+`file_transfer from=freeagent:attachment/<id> to=drive:folder/<folderId>`.
+
+To replace a wrong attachment, delete it with
+`freeagent_attachment_delete attachment_id=<id> confirm=true`, then attach again. Both
+steps fail on a locked record.
+
+The CLI is needed only for a file that exists solely on local disk and cannot first be
+uploaded with the `gateway-files` sandbox recipe:
 
 ```bash
 op-freeagent bills attach --url <bill_uri> --file <local_path>
 op-freeagent explanations attach --url <explanation_uri> --file <local_path>
 ```
 
-Tracked as `work-ysf.1`.
 
 ## Log the gaps you hit
 
@@ -85,7 +131,7 @@ command through `op-freeagent`, never bare `freeagent`. Each invocation costs on
 1Password desktop authorization — which is the reason the gateway comes first.
 
 ### Bills
-- **List bills:** `freeagent bills list`
+- **List bills:** `freeagent bills list` (FreeAgent's own order, which is not by date; first page only)
 - **Create a bill:** 
   `freeagent bills create --contact <contact_uri> --reference <ref> --date <yyyy-mm-dd> --due <yyyy-mm-dd> --category <cat_uri> --value <amount>`
 - **Attach a file to a bill:**

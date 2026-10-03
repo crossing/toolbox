@@ -12,25 +12,22 @@ FreeAgent answers 401. Tokens never touch disk.
 ## Prefer the MCP gateway
 
 The hosted MCP gateway (connector "Gateway", `https://mcp.xing.works/mcp`) is the
-first choice for FreeAgent work. Its sixteen `freeagent_*` tools cover every
-command this CLI has except file attachment, they hold their own FreeAgent
-tokens so they cost no 1Password authorization, and reads and writes both
-execute directly — `freeagent_explanation_delete` takes `confirm: true`, and
-every write lands in the gateway's audit log.
+first choice for FreeAgent work. Its eighteen `freeagent_*` tools cover every
+command this CLI has, they hold their own FreeAgent tokens so they cost no
+1Password authorization, and every write lands in the gateway's audit log.
+`freeagent_explanation_delete` and `freeagent_attachment_delete` take
+`confirm: true`.
 
-This CLI is the fallback for the one thing the gateway cannot do: **attaching a
-receipt or supplier invoice**. There is no gateway tool for it, and no `file`
-argument on `freeagent_bill_create` / `freeagent_explanation_create` /
-`freeagent_expense_create`. Create the record through the gateway, then attach
-through this CLI:
+Attaching a receipt or supplier invoice also goes through the gateway:
+`file_transfer` from a Drive, Gmail or WhatsApp ref (or an upload URL from
+`file_upload_url`) to `freeagent:bill/<id>`, `freeagent:explanation/<id>` or
+`freeagent:expense/<id>`. See the `gateway-files` skill. Use this CLI's
+`attach` commands only when the gateway is unavailable:
 
 ```bash
 op-freeagent bills attach --url <bill_uri> --file <local_path>
 op-freeagent explanations attach --url <explanation_uri> --file <local_path>
 ```
-
-Tracked as `work-ysf.1`; see the "Log the gaps you hit" section in the
-`freeagent` skill before filing anything new.
 
 ## Usage
 

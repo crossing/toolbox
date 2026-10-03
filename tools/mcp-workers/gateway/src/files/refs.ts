@@ -5,6 +5,7 @@
 //
 // The only query parameter is `account`, and only on refs for multi-account
 // services (Drive, Gmail). WhatsApp has one bridge and FreeAgent one company.
+// FreeAgent is a sink (bill/explanation/expense) and, for attachments, a source.
 
 import { FileError, TRANSIT_FOLDER, type FreeAgentTarget, type SinkRef, type SourceRef } from "./types";
 
@@ -18,7 +19,8 @@ const WA_MESSAGE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const NUMERIC_ID = /^[0-9]{1,20}$/;
 const FREEAGENT_TARGETS: readonly FreeAgentTarget[] = ["bill", "explanation", "expense"];
 
-const SOURCE_SHAPES = "drive:<fileId>[?account=], gmail:<messageId>/<attachmentId>[?account=], wa:<chatJid>/<messageId>";
+const SOURCE_SHAPES =
+  "drive:<fileId>[?account=], gmail:<messageId>/<attachmentId>[?account=], wa:<chatJid>/<messageId>, freeagent:attachment/<id>";
 const SINK_SHAPES =
   "drive:folder/<parentId>[?account=], gmail:draft/<draftId>[?account=], wa:send/<recipient>, freeagent:bill|explanation|expense/<id>";
 
@@ -94,8 +96,18 @@ export function parseSourceRef(ref: string): SourceRef {
       if (!WA_MESSAGE_ID.test(messageId)) fail(`"${ref}": "${messageId}" is not a WhatsApp message id`);
       return { kind: "wa", chatJid, messageId };
     }
-    case "freeagent":
-      return fail(`"${ref}": FreeAgent is a destination only; expected one of ${SOURCE_SHAPES}`);
+    case "freeagent": {
+      noAccount(ref, s, "FreeAgent");
+      const [what, id] = twoParts(ref, s.path, "freeagent:attachment/<id>");
+      if (what !== "attachment") {
+        if ((FREEAGENT_TARGETS as readonly string[]).includes(what)) {
+          fail(`"${ref}" is a sink (a record to attach to); to read a FreeAgent file use freeagent:attachment/<id>`);
+        }
+        fail(`"${ref}" is malformed; FreeAgent sources are freeagent:attachment/<id>`);
+      }
+      if (!NUMERIC_ID.test(id)) fail(`"${ref}": "${id}" is not a FreeAgent attachment id (the number at the end of its url)`);
+      return { kind: "freeagent-attachment", id };
+    }
     default:
       return fail(`"${ref}": unknown scheme "${s.scheme}"; expected one of ${SOURCE_SHAPES}`);
   }
@@ -133,6 +145,7 @@ export function parseSinkRef(ref: string): SinkRef {
     case "freeagent": {
       noAccount(ref, s, "FreeAgent");
       const [target, id] = twoParts(ref, s.path, "freeagent:bill|explanation|expense/<id>");
+      if (target === "attachment") fail(`"${ref}" is a source (a file to read), not a record to attach to`);
       if (!(FREEAGENT_TARGETS as readonly string[]).includes(target)) {
         fail(`"${ref}": FreeAgent destinations are bill, explanation or expense, not "${target}"`);
       }
@@ -158,6 +171,8 @@ export function formatRef(ref: SourceRef | SinkRef): string {
       return `gmail:${ref.messageId}/${ref.attachmentId}${accountSuffix(ref.account)}`;
     case "wa":
       return `wa:${ref.chatJid}/${ref.messageId}`;
+    case "freeagent-attachment":
+      return `freeagent:attachment/${ref.id}`;
     case "drive-folder":
       return `drive:folder/${ref.parentId}${accountSuffix(ref.account)}`;
     case "gmail-draft":

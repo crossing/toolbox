@@ -10,7 +10,7 @@
 // be tested without a Durable Object runtime.
 
 import { DurableObject } from "cloudflare:workers";
-import { claimFileUrl } from "./files/http";
+import { claimGrant, getGrant, putGrant, type FileUrlGrant, type StoredGrant } from "./files/signed";
 import { VaultStore, type AccountInfo, type AuditEntry, type CatalogConfig } from "./vaultstore";
 
 export type { AccountInfo, AuditEntry, CatalogConfig } from "./vaultstore";
@@ -83,9 +83,22 @@ export class UserVault extends DurableObject<unknown> {
     this.store.setSetting(key, value);
   }
 
-  /** Single-use marker for a signed PUT URL (files/http.ts); true the first time only. */
-  claimFileUrl(jti: string, exp: number): boolean {
-    return claimFileUrl(this.ctx.storage.sql, jti, exp);
+  // Signed file URL grants (files/signed.ts). These are called only on the
+  // "files-url-grants/<shard>" instances (files/http.ts grantStoreFor), never
+  // on a user's own vault: the route must find a grant before it knows whose
+  // it is.
+
+  putFileGrant(jti: string, grant: FileUrlGrant, now: number): void {
+    putGrant(this.ctx.storage.sql, jti, grant, now);
+  }
+
+  getFileGrant(jti: string, now: number): StoredGrant | null {
+    return getGrant(this.ctx.storage.sql, jti, now);
+  }
+
+  /** Single use for a PUT URL: true for exactly one caller, never after expiry. */
+  claimFileGrant(jti: string, now: number): boolean {
+    return claimGrant(this.ctx.storage.sql, jti, now);
   }
 
   appendAudit(entry: AuditEntry): void {

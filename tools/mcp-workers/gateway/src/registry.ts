@@ -44,7 +44,11 @@ export interface GatewayToolContext {
   listAccounts(): Promise<AccountInfo[]>;
   /** Where the `_Transit` folder id is cached: the user's vault. */
   transitCache: TransitCache;
-  /** Sign a /files/<token> URL as this user (files/signed.ts); 15 minutes. */
+  /**
+   * Issue an opaque /files/<token> URL as this user (files/signed.ts); 15
+   * minutes. `account` null means the user's Drive account; either way the
+   * grant stores the resolved label, so the URL keeps to that account.
+   */
   signFileUrl(req: {
     account: string | null;
     method: FileUrlMethod;
@@ -170,7 +174,7 @@ const freeagentService: ServiceDef = {
   id: "freeagent",
   title: "FreeAgent",
   description:
-    "Accounting reads (bank accounts/transactions, bills, expenses, contacts, reports) and writes (bill/explanation/expense create, approve; deletes confirm-gated).",
+    "Accounting reads (bank accounts/transactions, bills, expenses, contacts, attachments, reports; paged, newest first) and writes (bill/explanation/expense create, approve; explanation and attachment deletes confirm-gated).",
   defaultEnabled: true,
   accountService: FREEAGENT_ACCOUNT_SERVICE,
   registerRead(server, ctx) {

@@ -14,6 +14,11 @@
 //   wa     streamed through the bridge's openMedia; a bridge deployed before
 //          openMedia existed is detected by the RPC's own refusal and falls
 //          back to downloadMedia and its inline caps.
+//   freeagent:attachment
+//          streamed. stat() reads the attachment's metadata; open() reads it
+//          again for a fresh presigned content_src (they live ~30 s) and
+//          streams it inside FreeAgentClient.openAttachment, so the URL never
+//          leaves the client. The stream is cut at the sink's cap.
 
 import type { FreeAgentClient } from "../freeagentapi";
 import { attachExportFor, DRIVE, exportedFilename } from "../drive";
@@ -23,7 +28,7 @@ import { base64UrlToBytes } from "../mime";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 import { formatRef } from "./refs";
 import type { TransitCache } from "./transit";
-import { enforceCap, FileError, readAll, type FileCap, type FileMeta, type OpenedFile, type Source, type SourceRef } from "./types";
+import { enforceCap, FileError, FILE_CAPS, readAll, type FileCap, type FileMeta, type OpenedFile, type Source, type SourceRef } from "./types";
 
 /** Everything sources and sinks resolve through; built per tool call from the gateway context. */
 export interface FileContext {
@@ -396,6 +401,73 @@ class WhatsAppSource implements Source {
   }
 }
 
+// ---- freeagent ------------------------------------------------------------
+
+/**
+ * Pass `body` through, failing the stream with a 413 FileError once more than
+ * the cap has gone by — for a source whose stated size could be wrong.
+ */
+export function capStream(body: ReadableStream<Uint8Array>, cap: FileCap, what = "file"): ReadableStream<Uint8Array> {
+  const limit = FILE_CAPS[cap];
+  let total = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > limit) {
+          try {
+            enforceCap(total, cap, what);
+          } catch (err) {
+            controller.error(err);
+            return;
+          }
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+}
+
+class FreeAgentAttachmentSource implements Source {
+  private meta?: Promise<FileMeta>;
+
+  constructor(
+    readonly ref: Extract<SourceRef, { kind: "freeagent-attachment" }>,
+    private ctx: FileContext,
+    private opts: SourceOptions = {},
+  ) {}
+
+  stat(): Promise<FileMeta> {
+    return (this.meta ??= this.ctx.freeagent().then(async (client) => toMeta(await client.getAttachment(this.ref.id), this.ref.id)));
+  }
+
+  async open(): Promise<OpenedFile> {
+    const client = await this.ctx.freeagent();
+    const { attachment, body } = await client.openAttachment(this.ref.id);
+    const meta = toMeta(attachment, this.ref.id);
+    if (!this.opts.cap) return { meta, body };
+    try {
+      enforceCap(meta.size, this.opts.cap, `"${meta.name}"`);
+    } catch (err) {
+      await body.cancel().catch(() => {});
+      throw err;
+    }
+    return { meta, body: capStream(body, this.opts.cap, `"${meta.name}"`) };
+  }
+}
+
+function toMeta(
+  attachment: { file_name?: string; content_type?: string; file_size?: number | string },
+  id: string,
+): FileMeta {
+  const size = Number(attachment.file_size ?? 0);
+  return {
+    name: attachment.file_name || `freeagent-attachment-${id}`,
+    mimeType: attachment.content_type || "application/octet-stream",
+    size: Number.isFinite(size) && size >= 0 ? size : 0,
+  };
+}
+
 export function makeSource(ref: SourceRef, ctx: FileContext, opts: SourceOptions = {}): Source {
   switch (ref.kind) {
     case "drive":
@@ -404,5 +476,7 @@ export function makeSource(ref: SourceRef, ctx: FileContext, opts: SourceOptions
       return new GmailSource(ref, ctx);
     case "wa":
       return new WhatsAppSource(ref, ctx);
+    case "freeagent-attachment":
+      return new FreeAgentAttachmentSource(ref, ctx, opts);
   }
 }

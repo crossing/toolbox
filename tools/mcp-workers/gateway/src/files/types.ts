@@ -8,6 +8,7 @@
 //   sources  drive:<fileId>[?account=]
 //            gmail:<messageId>/<attachmentId>[?account=]
 //            wa:<chatJid>/<messageId>
+//            freeagent:attachment/<attachmentId>
 //   sinks    drive:folder/<parentId>[?account=]   (parentId may be _Transit or root)
 //            gmail:draft/<draftId>[?account=]
 //            wa:send/<recipient>
@@ -83,7 +84,8 @@ export const TRANSIT_FOLDER = "_Transit";
 export type SourceRef =
   | { kind: "drive"; fileId: string; account?: string }
   | { kind: "gmail"; messageId: string; attachmentId: string; account?: string }
-  | { kind: "wa"; chatJid: string; messageId: string };
+  | { kind: "wa"; chatJid: string; messageId: string }
+  | { kind: "freeagent-attachment"; id: string };
 
 export type FreeAgentTarget = "bill" | "explanation" | "expense";
 

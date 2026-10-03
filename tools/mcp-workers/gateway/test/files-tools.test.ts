@@ -12,8 +12,12 @@ import { FILE_CAPS } from "../src/files/types";
 import { SERVICES, type GatewayToolContext } from "../src/registry";
 import { registerRelayTools } from "../src/relay";
 import { bytes, fakeGoogle, fakeVault, type GCall } from "./files-fake";
+import { makeGrantStore } from "./grantfake";
 
 const KEY = "test-files-url-key-not-a-secret";
+// One grant store for the file: tokens are minted by the harness and read
+// back by tokenPayload, as the real shards serve both sides.
+const grants = makeGrantStore();
 const ORIGIN = "https://gateway.example";
 const DRIVE_FILES = "https://www.googleapis.com/drive/v3/files";
 const PDF = "application/pdf";
@@ -60,8 +64,8 @@ function harness(opts: {
     },
     transitCache: fakeVault(),
     async signFileUrl(req: Parameters<GatewayToolContext["signFileUrl"]>[0]) {
-      const { token, payload } = await signToken(KEY, { ...req, userId: "owner@example.com" });
-      return { url: fileUrl(ORIGIN, token), expiresAt: payload.exp };
+      const { token, grant } = await signToken(KEY, grants, { ...req, userId: "owner@example.com" });
+      return { url: fileUrl(ORIGIN, token), expiresAt: grant.exp };
     },
     async audit(tool: string, summary: string) {
       audits.push(`${tool}: ${summary}`);
@@ -93,9 +97,12 @@ function harness(opts: {
 
 async function tokenPayload(url: string, method: "GET" | "PUT") {
   const token = url.slice(`${ORIGIN}/files/`.length);
-  const verified = await verifyToken(KEY, token, method);
+  // The URL itself must say nothing about whose file it is or where it goes.
+  expect(url).not.toContain("owner@example.com");
+  expect(url).not.toContain("FAKE");
+  const verified = await verifyToken(KEY, grants, token, method);
   if (!verified.ok) throw new Error(`token did not verify: ${verified.reason}`);
-  return verified.payload;
+  return verified.grant;
 }
 
 describe("file_stat", () => {
@@ -325,6 +332,16 @@ describe("file_download_url", () => {
     const { isError, text } = await call("file_download_url", { ref: "gmail:FAKEMSG01/FAKEATT01" });
     expect(isError).toBe(true);
     expect(text).toContain("write access");
+    expect(text).toContain("gmail: ref");
+    expect(drive.calls).toEqual([]);
+  });
+
+  it("names a freeagent: ref in the refusal", async () => {
+    const { call, drive } = harness({ canWrite: false });
+    const { isError, text } = await call("file_download_url", { ref: "freeagent:attachment/12345" });
+    expect(isError).toBe(true);
+    expect(text).toContain("freeagent: ref stages it in Drive");
+    expect(text).not.toContain("gmail");
     expect(drive.calls).toEqual([]);
   });
 });

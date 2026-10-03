@@ -122,7 +122,7 @@ live only inside the Worker and die with it. Current names:
 the Worker and 1Password. Lose both and every linked account must be
 re-linked; the vault rows become undecryptable.
 
-`FILES_URL_KEY` is the HMAC key for signed file URLs (below). Rolling it
+`FILES_URL_KEY` is the HMAC key for file URL tokens (below). Rolling it
 voids every outstanding URL — at most 15 minutes' worth — and nothing else;
 generate a fresh one with `openssl rand -base64 32` whenever in doubt. It is
 deliberately not `COOKIE_SECRET`, so a session cookie can never pass as a
@@ -132,10 +132,27 @@ file URL.
 
 `https://mcp.xing.works/files/<token>` lets a sandbox with nothing but curl
 move one file into or out of Drive (`curl -T file "$url"`, `curl -o file
-"$url"`). The token is an HMAC-signed bearer credential naming the user,
-Drive account, method, Drive file id and byte limit; it lives 15 minutes,
-and a PUT URL works once (the marker is a row in that user's `UserVault`).
-The route is served before the OAuth provider and takes no other auth.
+"$url"`). The token is an opaque bearer credential, `<id>.<hmac>`: a random
+128-bit id and an HMAC-SHA256 of it under `FILES_URL_KEY`. It carries no
+user, account, file id, size or expiry. Those live server-side as a *grant*
+(user, Drive account, method, Drive file id, byte limit, expiry) keyed by
+the id, in a `file_url_grants` SQLite table inside `UserVault` instances
+named `files-url-grants/0` … `files-url-grants/7` (shard = first character
+of the id). These reuse the `USER_VAULT` binding — no extra binding or
+migration — and can never collide with a real vault, whose name is an email.
+A Durable Object rather than KV because a PUT URL must work exactly once:
+the DO's claim is an atomic check-and-set, while KV is eventually consistent
+and has no compare-and-swap. A grant lives 15 minutes; expired rows are
+deleted on the next write to the shard or the next read that finds them,
+and an expired grant is never honoured. The MAC is checked before any
+lookup, so a forged token costs no DO call. Tokens from before 2026-10-03
+(base64 JSON payloads, which exposed the user's email) are refused as
+malformed. The grant's Drive account is the label resolved when the URL is
+issued, never "the default", so changing the default Drive account on
+/manage cannot redirect an outstanding URL. Round 1 kept PUT claims in a
+`file_url_claims` table inside each user's own vault; `VaultStore` now drops
+that table on start. The route is served before the OAuth provider and takes
+no other auth.
 Uploads stream into a Drive resumable session opened at request time; the
 session URI never leaves the Worker.
 
@@ -146,10 +163,12 @@ at once rather than at its expiry.
 
 **Known exposure: tokens in Workers Logs.** The token is the URL path, and
 the gateway has `observability` on, so Cloudflare's Workers Logs record
-every `/files/<token>` URL with the invocation. Anyone with log read access
-on the Cloudflare account can replay a GET URL (or an unspent PUT URL) for
-the rest of its 15 minutes. Accepted for now: it needs log read access on
-the Cloudflare account, and the window is 15 minutes. To
+every `/files/<token>` URL with the invocation. Since 2026-10-03 the logged
+URL carries only an opaque id — no email, account or file id — but it is
+still a bearer credential: anyone with log read access on the Cloudflare
+account can replay a GET URL (or an unspent PUT URL) for the rest of its 15
+minutes. Accepted for now: it needs log read access on the Cloudflare
+account, and the window is 15 minutes. To
 close it, set `observability.logs.invocation_logs: false` in
 `gateway/wrangler.jsonc` (losing request logs for every route), or move the
 token out of the path.

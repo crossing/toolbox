@@ -19,6 +19,7 @@ Use it instead of base64 round-trips (`gmail_get_attachment` → `drive_create_f
 | Drive file | `drive:<fileId>` | `drive_search`, `drive_get_file` |
 | Gmail attachment | `gmail:<messageId>/<attachmentId>` | `gmail_get_message` |
 | WhatsApp media | `wa:<chatJid>/<messageId>` | `whatsapp_list_messages` |
+| FreeAgent attachment | `freeagent:attachment/<id>` | `attachment.id` on a bill, expense or explanation; `freeagent_attachment_get` |
 
 Sinks (only valid as `to`):
 
@@ -51,6 +52,7 @@ file_transfer from=drive:<fileId>          to=gmail:draft/<draftId>
 file_transfer from=wa:<chatJid>/<msgId>    to=drive:folder/<folderId>
 file_transfer from=drive:<fileId>          to=wa:send/447700900111  confirm=true
 file_transfer from=gmail:<msg>/<att>       to=freeagent:bill/<billId>  description="Receipt"
+file_transfer from=freeagent:attachment/<id>  to=drive:folder/<folderId>
 ```
 
 - **Drive to Drive in the same account is free.** Out of `_Transit` the file is *moved*
@@ -62,6 +64,11 @@ file_transfer from=gmail:<msg>/<att>       to=freeagent:bill/<billId>  descripti
   person asked for that send to that recipient.
 - The result reports `mode` (`moved`, `copied` or `streamed`). When the file landed in
   Drive, it also gives the new `ref`.
+- **FreeAgent records in a locked accounting period refuse attachments.** Check
+  `is_locked` on the bill, expense or explanation first. The error names the lock.
+- **FreeAgent attachments** are read with `freeagent_attachment_get` (metadata only) and
+  removed with `freeagent_attachment_delete` (`confirm: true`). Their expiring download
+  URLs never reach the conversation; the gateway fetches one only while streaming.
 
 The older pair tools (`drive_save_gmail_attachment`, `drive_save_whatsapp_media`,
 `gmail_attach_drive_file`, `whatsapp_send_drive_file`) are now wrappers over
@@ -145,6 +152,7 @@ A transfer over a cap is refused before any bytes move, with both numbers in the
 | Gmail attachment as a source | 25 MB | one base64 JSON field |
 | Google-native export | 10 MB | Drive's export limit |
 | WhatsApp media as a source | 100 MB (32 MB if the message has no size) | bridge streaming ceiling |
+| FreeAgent attachment as a source | streamed; the sink's cap applies | read from FreeAgent's storage |
 | → Gmail draft | 18 MB total, less what the draft already holds | 25 MB message after encoding |
 | → WhatsApp send | 5 MB | bridge send limit |
 | → FreeAgent attachment | 5 MB | conservative; base64 in JSON |

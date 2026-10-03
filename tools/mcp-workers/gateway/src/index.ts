@@ -27,7 +27,7 @@ import {
 } from "@toolbox/mcp-shared";
 import { decryptJson, encryptJson, importVaultKey } from "./crypto";
 import { vaultFor, type Env } from "./env";
-import { fileUrl, googleClientForUser, handleFilesRequest } from "./files/http";
+import { fileUrl, googleClientForUser, grantStoreFor, handleFilesRequest, pinDriveAccount } from "./files/http";
 import { signToken } from "./files/signed";
 import { FileError } from "./files/types";
 import { listTransitFolders, transitCacheKey, trashExpired } from "./files/transit";
@@ -159,8 +159,13 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
         if (!this.env.FILES_URL_KEY || !this.env.PUBLIC_ORIGIN) {
           throw new FileError(503, "signed file URLs are not configured on this gateway (FILES_URL_KEY / PUBLIC_ORIGIN)");
         }
-        const { token, payload } = await signToken(this.env.FILES_URL_KEY, { ...req, userId: email });
-        return { url: fileUrl(this.env.PUBLIC_ORIGIN, token), expiresAt: payload.exp };
+        const account = await pinDriveAccount(vault, req.account);
+        const { token, grant } = await signToken(this.env.FILES_URL_KEY, grantStoreFor(this.env), {
+          ...req,
+          account,
+          userId: email,
+        });
+        return { url: fileUrl(this.env.PUBLIC_ORIGIN, token), expiresAt: grant.exp };
       },
       audit: async (tool, summary, status) =>
         vault.appendAudit({ ts: Date.now(), tool, summary, status }),

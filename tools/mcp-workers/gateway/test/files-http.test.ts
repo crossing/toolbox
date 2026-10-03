@@ -3,11 +3,11 @@
 // kind of bad token gets back, that a PUT URL works exactly once, that size
 // limits bite before any bytes move, and that nothing secret is echoed.
 
-import { afterEach, describe, expect, it } from "vitest";
-import { encryptJson, importVaultKey } from "../src/crypto";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { encryptJson, importVaultKey, signToken as signCookie } from "../src/crypto";
 import type { Env } from "../src/env";
-import { claimFileUrl, contentDisposition, fileUrl, handleFilesRequest } from "../src/files/http";
-import { signToken, type SignRequest } from "../src/files/signed";
+import { contentDisposition, fileUrl, grantShardName, grantStoreFor, handleFilesRequest, pinDriveAccount } from "../src/files/http";
+import { claimGrant, getGrant, putGrant, signToken, type SignRequest } from "../src/files/signed";
 import { FILE_CAPS } from "../src/files/types";
 import { makeFakeSql, type FakeSql } from "./sqlfake";
 
@@ -17,11 +17,36 @@ const USER = "owner@example.test";
 const SESSION = "https://upload.example.test/session?upload_id=FAKEsession01";
 const DRIVE = "https://www.googleapis.com/drive/v3/files";
 
-let open: FakeSql[] = [];
-afterEach(() => {
-  for (const sql of open) sql.close();
-  open = [];
+// The grant shards: one SQL table per shard name, shared by every harness in
+// a test, as the real "files-url-grants/<n>" Durable Objects are shared by
+// every request. Each is a UserVault-shaped stub running the real grant SQL.
+let shards = new Map<string, FakeSql>();
+function grantShard(name: string) {
+  let sql = shards.get(name);
+  if (!sql) shards.set(name, (sql = makeFakeSql()));
+  const db = sql;
+  return {
+    putFileGrant: async (jti: string, grant: Parameters<typeof putGrant>[2], now: number) => putGrant(db, jti, grant, now),
+    getFileGrant: async (jti: string, now: number) => getGrant(db, jti, now),
+    claimFileGrant: async (jti: string, now: number) => claimGrant(db, jti, now),
+  };
+}
+const isShard = (name: string) => name.startsWith("files-url-grants/");
+beforeEach(() => {
+  shards = new Map();
 });
+afterEach(() => {
+  for (const sql of shards.values()) sql.close();
+});
+
+/** An Env whose USER_VAULT routes shard names to the grant stubs and anything else to `vault`. */
+function vaultNamespace(vault: unknown) {
+  return {
+    idFromName: (name: string) => name,
+    get: (id: string) => (isShard(id) ? grantShard(id) : vault),
+  };
+}
+const issuingEnv = { USER_VAULT: vaultNamespace(null) } as unknown as Env;
 
 interface Call {
   url: string;
@@ -38,13 +63,10 @@ interface Harness {
 async function harness(
   opts: { driveEnabled?: boolean; filesEnabled?: boolean; allowed?: string; linked?: boolean; respond?: (call: Call) => Response } = {},
 ): Promise<Harness> {
-  const sql = makeFakeSql();
-  open.push(sql);
   const ciphertext = await encryptJson(await importVaultKey(VAULT_KEY), { refreshToken: "fake-refresh" });
   const vault = {
     isServiceEnabled: async (service: string) => (service === "files" ? (opts.filesEnabled ?? true) : (opts.driveEnabled ?? true)),
     getAccountForService: async () => (opts.linked === false ? null : { label: USER, ciphertext }),
-    claimFileUrl: async (jti: string, exp: number) => claimFileUrl(sql, jti, exp),
   };
   const env = {
     FILES_URL_KEY: FILES_KEY,
@@ -52,7 +74,7 @@ async function harness(
     VAULT_KEY,
     GWS_CLIENT_ID: "fake-client",
     GWS_CLIENT_SECRET: "fake-secret",
-    USER_VAULT: { idFromName: () => "id", get: () => vault },
+    USER_VAULT: vaultNamespace(vault),
   } as unknown as Env;
 
   const calls: Call[] = [];
@@ -85,7 +107,7 @@ async function harness(
 
 async function token(overrides: Partial<SignRequest> = {}, now?: () => number): Promise<string> {
   const req: SignRequest = { userId: USER, method: "GET", target: "FAKEfile01", maxBytes: 10, ...overrides };
-  return (await signToken(FILES_KEY, req, now)).token;
+  return (await signToken(FILES_KEY, grantStoreFor(issuingEnv), req, now)).token;
 }
 
 const url = (t: string) => fileUrl("https://mcp.example.test/", t);
@@ -152,8 +174,15 @@ describe("bad tokens", () => {
 
   it("refuses a token signed with another key", async () => {
     const h = await harness();
-    const { token: other } = await signToken("some-other-key", { userId: USER, method: "GET", target: "x", maxBytes: 1 });
+    const { token: other } = await signToken("some-other-key", grantStoreFor(issuingEnv), { userId: USER, method: "GET", target: "x", maxBytes: 1 });
     expect((await h.call(new Request(url(other)))).status).toBe(403);
+  });
+
+  it("refuses a round-1 self-describing token outright with 403", async () => {
+    const h = await harness();
+    const roundOne = await signCookie(FILES_KEY, { v: 1, userId: USER, account: null, method: "GET", target: "FAKEfile01", maxBytes: 10, exp: Date.now() + 60_000, jti: "0".repeat(32) });
+    expect((await h.call(new Request(url(roundOne)))).status).toBe(403);
+    expect(h.calls).toHaveLength(0);
   });
 
   it("answers an expired token with 410", async () => {
@@ -249,7 +278,7 @@ describe("GET", () => {
 });
 
 describe("PUT", () => {
-  const putToken = (o: Partial<SignRequest> = {}) => token({ method: "PUT", maxBytes: 1000, ...o });
+  const putToken = (o: Partial<SignRequest> = {}, now?: () => number) => token({ method: "PUT", maxBytes: 1000, ...o }, now);
 
   it("fills the placeholder through a resumable session and returns its drive ref", async () => {
     const h = await harness();
@@ -276,6 +305,31 @@ describe("PUT", () => {
     expect(replay.status).toBe(410);
     expect(await errorOf(replay)).toMatch(/already been used/);
     expect(h.calls.filter((c) => c.url === SESSION).length).toBe(uploads);
+  });
+
+  it("lets exactly one of two concurrent PUTs through; the other gets 410", async () => {
+    const h = await harness();
+    const t = await putToken();
+    const results = await Promise.all([h.call(put(t, "one")), h.call(put(t, "two"))]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 410]);
+    expect(h.calls.filter((c) => c.url === SESSION)).toHaveLength(1);
+  });
+
+  it("refuses a PUT whose account is no longer linked without burning the URL", async () => {
+    const t = await putToken({ account: "FAKE-unlinked" });
+    const gone = await (await harness({ linked: false })).call(put(t, "first"));
+    expect(gone.status).toBe(403);
+    // Re-linked, the same URL still works: the refusal came before the claim.
+    expect((await (await harness()).call(put(t, "second"))).status).toBe(200);
+  });
+
+  it("refuses a PUT URL past its expiry with 410 even when never used", async () => {
+    const h = await harness();
+    const t = await putToken({}, () => Date.now() - 15 * 60 * 1000);
+    const res = await h.call(put(t, "late"));
+    expect(res.status).toBe(410);
+    expect(await errorOf(res)).toMatch(/expired/);
+    expect(h.calls).toHaveLength(0);
   });
 
   it("requires Content-Length (411) and leaves the URL usable", async () => {
@@ -307,14 +361,17 @@ describe("PUT", () => {
   });
 });
 
-describe("claimFileUrl", () => {
-  it("is true once per jti and prunes markers whose token has expired", () => {
-    const sql = makeFakeSql();
-    open.push(sql);
-    expect(claimFileUrl(sql, "j1", 1000, 0)).toBe(true);
-    expect(claimFileUrl(sql, "j1", 1000, 10)).toBe(false);
-    expect(claimFileUrl(sql, "j2", 3000, 2000)).toBe(true);
-    expect(sql.exec("SELECT jti FROM file_url_claims").toArray()).toEqual([{ jti: "j2" }]);
+describe("grantShardName", () => {
+  it("is a pure function of the jti, never an email-shaped vault name", () => {
+    const names = new Set<string>();
+    for (const c of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") {
+      const name = grantShardName(`${c}${"x".repeat(21)}`);
+      expect(name).toMatch(/^files-url-grants\/[0-7]$/);
+      expect(name).not.toContain("@");
+      names.add(name);
+    }
+    expect(names.size).toBe(8);
+    expect(grantShardName("Qabc")).toBe(grantShardName("Qxyz"));
   });
 });
 
@@ -322,5 +379,30 @@ describe("contentDisposition", () => {
   it("keeps ASCII names plain and strips quotes and line breaks", () => {
     expect(contentDisposition("a.pdf")).toBe('attachment; filename="a.pdf"');
     expect(contentDisposition('a"b\r\n.pdf')).toBe('attachment; filename="a_b__.pdf"');
+  });
+});
+
+describe("pinDriveAccount", () => {
+  const vault = (labels: Record<string, string>, fallback: string | null) => ({
+    calls: [] as (string | undefined)[],
+    getAccountForService(accountService: string, service: string, label?: string) {
+      this.calls.push(label);
+      expect([accountService, service]).toEqual(["google", "drive"]);
+      if (label !== undefined) return labels[label] ? { label } : null;
+      return fallback ? { label: fallback } : null;
+    },
+  });
+
+  it("resolves 'the user's Drive account' to its label at issue time", async () => {
+    const v = vault({}, "FAKE-default");
+    expect(await pinDriveAccount(v, null)).toBe("FAKE-default");
+    expect(v.calls).toEqual([undefined]);
+  });
+
+  it("keeps an explicit label, and refuses one that is not linked", async () => {
+    const v = vault({ "FAKE-second": "x" }, "FAKE-default");
+    expect(await pinDriveAccount(v, "FAKE-second")).toBe("FAKE-second");
+    await expect(pinDriveAccount(v, "FAKE-gone")).rejects.toThrow();
+    await expect(pinDriveAccount(vault({}, null), null)).rejects.toThrow();
   });
 });
