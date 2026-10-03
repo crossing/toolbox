@@ -289,13 +289,29 @@ export function attachmentPart(attachment: OutgoingAttachment): string {
 // header this code did not think to carry over. Splicing preserves every byte
 // that was already there, including bodies in encodings we never decode.
 
-export function base64UrlToBytes(data: string): Uint8Array {
-  const b64 = data.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-  const bin = atob(padded);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
+/**
+ * base64url (or plain base64, padded or not) to bytes. Decoded in slices, so
+ * a 25 MB attachment costs its bytes plus one slice on top of the input,
+ * rather than three more full-length strings (two replace() passes, the
+ * padded copy, atob's binary string) — the difference between fitting in an
+ * isolate's 128 MB and not.
+ */
+export function base64UrlToBytes(input: string): Uint8Array {
+  // Wrapped MIME bodies carry newlines; slicing needs them gone. The test
+  // scans without copying, so unwrapped input (the common case) is untouched.
+  const data = /\s/.test(input) ? input.replace(/\s+/g, "") : input;
+  let length = data.length;
+  while (length > 0 && data.charCodeAt(length - 1) === 61 /* = */) length--;
+  const out = new Uint8Array(Math.floor((length * 3) / 4));
+  const SLICE = 1 << 16; // a multiple of 4, so every slice but the last decodes whole
+  let offset = 0;
+  for (let start = 0; start < length; start += SLICE) {
+    let piece = data.slice(start, Math.min(start + SLICE, length)).replace(/-/g, "+").replace(/_/g, "/");
+    if (piece.length % 4 !== 0) piece += "=".repeat(4 - (piece.length % 4));
+    const bin = atob(piece);
+    for (let i = 0; i < bin.length; i++) out[offset++] = bin.charCodeAt(i);
+  }
+  return offset === out.length ? out : out.subarray(0, offset);
 }
 
 /** Bytes as a latin1 string: one char per octet, no transcoding, reversible. */

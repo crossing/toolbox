@@ -10,6 +10,7 @@
 // be tested without a Durable Object runtime.
 
 import { DurableObject } from "cloudflare:workers";
+import { claimFileUrl } from "./files/http";
 import { VaultStore, type AccountInfo, type AuditEntry, type CatalogConfig } from "./vaultstore";
 
 export type { AccountInfo, AuditEntry, CatalogConfig } from "./vaultstore";
@@ -72,6 +73,19 @@ export class UserVault extends DurableObject<unknown> {
 
   deleteAccount(service: string, label: string): void {
     this.store.deleteAccount(service, label);
+  }
+
+  getSetting(key: string): string | null {
+    return this.store.getSetting(key);
+  }
+
+  setSetting(key: string, value: string): void {
+    this.store.setSetting(key, value);
+  }
+
+  /** Single-use marker for a signed PUT URL (files/http.ts); true the first time only. */
+  claimFileUrl(jti: string, exp: number): boolean {
+    return claimFileUrl(this.ctx.storage.sql, jti, exp);
   }
 
   appendAudit(entry: AuditEntry): void {

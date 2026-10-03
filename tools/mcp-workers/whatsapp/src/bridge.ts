@@ -34,6 +34,7 @@ import type {
   MediaResult,
   MessageContext,
   MessageRow,
+  OpenedMedia,
   PairingResult,
   PreflightResult,
   ProfileResult,
@@ -63,7 +64,7 @@ import {
   type Me,
   type PreparedGroupRequest,
 } from "./groups";
-import { encryptForUpload, fetchAndDecrypt, MediaError, uploadEncrypted } from "./media";
+import { encryptForUpload, fetchAndDecrypt, mediaFilename, MediaError, openDecryptedStream, uploadEncrypted } from "./media";
 import {
   chatNameFor,
   isoFromSeconds,
@@ -912,6 +913,38 @@ export class WhatsAppBridge extends DurableObject<BridgeEnv> implements WhatsApp
       const detail = err instanceof Error ? err.message : String(err);
       if (err instanceof MediaError && err.retryable) this.log("warn", `media expired: ${messageId}`);
       return { ok: false, detail };
+    }
+  }
+
+  /**
+   * The attachment as a byte stream, for the gateway's file transfers. Unlike
+   * downloadMedia there is no inline cap: the bytes never reach the model.
+   * Bounded by STREAM_MEDIA_CEILING (100 MB) when the message declares its
+   * size, and by BUFFERED_MEDIA_CEILING (32 MB, decrypted in memory) when it
+   * does not; see media.ts. Failures known up front throw; an integrity
+   * failure found mid-download errors the stream before its last bytes, so a
+   * consumer that needs the full declared size never commits a bad file.
+   *
+   * Workers RPC carries the stream to the gateway with flow control; it has to
+   * be a byte stream (`type: "bytes"`), which openDecryptedStream returns.
+   */
+  async openMedia(messageId: string, chatJid: string): Promise<OpenedMedia> {
+    const descriptor = this.store.mediaFor(messageId, chatJid);
+    if (!descriptor) throw new Error("no such message in the store");
+    if (!descriptor.mediaType) throw new Error("that message has no attachment");
+    try {
+      const media = await openDecryptedStream(descriptor);
+      if (!media.streamed) this.log("info", `media ${messageId} decrypted in memory (no declared size)`);
+      return {
+        filename: mediaFilename(messageId, descriptor.mediaType, media.mimeType, media.filename),
+        mimeType: media.mimeType,
+        size: media.size,
+        body: media.body,
+      };
+    } catch (err) {
+      if (err instanceof MediaError && err.retryable) this.log("warn", `media expired: ${messageId}`);
+      // A plain Error: only the message survives RPC, not the class.
+      throw new Error(err instanceof Error ? err.message : String(err));
     }
   }
 

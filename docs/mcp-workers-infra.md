@@ -111,7 +111,7 @@ live only inside the Worker and die with it. Current names:
 
 - `gateway-mcp`: `GWS_CLIENT_ID`, `GWS_CLIENT_SECRET`, `ALLOWED_EMAILS`,
   `FREEAGENT_CLIENT_ID`, `FREEAGENT_CLIENT_SECRET`, `ALLOWED_COMPANY`,
-  `VAULT_KEY`, `COOKIE_SECRET`
+  `VAULT_KEY`, `COOKIE_SECRET`, `FILES_URL_KEY`
 - `gws-mcp`: `GWS_CLIENT_ID`, `GWS_CLIENT_SECRET`, `ALLOWED_EMAILS`
 - `freeagent-mcp`: `FREEAGENT_CLIENT_ID`, `FREEAGENT_CLIENT_SECRET`,
   `ALLOWED_COMPANY`
@@ -121,6 +121,49 @@ live only inside the Worker and die with it. Current names:
 `VAULT_KEY` is the AES-GCM key for vault ciphertext and exists **only** in
 the Worker and 1Password. Lose both and every linked account must be
 re-linked; the vault rows become undecryptable.
+
+`FILES_URL_KEY` is the HMAC key for signed file URLs (below). Rolling it
+voids every outstanding URL — at most 15 minutes' worth — and nothing else;
+generate a fresh one with `openssl rand -base64 32` whenever in doubt. It is
+deliberately not `COOKIE_SECRET`, so a session cookie can never pass as a
+file URL.
+
+### Signed file URLs and the `_Transit` sweep
+
+`https://mcp.xing.works/files/<token>` lets a sandbox with nothing but curl
+move one file into or out of Drive (`curl -T file "$url"`, `curl -o file
+"$url"`). The token is an HMAC-signed bearer credential naming the user,
+Drive account, method, Drive file id and byte limit; it lives 15 minutes,
+and a PUT URL works once (the marker is a row in that user's `UserVault`).
+The route is served before the OAuth provider and takes no other auth.
+Uploads stream into a Drive resumable session opened at request time; the
+session URI never leaves the Worker.
+
+Revocation: the route re-checks, on every request, that the user is still
+in `ALLOWED_EMAILS` and that the Files service is still on (Drive's toggle
+too). After a leak, switch Files off on `/manage`; every issued URL stops
+at once rather than at its expiry.
+
+**Known exposure: tokens in Workers Logs.** The token is the URL path, and
+the gateway has `observability` on, so Cloudflare's Workers Logs record
+every `/files/<token>` URL with the invocation. Anyone with log read access
+on the Cloudflare account can replay a GET URL (or an unspent PUT URL) for
+the rest of its 15 minutes. Accepted for now: it needs log read access on
+the Cloudflare account, and the window is 15 minutes. To
+close it, set `observability.logs.invocation_logs: false` in
+`gateway/wrangler.jsonc` (losing request logs for every route), or move the
+token out of the path.
+
+`GET` or `HEAD /files/healthcheck` answers 204 with no token — the probe
+for whether a sandbox's egress allowlist lets it reach the gateway.
+
+A daily cron trigger (`gateway/wrangler.jsonc`, 03:17 UTC) trashes files in
+each user's Drive `_Transit` folder older than 7 days — trashed, so Drive
+keeps them 30 days more. The trigger is part of the Worker and goes with it.
+The `_Transit` folder itself lives in the default Drive account of each
+allowlisted user, at the Drive root; `drive:folder/_Transit?account=` is
+refused. If a race ever made two root-level `_Transit` folders, the sweep
+cleans every one of them.
 
 ## Google
 
@@ -224,7 +267,7 @@ op-oauth wrappers — deleting those breaks the CLIs.**
 
 | Item | Fields to delete on teardown | Leave alone |
 |---|---|---|
-| `mcp-gateway` (secure note, created for this) | the whole item: `vault_key`, `cookie_secret` | — |
+| `mcp-gateway` (secure note, created for this) | the whole item: `vault_key`, `cookie_secret`, `files_url_key` | — |
 | `Google` (login) | `mcp_client_id`, `mcp_client_secret`, `mcp_allowed_emails` | `gws_client_id`, `gws_client_secret`, `gws_refresh_token`, `gws_access_token`, `gws_expires_at`, and the login itself |
 | `FreeAgent` (login) | `mcp_client_id`, `mcp_client_secret`, `mcp_allowed_company` | `client_id`, `client_secret`, `access_token`, `refresh_token`, and the login itself |
 | `cloudflare.com` (login) | `api_token_wrangler-mcp-workers` | the login, OTP, other tokens |
@@ -294,9 +337,14 @@ Reverse of creation, so nothing is orphaned:
    CLI`). Deleting either sibling breaks the local CLIs. The Google project
    itself can stay: its consent screen and lifetime user cap are shared with
    the CLI client.
-7. **Cloudflare API tokens** — delete `wrangler-mcp-workers` (and its dead
+7. **Drive `_Transit`** — in each allowlisted user's default Drive account,
+   empty and trash the `_Transit` folder at the Drive root once nothing
+   more is staged there; the cron that expired its files died in step 3.
+   Remove `mcp.xing.works` from the claude.ai code-execution egress
+   allowlist and from the cloud Code environment's network allowlist.
+8. **Cloudflare API tokens** — delete `wrangler-mcp-workers` (and its dead
    duplicate) in the dashboard.
-8. **1Password** — delete the `mcp-gateway` item and only the `mcp_*` fields
+9. **1Password** — delete the `mcp-gateway` item and only the `mcp_*` fields
    listed above. Leave the CLI fields alone.
 
 Partial teardown (retiring just `gws-mcp` and `freeagent-mcp` once the

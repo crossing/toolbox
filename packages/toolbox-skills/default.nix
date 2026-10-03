@@ -14,6 +14,8 @@ let
     { name = "op-freeagent"; skill = ../../tools/op-freeagent/SKILL.md; }
     { name = "ibkr-local"; skill = ../../tools/ibkr-local/SKILL.md; }
     { name = "ibkr-x11"; skill = ../../tools/ibkr-x11/SKILL.md; }
+    # Skill-only: the gateway's file tools, kept beside the Worker that implements them.
+    { name = "gateway-files"; skill = ../../tools/mcp-workers/gateway/skills/gateway-files/SKILL.md; }
   ];
 in
 runCommand "toolbox-skills" { } ''

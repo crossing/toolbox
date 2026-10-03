@@ -37,16 +37,25 @@ destructive and takes `confirm: true`.
 | List / create expenses | `freeagent_expenses_list`, `freeagent_expense_create` | `freeagent expenses list\|create` |
 | Balance sheet / P&L / trial balance | `freeagent_balance_sheet`, `freeagent_profit_and_loss`, `freeagent_trial_balance` | `freeagent balance-sheet\|profit-and-loss\|trial-balance` |
 | Look up contacts, categories, users | `freeagent_contacts_list`, `freeagent_categories_list`, `freeagent_users_list` | — (not in the CLI) |
-| **Attach a file** | **none — use the CLI** | `freeagent bills\|explanations attach` |
+| **Attach a file** | `file_transfer` to `freeagent:bill\|explanation\|expense/<id>` (see below) | `freeagent bills\|explanations attach` |
 
 Gateway tools take snake_case arguments matching the CLI flags (`bank_account`,
 `from_date`, `sales_tax_rate`, `ec_status`, `paid_bill`, `transfer_account`), and API
 URLs rather than ids, exactly as the CLI does.
 
-### The one gap: attachments
+### Attachments
 
-Neither the create tools nor any standalone tool can upload a file. Create the record
-through the gateway, note the returned URL, then attach through the CLI:
+The create tools cannot carry a file. Create the record through the gateway and note
+the returned URL; `<id>` is its last path segment. Then attach a file the gateway can
+reach (Drive, Gmail, WhatsApp) server-side with the `gateway-files` skill:
+
+```
+file_transfer from=gmail:<messageId>/<attachmentId> to=freeagent:bill/<id> description="Receipt"
+```
+
+That path caps attachments at 5 MB and has not yet been exercised against live
+FreeAgent; read the record back to confirm the attachment landed. For a local file, or
+when the gateway path fails, attach through the CLI:
 
 ```bash
 op-freeagent bills attach --url <bill_uri> --file <local_path>

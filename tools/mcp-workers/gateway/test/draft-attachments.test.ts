@@ -107,6 +107,12 @@ function harness(opts: HarnessOptions = {}) {
       const bytes = opts.driveBytes ?? new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52, 10]);
       return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     },
+    // gmail_attach_drive_file now goes through the file layer, which streams
+    // alt=media rather than buffering it with getRaw.
+    async getStream(url: string, query?: unknown) {
+      driveCalls.push({ method: "GET", url, query });
+      return new Response(opts.driveBytes ?? new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52, 10])).body!;
+    },
   };
 
   const tools = new Map<string, Handler>();

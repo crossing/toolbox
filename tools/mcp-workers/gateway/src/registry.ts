@@ -10,6 +10,9 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
+import type { FileUrlMethod } from "./files/signed";
+import { registerFileReadTools, registerFileWriteTools } from "./files/tools";
+import type { TransitCache } from "./files/transit";
 import { registerFreeagentReadTools, registerFreeagentWriteTools } from "./freeagent";
 import type { FreeAgentClient } from "./freeagentapi";
 import { registerGmailReadTools, registerGmailWriteTools } from "./gmail";
@@ -39,6 +42,15 @@ export interface GatewayToolContext {
   // Dispatch lives in the Worker: the SMS Durable Object holds no credentials.
   sendSms(sendId: string, peer: string, body: string): Promise<{ ok: boolean; detail: string }>;
   listAccounts(): Promise<AccountInfo[]>;
+  /** Where the `_Transit` folder id is cached: the user's vault. */
+  transitCache: TransitCache;
+  /** Sign a /files/<token> URL as this user (files/signed.ts); 15 minutes. */
+  signFileUrl(req: {
+    account: string | null;
+    method: FileUrlMethod;
+    target: string;
+    maxBytes: number;
+  }): Promise<{ url: string; expiresAt: number }>;
   // Best-effort write audit into the vault; failures never fail a tool call.
   audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
 }
@@ -149,6 +161,7 @@ const driveService: ServiceDef = {
       gmail: (account) => ctx.googleClient("gmail", account),
       drive: (account) => ctx.googleClient("drive", account),
       whatsapp: () => ctx.whatsappBridge(),
+      vault: ctx.transitCache,
     });
   },
 };
@@ -211,12 +224,31 @@ const smsService: ServiceDef = {
   },
 };
 
+// Moves files between the other services by ref. It owns no account and no
+// upstream of its own: every resolver it calls asserts the underlying
+// service's toggle, so with Gmail off a gmail: ref fails closed here too. On
+// by default like Drive, whose `_Transit` folder is its staging store.
+const filesService: ServiceDef = {
+  id: "files",
+  title: "Files",
+  description:
+    "Move files between Drive, Gmail, WhatsApp and FreeAgent by ref, server-side (file_transfer), and hand sandboxes signed 15-minute curl URLs to upload into or download from Drive. Uploads stage in a Drive _Transit folder that is swept to the trash after 7 days.",
+  defaultEnabled: true,
+  registerRead(server, ctx) {
+    registerFileReadTools(server, ctx);
+  },
+  registerWrite(server, ctx) {
+    registerFileWriteTools(auditedServer(server, ctx), ctx);
+  },
+};
+
 export const SERVICES: ServiceDef[] = [
   gmailService,
   driveService,
   freeagentService,
   whatsappService,
   smsService,
+  filesService,
 ];
 
 export function defaultServiceToggles(): Record<string, boolean> {

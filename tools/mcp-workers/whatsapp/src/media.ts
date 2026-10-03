@@ -16,6 +16,8 @@
 //   fileEncSha256            = SHA-256(enc || mac)     (the whole download)
 //   fileSha256               = SHA-256(plaintext)
 
+import { createDecipheriv, createHash, createHmac } from "node:crypto";
+
 const MEDIA_HOST = "mmg.whatsapp.net";
 const ORIGIN = "https://web.whatsapp.com";
 
@@ -337,4 +339,337 @@ export async function fetchAndDecrypt(
     mimeType: descriptor.mimeType ?? "application/octet-stream",
     filename: descriptor.filename,
   };
+}
+
+// --- streaming download ---------------------------------------------------
+//
+// `fetchAndDecrypt` buffers, which is right for the inline tools (their caps
+// are tiny) and wrong for moving a 40 MB PDF into Drive: decryption holds about
+// three copies of the file against a 128 MB isolate. `openDecryptedStream`
+// decrypts as the ciphertext arrives instead. WebCrypto has no incremental
+// AES-CBC, SHA-256 or HMAC, so this half uses node:crypto, which workerd
+// supports in full under nodejs_compat (Cipheriv/Decipheriv, Hash, Hmac).
+//
+// Streaming means plaintext leaves before the MAC at the end of the file has
+// been checked. Two rules keep that honest:
+//   - the stream declares its exact size up front (from the message's
+//     fileLength, cross-checked against the ciphertext's length), and
+//   - the last plaintext bytes are withheld until the MAC, fileEncSha256 and
+//     fileSha256 have all passed; any failure errors the stream instead.
+// So a consumer that commits only on a complete, correctly sized stream — a
+// Drive resumable upload with a declared size is one — never commits a
+// tampered or truncated file. A consumer that writes partial bytes somewhere
+// durable must discard them when the stream errors.
+
+/**
+ * Largest attachment `openDecryptedStream` will stream. Not a memory bound —
+ * streaming holds a chunk at a time — but a sanity ceiling matching the
+ * gateway's largest file cap, so a runaway download cannot pin the bridge.
+ */
+export const STREAM_MEDIA_CEILING = 100 * 1024 * 1024;
+
+/**
+ * Largest attachment decrypted in memory when it cannot be streamed (the
+ * message carries no usable fileLength, so the exact size is unknown until
+ * the padding is stripped). Three copies of 32 MB fit a 128 MB isolate with
+ * room for the rest of the bridge; 100 MB would not.
+ */
+export const BUFFERED_MEDIA_CEILING = 32 * 1024 * 1024;
+
+export interface DecryptedStream {
+  mimeType: string;
+  filename: string | null;
+  /** Exact plaintext byte count; the stream errors rather than deliver another. */
+  size: number;
+  /** A byte stream (`type: "bytes"`), the only kind Workers RPC can carry. */
+  body: ReadableStream<Uint8Array>;
+  /** False when the file had to be decrypted in memory first. */
+  streamed: boolean;
+}
+
+export interface StreamOptions {
+  /** Ceiling for streamed downloads; defaults to STREAM_MEDIA_CEILING. */
+  maxBytes?: number;
+  /** Ceiling for the in-memory fallback; defaults to BUFFERED_MEDIA_CEILING. */
+  maxBufferedBytes?: number;
+  fetcher?: typeof fetch;
+}
+
+/** Ciphertext length (enc || mac) for a plaintext of `size` bytes. */
+export function encryptedLength(size: number): number {
+  // PKCS#7 always pads, by 1..16 bytes.
+  return (Math.floor(size / 16) + 1) * 16 + 10;
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  if (a.length === 0) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+/**
+ * A byte stream over `chunks`, copying each into its own ArrayBuffer: byte
+ * streams transfer what is enqueued, and node:crypto's small outputs can share
+ * a pooled buffer that must not be detached.
+ */
+function byteStream(
+  next: () => Promise<Uint8Array | null>,
+  onCancel: (reason: unknown) => Promise<void> | void = () => {},
+): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    type: "bytes",
+    async pull(controller) {
+      // Loop until something is enqueued: a byte stream's pull is not called
+      // again on its own after a pull that produced nothing.
+      for (;;) {
+        let chunk: Uint8Array | null;
+        try {
+          chunk = await next();
+        } catch (err) {
+          controller.error(err);
+          return;
+        }
+        if (chunk === null) {
+          controller.close();
+          // A pending BYOB request would otherwise hang the reader.
+          controller.byobRequest?.respond(0);
+          return;
+        }
+        if (chunk.length > 0) {
+          controller.enqueue(new Uint8Array(chunk));
+          return;
+        }
+      }
+    },
+    cancel: onCancel,
+  }) as ReadableStream<Uint8Array>;
+}
+
+/** A byte stream over bytes already in memory, in modest slices. */
+function bufferedStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  const SLICE = 256 * 1024;
+  let offset = 0;
+  return byteStream(async () => {
+    if (offset >= bytes.length) return null;
+    const slice = bytes.subarray(offset, offset + SLICE);
+    offset += slice.length;
+    return slice;
+  });
+}
+
+function tooBig(bytes: number, limit: number): MediaError {
+  return new MediaError(
+    `attachment is ${Math.round(bytes / 1024)} KB, over the ${Math.round(limit / (1024 * 1024))} MB limit`,
+  );
+}
+
+/**
+ * Download, verify and decrypt an attachment as a stream. Throws MediaError
+ * for anything known before the first byte (no media, expired, too big, a
+ * length that contradicts the message); integrity failures found later error
+ * the stream instead.
+ */
+export async function openDecryptedStream(
+  descriptor: MediaDescriptor,
+  {
+    maxBytes = STREAM_MEDIA_CEILING,
+    maxBufferedBytes = BUFFERED_MEDIA_CEILING,
+    fetcher = (input, init) => fetch(input, init),
+  }: StreamOptions = {},
+): Promise<DecryptedStream> {
+  if (!descriptor.mediaType) throw new MediaError("this message has no attachment");
+  if (!descriptor.mediaKeyB64) throw new MediaError("the message has no media key");
+  // Validates the type before any network traffic.
+  const keys = await expandMediaKey(fromBase64(descriptor.mediaKeyB64), descriptor.mediaType);
+  if (descriptor.fileLength !== null && descriptor.fileLength > maxBytes) {
+    throw tooBig(descriptor.fileLength, maxBytes);
+  }
+
+  const response = await fetcher(mediaUrl(descriptor), {
+    headers: { Origin: ORIGIN },
+    // A redirect could otherwise walk off the allowlist.
+    redirect: "manual",
+  });
+  if (response.status === 404 || response.status === 410) {
+    throw new MediaError("WhatsApp has expired this media; it needs re-uploading from the phone", true);
+  }
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new MediaError(`media download failed with HTTP ${response.status}`);
+  }
+  const mimeType = descriptor.mimeType ?? "application/octet-stream";
+  const header = response.headers.get("content-length");
+  const declared = header === null ? null : Number(header);
+
+  // The size is only knowable up front from fileLength, and only trusted when
+  // the CDN's length agrees with it (the MAC does not cover fileLength).
+  const size = descriptor.fileLength;
+  const streamable =
+    size !== null && size >= 0 && (declared === null || declared === encryptedLength(size));
+  if (!streamable) {
+    const limit = Math.min(maxBytes, maxBufferedBytes);
+    if (declared !== null && declared > limit + 26) {
+      await response.body.cancel();
+      throw tooBig(declared, limit);
+    }
+    const file = await readCapped(response.body, limit + 26);
+    const bytes = await decryptMedia(file, descriptor);
+    if (bytes.length > limit) throw tooBig(bytes.length, limit);
+    return { mimeType, filename: descriptor.filename, size: bytes.length, body: bufferedStream(bytes), streamed: false };
+  }
+
+  const total = encryptedLength(size);
+  const reader = response.body.getReader();
+  const decipher = createDecipheriv("aes-256-cbc", keys.cipherKey, keys.iv);
+  const mac = createHmac("sha256", keys.macKey).update(keys.iv);
+  const encHash = createHash("sha256");
+  const plainHash = createHash("sha256");
+  let received = 0;
+  let emitted = 0;
+  // The trailing 10 bytes seen so far: the MAC, if the file ends here.
+  let tail: Uint8Array = new Uint8Array(0);
+  // The latest plaintext, held back until more arrives — so the final bytes
+  // only leave once verification has passed.
+  let pending: Uint8Array = new Uint8Array(0);
+  let done = false;
+
+  const release = (chunk: Uint8Array): Uint8Array => {
+    const out = pending;
+    pending = chunk;
+    emitted += out.length;
+    return out;
+  };
+
+  const finish = (): Uint8Array => {
+    if (received !== total) {
+      throw new MediaError(`media download ended after ${received} of ${total} bytes`);
+    }
+    const expectedMac = mac.digest().subarray(0, 10);
+    if (!equalBytes(expectedMac, tail)) {
+      throw new MediaError("media MAC check failed — the download was tampered with or truncated");
+    }
+    if (descriptor.fileEncSha256B64 && !equalBytes(encHash.digest(), fromBase64(descriptor.fileEncSha256B64))) {
+      throw new MediaError("downloaded media does not match fileEncSha256");
+    }
+    let final: Uint8Array;
+    try {
+      // Checks and strips the PKCS#7 padding.
+      final = new Uint8Array(decipher.final());
+    } catch {
+      throw new MediaError("media decryption failed");
+    }
+    plainHash.update(final);
+    const last = concat(pending, final);
+    if (descriptor.fileSha256B64 && !equalBytes(plainHash.digest(), fromBase64(descriptor.fileSha256B64))) {
+      throw new MediaError("decrypted media does not match fileSha256");
+    }
+    if (emitted + last.length !== size) {
+      throw new MediaError(`decrypted media is ${emitted + last.length} bytes, not the ${size} the message declared`);
+    }
+    pending = new Uint8Array(0);
+    return last;
+  };
+
+  const next = async (): Promise<Uint8Array | null> => {
+    if (done) return null;
+    const { value, done: ended } = await reader.read();
+    if (ended) {
+      done = true;
+      return finish();
+    }
+    received += value.length;
+    if (received > total) {
+      await reader.cancel();
+      throw new MediaError(`media download is longer than the ${total} bytes the message declared`);
+    }
+    encHash.update(value);
+    const joined = concat(tail, value);
+    const cut = Math.max(0, joined.length - 10);
+    const enc = joined.subarray(0, cut);
+    tail = joined.slice(cut);
+    if (enc.length === 0) return new Uint8Array(0);
+    mac.update(enc);
+    const plain = new Uint8Array(decipher.update(enc));
+    if (plain.length === 0) return new Uint8Array(0);
+    plainHash.update(plain);
+    return release(plain);
+  };
+
+  const body = byteStream(
+    async () => {
+      try {
+        return await next();
+      } catch (err) {
+        done = true;
+        await reader.cancel().catch(() => {});
+        throw err;
+      }
+    },
+    async (reason) => {
+      done = true;
+      await reader.cancel(reason);
+    },
+  );
+  return { mimeType, filename: descriptor.filename, size, body, streamed: true };
+}
+
+/** Read a body into memory, refusing as soon as it passes `limit` bytes. */
+async function readCapped(body: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    length += value.length;
+    if (length > limit) {
+      await reader.cancel();
+      throw tooBig(length, limit);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+// Extensions for the mime types WhatsApp actually sends, so a photo saved to
+// Drive opens as one. Anything else gets `.bin` rather than a guess.
+const EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "video/mp4": "mp4",
+  "video/3gpp": "3gp",
+  "audio/ogg": "ogg",
+  "audio/mpeg": "mp3",
+  "audio/mp4": "m4a",
+  "audio/aac": "aac",
+  "application/pdf": "pdf",
+};
+
+/**
+ * The sender's filename when there is one; otherwise one built from the media
+ * type and message id, e.g. `whatsapp-image-3EB0ABCD.jpg`. Path separators are
+ * replaced, since the name ends up as a Drive or attachment filename.
+ */
+export function mediaFilename(
+  messageId: string,
+  mediaType: string | null,
+  mimeType: string | null,
+  filename: string | null,
+): string {
+  const given = filename?.trim().replace(/[\\/\u0000-\u001f]/g, "_");
+  if (given) return given;
+  const bare = (mimeType ?? "").split(";")[0]!.trim().toLowerCase();
+  const ext = EXTENSIONS[bare] ?? "bin";
+  const id = messageId.replace(/[^A-Za-z0-9_-]/g, "_");
+  return `whatsapp-${mediaType ?? "media"}-${id}.${ext}`;
 }
