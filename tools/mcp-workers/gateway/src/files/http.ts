@@ -34,12 +34,11 @@
 // docs/mcp-workers-infra.md records that as a known exposure.
 
 import type { Fetcher } from "@toolbox/mcp-shared";
-import { decryptJson, importVaultKey } from "../crypto";
 import { vaultFor, type Env } from "../env";
 import { emailAllowed } from "../google";
-import { GoogleApiError, GoogleClient, TokenSource } from "../googleapi";
-import type { VaultBlob } from "../manage";
+import { GoogleApiError, GoogleClient } from "../googleapi";
 import { GOOGLE_ACCOUNT_SERVICE, SERVICES } from "../registry";
+import { vaultTokenSource } from "../tokencache";
 import { NoLinkedAccountError, ServiceDisabledError } from "../toolutil";
 import { formatRef } from "./refs";
 import {
@@ -151,8 +150,8 @@ export function grantStoreFor(env: Env): FileGrantStore {
 /**
  * The Google client for `service` as `email`, outside any MCP session: the
  * same checks ctx.googleClient makes in index.ts (service enabled, account
- * pin, then the namespace default), without its per-session token cache —
- * a signed URL or a cron run is one request, so one refresh is the cost.
+ * pin, then the namespace default), with a token source of its own for this
+ * one request — the access token itself comes from the vault's cache.
  */
 export async function googleClientForUser(
   env: Env,
@@ -166,14 +165,9 @@ export async function googleClientForUser(
   if (!(await vault.isServiceEnabled(service, def?.defaultEnabled ?? false))) throw new ServiceDisabledError(service);
   const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, service, account);
   if (!acct) throw new NoLinkedAccountError(service, account);
-  const key = await importVaultKey(env.VAULT_KEY);
-  const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
-  const source = new TokenSource(
-    env.GWS_CLIENT_ID,
-    env.GWS_CLIENT_SECRET,
-    { accessToken: "", refreshToken: blob.refreshToken, expiresAt: 0 },
-    fetcher,
-  );
+  // The vault serves its cached access token, refreshing it only when due:
+  // a burst of signed-URL requests no longer costs a refresh each.
+  const source = vaultTokenSource(vault, GOOGLE_ACCOUNT_SERVICE, acct.label);
   return new GoogleClient(source, fetcher);
 }
 

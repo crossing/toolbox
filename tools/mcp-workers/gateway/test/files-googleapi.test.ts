@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GoogleApiError, GoogleClient, TokenSource } from "../src/googleapi";
+import { GoogleApiError, GoogleClient } from "../src/googleapi";
 
 interface Call {
   url: string;
@@ -17,12 +17,7 @@ function client(respond: (call: Call) => Response) {
     calls.push(call);
     return respond(call);
   };
-  const tokens = new TokenSource(
-    "fake-client",
-    "fake-secret",
-    { accessToken: "fake-access", refreshToken: "fake-refresh", expiresAt: Date.now() + 3_600_000 },
-    fetcher,
-  );
+  const tokens = { token: async () => "fake-access" };
   return { calls, google: new GoogleClient(tokens, fetcher) };
 }
 

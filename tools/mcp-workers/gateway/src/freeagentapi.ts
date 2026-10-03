@@ -4,11 +4,15 @@
 // only the OAuth error/error_description fields surface, never a raw
 // response body that could echo a credential.
 //
-// Token model in the gateway: the vault blob stores the full token set
-// (access token ~7 days, refresh token). The session DO uses the stored
-// access token until it nears expiry, then refreshes in-process and writes
-// the new set back to the vault — FreeAgent MAY rotate the refresh token on
-// use, so the write-back is not optional.
+// Token model in the gateway: the vault blob stores the full token set. A
+// FreeAgent access token lives one hour, and FreeAgent rotates the refresh
+// token on every refresh, so exactly one writer may refresh: the UserVault
+// Durable Object (tokencache.ts TokenBroker). Sessions only ever hold an
+// access token and ask the vault for a new one.
+//
+// Rate limits (dev.freeagent.com): 120 API requests a minute, 3600 an hour,
+// 15 token refreshes a minute; a 429 carries Retry-After. A short wait is
+// taken once; a longer one surfaces as "FreeAgent rate limited; retry in N s".
 
 import { boundFetch, sanitizedTokenError, type Fetcher } from "@toolbox/mcp-shared";
 
@@ -27,6 +31,37 @@ export interface FreeAgentTokens {
 
 export class FreeAgentUpstreamError extends Error {}
 
+/** A 429 from the token endpoint whose Retry-After was too long to wait out. */
+export class FreeAgentRateLimitError extends FreeAgentUpstreamError {
+  constructor(public retryAfterS: number) {
+    super(rateLimitMessage(retryAfterS));
+  }
+}
+
+/** The longest Retry-After worth waiting out inside one call. */
+export const RATE_LIMIT_MAX_WAIT_S = 5;
+/** What a 429 without a usable Retry-After is assumed to ask for. */
+const DEFAULT_RETRY_AFTER_S = 60;
+
+export function rateLimitMessage(retryAfterS: number): string {
+  return `FreeAgent rate limited; retry in ${retryAfterS} s`;
+}
+
+/** Retry-After in whole seconds, from delta-seconds or an HTTP date; a default when absent or garbled. */
+export function retryAfterSeconds(header: string | null, now: number = Date.now()): number {
+  if (header === null || header.trim() === "") return DEFAULT_RETRY_AFTER_S;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return DEFAULT_RETRY_AFTER_S;
+  return Math.max(0, Math.ceil((at - now) / 1000));
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** The renewal hint for a refresh grant FreeAgent no longer accepts. */
+export const RENEW_LINK_HINT = "the FreeAgent link must be renewed on mcp.xing.works/manage";
+
 interface TokenEndpointResponse {
   access_token: string;
   refresh_token?: string;
@@ -40,38 +75,57 @@ async function postTokenEndpoint(
   fetcher: Fetcher,
 ): Promise<TokenEndpointResponse> {
   const basic = btoa(`${clientId}:${clientSecret}`);
+  const isRefresh = params.grant_type === "refresh_token";
   let response: Response;
-  try {
-    response = await fetcher(FREEAGENT_TOKEN_URL, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${basic}`,
-        "content-type": "application/x-www-form-urlencoded",
-        accept: "application/json",
-        "user-agent": USER_AGENT,
-      },
-      body: new URLSearchParams(params).toString(),
-    });
-  } catch (err) {
-    throw new FreeAgentUpstreamError(
-      `token endpoint unreachable: ${err instanceof Error ? err.message : "fetch failed"}`,
-    );
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await fetcher(FREEAGENT_TOKEN_URL, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${basic}`,
+          "content-type": "application/x-www-form-urlencoded",
+          accept: "application/json",
+          "user-agent": USER_AGENT,
+        },
+        body: new URLSearchParams(params).toString(),
+      });
+    } catch (err) {
+      throw new FreeAgentUpstreamError(
+        `token endpoint unreachable: ${err instanceof Error ? err.message : "fetch failed"}`,
+      );
+    }
+    if (response.status !== 429) break;
+    // 15 refreshes a minute. A 429 means the grant was not consumed, so the
+    // stored tokens stay as they are: wait once if the wait is short.
+    await response.body?.cancel();
+    const wait = retryAfterSeconds(response.headers.get("retry-after"));
+    if (attempt > 0 || wait > RATE_LIMIT_MAX_WAIT_S) throw new FreeAgentRateLimitError(wait);
+    await sleep(wait * 1000);
   }
   const text = await response.text();
   if (!response.ok) {
     // FreeAgent answers invalid/expired grants with a bare 401 HTML page, not
-    // an OAuth error JSON — surface the status so that case reads sensibly.
-    let parses = false;
+    // an OAuth error JSON — surface the status so that case reads sensibly,
+    // and never echo a non-JSON body.
+    let detail: string | null = null;
     try {
       JSON.parse(text);
-      parses = true;
+      detail = sanitizedTokenError(text);
     } catch {
       /* not JSON */
     }
+    const status = response.status;
+    if (isRefresh) {
+      const deadGrant = (status === 400 || status === 401) && (detail === null || detail.startsWith("invalid_grant"));
+      throw new FreeAgentUpstreamError(
+        `FreeAgent token refresh failed (status ${status})${detail ? `: ${detail}` : ""}` +
+          (deadGrant ? `; ${RENEW_LINK_HINT}` : ""),
+      );
+    }
     throw new FreeAgentUpstreamError(
-      parses
-        ? sanitizedTokenError(text)
-        : `token endpoint rejected the request (status ${response.status}); the authorization code may have expired — retry the link`,
+      detail
+        ? `token endpoint rejected the request (status ${status}): ${detail}`
+        : `token endpoint rejected the request (status ${status}); the authorization code may have expired — retry the link`,
     );
   }
   let payload: unknown;
@@ -90,7 +144,8 @@ async function postTokenEndpoint(
 function toTokens(resp: TokenEndpointResponse, now: number, previousRefreshToken?: string): FreeAgentTokens {
   const refreshToken = resp.refresh_token ?? previousRefreshToken;
   if (!refreshToken) throw new FreeAgentUpstreamError("token endpoint returned no refresh token");
-  // FreeAgent access tokens normally live 7 days; fall back conservatively.
+  // FreeAgent access tokens live one hour; expires_in says so, and the
+  // fallback assumes the same.
   const expiresIn = typeof resp.expires_in === "number" && resp.expires_in > 0 ? resp.expires_in : 3600;
   return { accessToken: resp.access_token, refreshToken, expiresAt: now + expiresIn * 1000 };
 }
@@ -141,34 +196,14 @@ export function buildFreeagentAuthorizeRedirect(opts: {
   return url.toString();
 }
 
-// Refresh once less than an hour remains — resolution happens at call time,
-// so the margin only needs to outlast a single tool call.
-const REFRESH_MARGIN_MS = 60 * 60 * 1000;
-
-// Serves access tokens from the vault-loaded set, refreshing on demand.
-// onRotate persists every refreshed set (FreeAgent may rotate the refresh
-// token, and the new access token is worth keeping across DO hibernation).
-export class FreeAgentTokenSource {
-  constructor(
-    private clientId: string,
-    private clientSecret: string,
-    private tokens: FreeAgentTokens,
-    private onRotate?: (tokens: FreeAgentTokens) => Promise<void>,
-    private fetcher: Fetcher = boundFetch,
-  ) {}
-
-  async token(): Promise<string> {
-    if (Date.now() < this.tokens.expiresAt - REFRESH_MARGIN_MS) return this.tokens.accessToken;
-    const refreshed = await refreshFreeagent({
-      clientId: this.clientId,
-      clientSecret: this.clientSecret,
-      refreshToken: this.tokens.refreshToken,
-      fetcher: this.fetcher,
-    });
-    this.tokens = refreshed;
-    await this.onRotate?.(refreshed);
-    return refreshed.accessToken;
-  }
+/**
+ * What a FreeAgentClient draws access tokens from. `invalidate` is optional:
+ * given the token the API just refused with a 401, it returns a fresh one
+ * (tokencache.ts VaultTokenSource asks the vault for a forced refresh).
+ */
+export interface FreeAgentTokenProvider {
+  token(): Promise<string>;
+  invalidate?(failed: string): Promise<string>;
 }
 
 export class FreeAgentApiError extends Error {
@@ -206,7 +241,7 @@ function errorMessage(status: number, body: string): string {
 
 export class FreeAgentClient {
   constructor(
-    private tokens: FreeAgentTokenSource | { token(): Promise<string> },
+    private tokens: FreeAgentTokenProvider,
     private fetcher: Fetcher = boundFetch,
     private baseUrl: string = FREEAGENT_BASE_URL,
   ) {}
@@ -325,25 +360,45 @@ export class FreeAgentClient {
     return new URL(rawUrl);
   }
 
+  // One retry each for a 401 (after asking for a fresh token) and for a 429
+  // with a short Retry-After; every body sent here is a replayable string.
   private async request(method: string, url: URL, body?: unknown): Promise<{ body: unknown; headers: Headers }> {
-    const token = await this.tokens.token();
-    const response = await this.fetcher(url.toString(), {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/json",
-        "user-agent": USER_AGENT,
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    const text = await response.text();
-    if (!response.ok) throw new FreeAgentApiError(response.status, errorMessage(response.status, text));
-    if (text === "") return { body: {}, headers: response.headers };
-    try {
-      return { body: JSON.parse(text), headers: response.headers };
-    } catch {
-      throw new FreeAgentApiError(response.status, "unparseable FreeAgent API response");
+    let token = await this.tokens.token();
+    let retriedAuth = false;
+    let retriedRate = false;
+    for (;;) {
+      const response = await this.fetcher(url.toString(), {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/json",
+          "user-agent": USER_AGENT,
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+      if (response.status === 401 && !retriedAuth && this.tokens.invalidate) {
+        await response.body?.cancel();
+        retriedAuth = true;
+        token = await this.tokens.invalidate(token);
+        continue;
+      }
+      if (response.status === 429) {
+        await response.body?.cancel();
+        const wait = retryAfterSeconds(response.headers.get("retry-after"));
+        if (retriedRate || wait > RATE_LIMIT_MAX_WAIT_S) throw new FreeAgentApiError(429, rateLimitMessage(wait));
+        retriedRate = true;
+        await sleep(wait * 1000);
+        continue;
+      }
+      const text = await response.text();
+      if (!response.ok) throw new FreeAgentApiError(response.status, errorMessage(response.status, text));
+      if (text === "") return { body: {}, headers: response.headers };
+      try {
+        return { body: JSON.parse(text), headers: response.headers };
+      } catch {
+        throw new FreeAgentApiError(response.status, "unparseable FreeAgent API response");
+      }
     }
   }
 }

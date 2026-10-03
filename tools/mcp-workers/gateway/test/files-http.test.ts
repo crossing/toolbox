@@ -9,6 +9,7 @@ import type { Env } from "../src/env";
 import { contentDisposition, fileUrl, grantShardName, grantStoreFor, handleFilesRequest, pinDriveAccount } from "../src/files/http";
 import { claimGrant, getGrant, putGrant, signToken, type SignRequest } from "../src/files/signed";
 import { FILE_CAPS } from "../src/files/types";
+import { TokenBroker, type AccessTokenOptions, type TokenService } from "../src/tokencache";
 import { makeFakeSql, type FakeSql } from "./sqlfake";
 
 const FILES_KEY = "fake-files-url-key";
@@ -63,10 +64,22 @@ interface Harness {
 async function harness(
   opts: { driveEnabled?: boolean; filesEnabled?: boolean; allowed?: string; linked?: boolean; respond?: (call: Call) => Response } = {},
 ): Promise<Harness> {
-  const ciphertext = await encryptJson(await importVaultKey(VAULT_KEY), { refreshToken: "fake-refresh" });
+  let ciphertext = await encryptJson(await importVaultKey(VAULT_KEY), { refreshToken: "fake-refresh" });
+  // The vault's token cache runs for real over this one account row, so the
+  // route's token-endpoint calls still land in `calls` below.
+  const accounts = {
+    getAccount: () => ({ label: USER, ciphertext }),
+    replaceAccountCiphertext: (_s: string, _l: string, expected: string, next: string) => {
+      if (expected !== ciphertext) return false;
+      ciphertext = next;
+      return true;
+    },
+  };
+  let broker: TokenBroker | undefined;
   const vault = {
     isServiceEnabled: async (service: string) => (service === "files" ? (opts.filesEnabled ?? true) : (opts.driveEnabled ?? true)),
     getAccountForService: async () => (opts.linked === false ? null : { label: USER, ciphertext }),
+    accessToken: (service: TokenService, label: string, o?: AccessTokenOptions) => broker!.accessToken(service, label, o),
   };
   const env = {
     FILES_URL_KEY: FILES_KEY,
@@ -102,6 +115,7 @@ async function harness(
     calls.push(c);
     return respond(c);
   };
+  broker = new TokenBroker(accounts, env, fetcher);
   return { env, calls, call: async (request) => (await handleFilesRequest(request, env, { fetcher }))! };
 }
 

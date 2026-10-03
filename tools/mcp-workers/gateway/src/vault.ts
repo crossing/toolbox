@@ -1,26 +1,43 @@
 // UserVault — one Durable Object per allowlisted identity (idFromName on the
 // lowercased email). Holds everything the management interface edits: service
-// toggles, linked accounts (upstream refresh tokens as AES-GCM ciphertext —
-// the key stays in worker env, this DO never sees it), and the audit log.
+// toggles, linked accounts (upstream tokens as AES-GCM ciphertext), and the
+// audit log.
+//
+// It is also the single writer of upstream tokens: accessToken() serves the
+// cached access token or refreshes it (tokencache.ts TokenBroker), so it
+// holds VAULT_KEY and the OAuth client secrets from the Worker env. Sessions
+// never see a refresh token.
 //
 // Accessed over DO RPC from both the session McpAgent (catalog assembly,
-// per-call enablement checks) and the /manage handlers (edits). The methods
-// are one-line delegations on purpose: RPC needs them declared on the class,
-// and the logic they forward to is plain SQL in vaultstore.ts, where it can
-// be tested without a Durable Object runtime.
+// per-call enablement checks, access tokens) and the /manage handlers
+// (edits). The methods are one-line delegations on purpose: RPC needs them
+// declared on the class, and the logic they forward to lives in
+// vaultstore.ts and tokencache.ts, where it can be tested without a Durable
+// Object runtime.
 
 import { DurableObject } from "cloudflare:workers";
 import { claimGrant, getGrant, putGrant, type FileUrlGrant, type StoredGrant } from "./files/signed";
+import type { Env } from "./env";
+import { TokenBroker, type AccessTokenOptions, type AccessTokenResult, type TokenService } from "./tokencache";
 import { VaultStore, type AccountInfo, type AuditEntry, type CatalogConfig } from "./vaultstore";
 
 export type { AccountInfo, AuditEntry, CatalogConfig } from "./vaultstore";
 
-export class UserVault extends DurableObject<unknown> {
+export class UserVault extends DurableObject<Env> {
   private store: VaultStore;
+  // Instance memory: its in-flight map is what makes concurrent asks for one
+  // account share a single refresh. Eviction loses nothing but that map.
+  private tokens: TokenBroker;
 
-  constructor(ctx: DurableObjectState, env: unknown) {
+  constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store = new VaultStore(ctx.storage.sql);
+    this.tokens = new TokenBroker(this.store, env);
+  }
+
+  /** An access token for one linked account, refreshed here and only here when due. */
+  accessToken(service: TokenService, label: string, opts?: AccessTokenOptions): Promise<AccessTokenResult> {
+    return this.tokens.accessToken(service, label, opts);
   }
 
   getCatalogConfig(defaults: Record<string, boolean>): CatalogConfig {
@@ -61,10 +78,6 @@ export class UserVault extends DurableObject<unknown> {
     label?: string,
   ): { label: string; ciphertext: string } | null {
     return this.store.getAccountForService(accountService, service, label);
-  }
-
-  updateAccountCiphertext(service: string, label: string, ciphertext: string): void {
-    this.store.updateAccountCiphertext(service, label, ciphertext);
   }
 
   setDefaultAccount(service: string, label: string): void {

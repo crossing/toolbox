@@ -206,10 +206,22 @@ export class VaultStore {
     return this.getAccount(accountService);
   }
 
-  // Token-rotation write-back: replaces only the ciphertext, leaving scopes,
-  // enablement, and default flag untouched.
-  updateAccountCiphertext(service: string, label: string, ciphertext: string): void {
-    this.sql.exec("UPDATE accounts SET ciphertext = ? WHERE service = ? AND label = ?", ciphertext, service, label);
+  /**
+   * Compare-and-swap write-back for the token cache: replaces the ciphertext
+   * only if it is still `expected`, so a relink that landed while a refresh
+   * was in flight is never overwritten with the older link's tokens.
+   */
+  replaceAccountCiphertext(service: string, label: string, expected: string, next: string): boolean {
+    const rows = this.sql
+      .exec(
+        "UPDATE accounts SET ciphertext = ? WHERE service = ? AND label = ? AND ciphertext = ? RETURNING label",
+        next,
+        service,
+        label,
+        expected,
+      )
+      .toArray();
+    return rows.length > 0;
   }
 
   setDefaultAccount(service: string, label: string): void {

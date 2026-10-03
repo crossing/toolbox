@@ -1,10 +1,11 @@
 // Key material plumbing for the gateway: AES-GCM for vault blobs (upstream
-// refresh tokens at rest) and HMAC-signed compact tokens for the management
+// tokens at rest) and HMAC-signed compact tokens for the management
 // session cookie and OAuth state. Pure WebCrypto so it runs identically in
 // workerd and in vitest under Node.
 //
-// The vault DO stores only ciphertext and never sees VAULT_KEY; encryption
-// and decryption happen in the worker/session code that holds the env.
+// Vault rows hold only ciphertext. The key lives in the Worker env, read by
+// the /manage link flows (which write new links) and by the UserVault DO
+// itself, the single writer of refreshed tokens (tokencache.ts).
 
 function toBytes(b64: string): Uint8Array {
   const bin = atob(b64);

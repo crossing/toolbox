@@ -107,7 +107,19 @@ async function postTokenEndpoint(
     throw new UpstreamError(`token endpoint unreachable: ${err instanceof Error ? err.message : "fetch failed"}`);
   }
   const text = await response.text();
-  if (!response.ok) throw new UpstreamError(sanitizedTokenError(text));
+  if (!response.ok) {
+    const detail = sanitizedTokenError(text);
+    if (params.grant_type === "refresh_token") {
+      // invalid_grant on refresh: the user revoked access, or the grant aged
+      // out. Nothing but a new link fixes that.
+      const deadGrant = (response.status === 400 || response.status === 401) && detail.startsWith("invalid_grant");
+      throw new UpstreamError(
+        `Google token refresh failed (status ${response.status}): ${detail}` +
+          (deadGrant ? "; the Google link must be renewed on mcp.xing.works/manage" : ""),
+      );
+    }
+    throw new UpstreamError(`token endpoint rejected the request (status ${response.status}): ${detail}`);
+  }
   let payload: unknown;
   try {
     payload = JSON.parse(text);

@@ -37,14 +37,18 @@ import {
 import { defaultServiceToggles, FREEAGENT_ACCOUNT_SERVICE, GOOGLE_ACCOUNT_SERVICE, SERVICES } from "./registry";
 import type { AccountInfo, AuditEntry } from "./vault";
 
-// What a vault account row's ciphertext decrypts to. Google blobs carry only
-// the refresh token (access tokens live ~1h, not worth persisting; Google
-// never rotates refresh tokens). FreeAgent blobs persist the full set:
-// access tokens live ~7 days, and the refresh token may rotate on use.
+// What a vault account row's ciphertext decrypts to. The refresh token is the
+// link itself; the access token, its expiry and its issue time are the
+// vault's cache (tokencache.ts TokenBroker), written only by the vault. A blob
+// without them — every Google link made before the cache existed — simply
+// refreshes on first use. FreeAgent access tokens live one hour and FreeAgent
+// rotates the refresh token on every refresh; Google's live about an hour
+// and Google never rotates.
 export interface VaultBlob {
   refreshToken: string;
   accessToken?: string;
   expiresAt?: number; // epoch ms
+  issuedAt?: number; // epoch ms; with expiresAt gives the lifetime the refresh margin is cut from
 }
 
 const SESSION_COOKIE = "gateway_session";
@@ -402,6 +406,7 @@ export async function handleLinkCallback(
   const requested = state.write ? GOOGLE_WRITE_SCOPES : GOOGLE_READ_SCOPES;
   let label: string;
   let refreshToken: string;
+  let linked: { accessToken: string; expiresAt: number };
   let scopes: string[];
   try {
     const result = await exchangeLinkCode({
@@ -412,6 +417,7 @@ export async function handleLinkCallback(
       requestedScopes: requested,
     });
     refreshToken = result.tokens.refreshToken;
+    linked = { accessToken: result.tokens.accessToken, expiresAt: result.tokens.expiresAt };
     scopes = result.scopes;
     label = (await fetchUserEmail(result.tokens.accessToken)).trim().toLowerCase();
   } catch (err) {
@@ -425,7 +431,10 @@ export async function handleLinkCallback(
   }
 
   const key = await importVaultKey(env.VAULT_KEY);
-  const ciphertext = await encryptJson(key, { refreshToken } satisfies VaultBlob);
+  // The access token from the exchange is good for an hour: seed the vault's
+  // cache with it so the first tool call needs no refresh.
+  const issuedAt = Date.now();
+  const ciphertext = await encryptJson(key, { refreshToken, ...linked, issuedAt } satisfies VaultBlob);
   await vaultFor(env, owner).putAccount(GOOGLE_ACCOUNT_SERVICE, label, ciphertext, scopes);
   return new Response(null, {
     status: 302,
@@ -483,12 +492,14 @@ export async function handleFreeagentLinkCallback(
   if (!code) return messagePage("FreeAgent returned no code.", 400);
 
   let tokens;
+  const issuedAt = Date.now();
   try {
     tokens = await exchangeFreeagentCode({
       clientId: env.FREEAGENT_CLIENT_ID,
       clientSecret: env.FREEAGENT_CLIENT_SECRET,
       code,
       redirectUri: `${url.origin}/callback`,
+      now: issuedAt,
     });
   } catch (err) {
     const message = err instanceof FreeAgentUpstreamError ? err.message : "link failed";
@@ -506,6 +517,7 @@ export async function handleFreeagentLinkCallback(
     refreshToken: tokens.refreshToken,
     accessToken: tokens.accessToken,
     expiresAt: tokens.expiresAt,
+    issuedAt,
   } satisfies VaultBlob);
   await vaultFor(env, owner).putAccount(FREEAGENT_ACCOUNT_SERVICE, subdomain, ciphertext, []);
   return new Response(null, {
