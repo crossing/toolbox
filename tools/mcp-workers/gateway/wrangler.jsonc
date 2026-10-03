@@ -45,5 +45,10 @@
     // (grants are invalidated, connectors just need reconnecting).
     { "binding": "OAUTH_KV", "id": "f8aeeff8216d4b3e9b43ba5f74d77113" }
   ],
+  // Daily _Transit sweep (index.ts scheduled → files/transit.ts trashExpired):
+  // staged files older than 7 days go to the Drive trash. 03:17 UTC, off the hour.
+  "triggers": { "crons": ["17 3 * * *"] },
+  // Invocation logs record request URLs, so /files/<token> bearer URLs land in
+  // Workers Logs: an accepted exposure, see docs/mcp-workers-infra.md.
   "observability": { "enabled": true }
 }

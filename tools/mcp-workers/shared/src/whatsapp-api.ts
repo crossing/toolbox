@@ -177,6 +177,16 @@ export interface MediaResult {
   detail?: string;
 }
 
+/** Decrypted media as a stream; see WhatsAppBridgeApi.openMedia. */
+export interface OpenedMedia {
+  /** The sender's filename, or one derived from the message id and type. */
+  filename: string;
+  mimeType: string;
+  /** Exact decrypted byte count, known before the first chunk. */
+  size: number;
+  body: ReadableStream<Uint8Array>;
+}
+
 export interface ImportRequest {
   chats: { jid: string; name: string | null; lastMessageTime: string | null }[];
   messages: {
@@ -437,6 +447,15 @@ export interface WhatsAppBridgeApi {
   getLastInteraction(jid: string): Promise<LastInteraction>;
   getMessageContext(messageId: string, before?: number, after?: number): Promise<MessageContext>;
   downloadMedia(messageId: string, chatJid: string): Promise<MediaResult>;
+  /**
+   * Stream one message's decrypted media, with no inline cap — the path the
+   * gateway's file tools pipe into Drive. A ReadableStream crosses the
+   * Durable Object RPC boundary as a stream, so nothing is buffered on either
+   * side. Rejects (rather than returning ok: false) when the message has no
+   * media or WhatsApp no longer serves it. Optional until the bridge ships it;
+   * the gateway falls back to downloadMedia when it is absent.
+   */
+  openMedia?(messageId: string, chatJid: string): Promise<OpenedMedia>;
 
   sendMessage(recipient: string, message: string): Promise<SendResult>;
   sendFile(

@@ -371,4 +371,19 @@ describe("byte-exact message round-trip", () => {
     expect([...roundTripped]).toEqual([...original]);
     expect([...base64UrlToBytes(toBase64Url(original))]).toEqual([...original]);
   });
+
+  it("decodes across slice boundaries, padded or not, url-safe or plain, wrapped or not", () => {
+    for (const size of [0, 1, 2, 3, 49151, 49152, 49153, 200_001]) {
+      const original = new Uint8Array(size);
+      for (let i = 0; i < size; i++) original[i] = (i * 131 + 7) & 0xff;
+      const url = toBase64Url(original);
+      const plain = btoa(bytesToLatin1(original));
+      const wrapped = plain.replace(/(.{76})/g, "$1\r\n");
+      for (const encoded of [url, plain, wrapped]) {
+        const decoded = base64UrlToBytes(encoded);
+        expect(decoded.byteLength, `size ${size}`).toBe(size);
+        expect(decoded.every((b, i) => b === original[i])).toBe(true);
+      }
+    }
+  });
 });

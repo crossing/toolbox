@@ -112,6 +112,12 @@ function fakeDrive(opts: FakeDriveOptions = {}) {
       const bytes = opts.bytes ?? PDF_BYTES;
       return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     },
+    // whatsapp_send_drive_file now goes through the file layer, which streams
+    // alt=media rather than buffering it with getRaw.
+    async getStream(url: string, query?: unknown) {
+      calls.push({ url, query });
+      return new Response(opts.bytes ?? PDF_BYTES).body!;
+    },
   };
   return { calls, client };
 }

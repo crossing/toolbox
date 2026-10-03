@@ -14,6 +14,11 @@
 // Worker memory rather than context, which is why it is twenty-five times the
 // one on `gmail_get_attachment`.
 //
+// Both tools are now thin wrappers over the file layer's transfer()
+// (files/transfer.ts), kept with their original schemas so existing callers
+// and routines keep working; file_transfer is the general form and these are
+// deprecated in its favour.
+//
 // Read-then-file is still the other path: when the *content* has to be
 // understood, fetch it, understand it, and write a note. These tools are for
 // when it does not.
@@ -27,50 +32,38 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DRIVE_UPLOAD, FILE_FIELDS, multipartBody } from "./drive";
-import { GMAIL } from "./gmail";
+import { partialFileContext } from "./files/sources";
+import { transfer, type TransferResult } from "./files/transfer";
+import type { TransitCache } from "./files/transit";
 import type { GoogleClient } from "./googleapi";
-import { GoogleApiError } from "./googleapi";
 import { ACCOUNT_PARAM, run, WRITE } from "./toolutil";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 
-/** Worker memory, not context, is the constraint on this path. */
-const RELAY_BYTE_CAP = 25 * 1024 * 1024;
+const DEPRECATED = "Deprecated: prefer file_transfer. ";
 
 export interface RelayClients {
   gmail(account?: string): Promise<GoogleClient>;
   drive(account?: string): Promise<GoogleClient>;
   whatsapp(): Promise<WhatsAppBridgeApi>;
+  /** Where the `_Transit` id is cached, so parent_id "_Transit" works as it does in file_transfer. */
+  vault: TransitCache;
 }
 
-async function uploadBase64(
-  drive: GoogleClient,
-  base64: string,
-  name: string,
-  parentId: string | undefined,
-  mimeType: string,
-): Promise<unknown> {
-  // base64 is 4 characters per 3 bytes; close enough to refuse before we build
-  // a multipart body we cannot hold.
-  const approxBytes = Math.floor((base64.length * 3) / 4);
-  if (approxBytes > RELAY_BYTE_CAP) {
-    throw new GoogleApiError(413, `attachment is about ${Math.round(approxBytes / 1024 / 1024)} MB; cap is 25 MB`);
-  }
-  const metadata: Record<string, unknown> = { name, mimeType };
-  if (parentId) metadata.parents = [parentId];
-  const { contentType, body } = multipartBody(metadata, { base64, mimeType });
-  const file = (await drive.sendBody("POST", `${DRIVE_UPLOAD}/files`, contentType, body, {
-    uploadType: "multipart",
-    fields: FILE_FIELDS,
-  })) as Record<string, unknown>;
-  return { ...file, bytes: approxBytes, relayed: true };
+/** The old result shape (Drive file JSON plus bytes/relayed), with the new ref and mode alongside. */
+function relayResult(result: TransferResult): Record<string, unknown> {
+  const file = (result.result ?? {}) as Record<string, unknown>;
+  return { ...file, bytes: result.size, relayed: true, ref: result.ref, mode: result.mode };
 }
 
 export function registerRelayTools(server: McpServer, clients: RelayClients): void {
+  const files = partialFileContext({ gmail: clients.gmail, drive: clients.drive, whatsapp: clients.whatsapp, vault: clients.vault });
+
   server.registerTool(
     "drive_save_gmail_attachment",
     {
       description:
+        DEPRECATED +
+        "Same as file_transfer from gmail:<message_id>/<attachment_id> to drive:folder/<parent_id>. " +
         "Copy a Gmail attachment straight into Drive without the bytes passing through this conversation — the gateway fetches it with the mail account's credentials and uploads it with the Drive account's. Prefer this over gmail_get_attachment + drive_create_file for anything you do not need to read: it costs no context and handles files up to 25 MB rather than 1 MB. Find message_id and attachment_id with gmail_get_message. For the opposite direction — a Drive file onto an outgoing message — use gmail_attach_drive_file, or gmail_create_draft's drive_attachments.",
       inputSchema: {
         message_id: z.string(),
@@ -80,40 +73,32 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
         mime_type: z
           .string()
           .optional()
-          .describe("Attachment's mime type from gmail_get_message; defaults to application/octet-stream"),
+          .describe("Attachment's mime type from gmail_get_message; defaults to the type Gmail reports"),
         gmail_account: ACCOUNT_PARAM,
         drive_account: ACCOUNT_PARAM,
       },
       annotations: WRITE,
     },
     async ({ message_id, attachment_id, name, parent_id, mime_type, gmail_account, drive_account }) =>
-      run(async () => {
-        const mail = await clients.gmail(gmail_account);
-        const att = (await mail.getJson(`${GMAIL}/messages/${message_id}/attachments/${attachment_id}`)) as {
-          size?: number;
-          data?: string;
-        };
-        if (!att.data) throw new GoogleApiError(404, "Gmail returned no attachment data");
-        if ((att.size ?? 0) > RELAY_BYTE_CAP) {
-          throw new GoogleApiError(413, `attachment is ${att.size} bytes; cap is ${RELAY_BYTE_CAP}`);
-        }
-        // Gmail speaks base64url; Drive wants standard base64.
-        const base64 = att.data.replace(/-/g, "+").replace(/_/g, "/");
-        return uploadBase64(
-          await clients.drive(drive_account),
-          base64,
-          name,
-          parent_id,
-          mime_type ?? "application/octet-stream",
-        );
-      }),
+      run(async () =>
+        relayResult(
+          await transfer(
+            { kind: "gmail", messageId: message_id, attachmentId: attachment_id, ...(gmail_account !== undefined && { account: gmail_account }) },
+            { kind: "drive-folder", parentId: parent_id ?? "root", ...(drive_account !== undefined && { account: drive_account }) },
+            files,
+            { name, ...(mime_type !== undefined && { mimeType: mime_type }) },
+          ),
+        ),
+      ),
   );
 
   server.registerTool(
     "drive_save_whatsapp_media",
     {
       description:
-        "Copy a WhatsApp attachment straight into Drive without the bytes passing through this conversation. Same reasoning as drive_save_gmail_attachment: the bridge decrypts it and the gateway uploads it. Note the bridge's own inline caps still apply on this path — images up to 2 MB, other types only up to 32 KB — so a large document will be refused with its size; record it and fetch it from the phone instead. Use whatsapp_list_messages to find the message id and chat jid.",
+        DEPRECATED +
+        "Same as file_transfer from wa:<chat_jid>/<message_id> to drive:folder/<parent_id>. " +
+        "Copy a WhatsApp attachment straight into Drive without the bytes passing through this conversation: the bridge decrypts it and streams it, and the gateway uploads it. Use whatsapp_list_messages to find the message id and chat jid.",
       inputSchema: {
         message_id: z.string(),
         chat_jid: z.string(),
@@ -124,19 +109,15 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
       annotations: WRITE,
     },
     async ({ message_id, chat_jid, name, parent_id, drive_account }) =>
-      run(async () => {
-        const bridge = await clients.whatsapp();
-        const media = await bridge.downloadMedia(message_id, chat_jid);
-        if (!media.ok || !media.base64) {
-          throw new GoogleApiError(400, media.detail ?? "the bridge returned no media");
-        }
-        return uploadBase64(
-          await clients.drive(drive_account),
-          media.base64,
-          name ?? media.filename ?? `whatsapp-${message_id}`,
-          parent_id,
-          media.mimeType ?? "application/octet-stream",
-        );
-      }),
+      run(async () =>
+        relayResult(
+          await transfer(
+            { kind: "wa", chatJid: chat_jid, messageId: message_id },
+            { kind: "drive-folder", parentId: parent_id ?? "root", ...(drive_account !== undefined && { account: drive_account }) },
+            files,
+            name !== undefined ? { name } : {},
+          ),
+        ),
+      ),
   );
 }

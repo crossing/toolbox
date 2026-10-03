@@ -27,6 +27,9 @@ export interface Env {
   // credential: 32 random characters, typed once into their control page.
   SMS_HOOK_SECRET: string;
   SMS_OWN_NUMBERS: string; // comma-separated; a delivery to anything else is refused
+  // HMAC key for signed /files/<token> URLs (files/signed.ts). Its own secret,
+  // not COOKIE_SECRET, so a session cookie can never pass as a file URL.
+  FILES_URL_KEY: string;
   // Sending credentials. Absent until phase 4 is provisioned, so both are
   // optional: a gateway with no way to send should stage requests and say so
   // plainly, not fail to boot.

@@ -9,6 +9,7 @@ import { boundFetch, type Fetcher } from "@toolbox/mcp-shared";
 import { refreshUpstream, type UpstreamTokens } from "./google";
 
 const REFRESH_MARGIN_MS = 60 * 1000;
+const DRIVE_RESUMABLE = "https://www.googleapis.com/upload/drive/v3/files";
 
 export class GoogleApiError extends Error {
   constructor(
@@ -99,6 +100,77 @@ export class GoogleClient {
   async getRaw(url: string, query?: QueryParams): Promise<ArrayBuffer> {
     const response = await this.doFetch("GET", url, query, { headers: { accept: "*/*" } });
     return response.arrayBuffer();
+  }
+
+  /**
+   * The response body as a stream, for piping bytes onwards without holding
+   * them: a Drive `alt=media` download into a signed GET response or another
+   * upload. getRaw stays for callers that need the whole buffer.
+   */
+  async getStream(url: string, query?: QueryParams): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.doFetch("GET", url, query, { headers: { accept: "*/*" } });
+    if (!response.body) throw new GoogleApiError(502, "Google API returned an empty body");
+    return response.body;
+  }
+
+  /**
+   * Open a Drive resumable upload session and return its session URI. With
+   * `fileId` the session replaces that file's content (PATCH) — how a
+   * pre-created `_Transit` placeholder gets its bytes — otherwise it creates a
+   * new file from `metadata`. `query` belongs here, not on the upload: the
+   * `fields` given now shape the file JSON the final PUT returns.
+   *
+   * The session URI is itself a credential (no auth header is needed to
+   * upload to it), so it never leaves the Worker.
+   */
+  async startResumableUpload(
+    metadata: Record<string, unknown>,
+    mimeType: string,
+    size?: number,
+    options: { fileId?: string; query?: QueryParams } = {},
+  ): Promise<string> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json; charset=UTF-8",
+      "x-upload-content-type": mimeType,
+    };
+    if (size !== undefined) headers["x-upload-content-length"] = String(size);
+    const url = options.fileId ? `${DRIVE_RESUMABLE}/${encodeURIComponent(options.fileId)}` : DRIVE_RESUMABLE;
+    const response = await this.doFetch(
+      options.fileId ? "PATCH" : "POST",
+      url,
+      { supportsAllDrives: true, ...options.query, uploadType: "resumable" },
+      { headers, body: JSON.stringify(metadata) },
+    );
+    // Drain so the connection can be reused; the session lives in the header.
+    await response.body?.cancel();
+    const location = response.headers.get("location");
+    if (!location) throw new GoogleApiError(502, "Drive opened no upload session (no Location header)");
+    return location;
+  }
+
+  /**
+   * Send the whole file to a session from startResumableUpload in one PUT,
+   * streamed. `size` must be the exact byte count: Drive needs a
+   * Content-Length, and in workerd only a FixedLengthStream body carries one
+   * (a plain stream goes out chunked). A body that comes up short or long
+   * fails the request rather than storing a truncated file.
+   */
+  async uploadToSession(sessionUri: string, body: ReadableStream<Uint8Array>, size: number): Promise<unknown> {
+    let sent: ReadableStream<Uint8Array> = body;
+    const init: RequestInit & { duplex?: "half" } = { headers: { "content-length": String(size) } };
+    if (typeof FixedLengthStream === "function") {
+      const fixed = new FixedLengthStream(size);
+      // Not awaited: the fetch below consumes the readable side, and a
+      // pipe failure surfaces there as a failed upload.
+      void body.pipeTo(fixed.writable).catch(() => {});
+      sent = fixed.readable;
+    } else {
+      // Node's fetch (vitest) wants this for any streamed request body.
+      init.duplex = "half";
+    }
+    const response = await this.doFetch("PUT", sessionUri, undefined, { ...init, body: sent });
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
   }
 
   async sendJson(method: "POST" | "PATCH" | "PUT", url: string, body: unknown, query?: QueryParams): Promise<unknown> {

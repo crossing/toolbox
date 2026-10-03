@@ -6,6 +6,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fetchDriveAttachment, multipartBody } from "./drive";
+import { partialFileContext } from "./files/sources";
+import { transfer } from "./files/transfer";
 import { GoogleApiError, type GoogleClient } from "./googleapi";
 import {
   addAttachmentToMessage,
@@ -277,6 +279,69 @@ async function fetchParentHeaders(client: GoogleClient, messageId: string) {
   };
 }
 
+// ---- attaching to an existing draft ----
+//
+// Shared by gmail_attach_drive_file and the file layer's gmail:draft/ sink, so
+// both splice into the stored raw message the same way and refuse at the same
+// size.
+
+export interface DraftForAttach {
+  /** The stored message, exactly as Gmail holds it (format=raw, decoded). */
+  existing: Uint8Array;
+  threadId?: string;
+}
+
+export async function loadDraftForAttach(client: GoogleClient, draftId: string): Promise<DraftForAttach> {
+  // format=raw returns the message exactly as stored, which is the only
+  // representation that survives being written back.
+  let draft: { id?: string; message?: { raw?: string; threadId?: string } };
+  try {
+    draft = (await client.getJson(`${GMAIL}/drafts/${draftId}`, { format: "raw" })) as typeof draft;
+  } catch (err) {
+    if (err instanceof GoogleApiError && err.status === 404) {
+      throw new GoogleApiError(
+        404,
+        `draft "${draftId}" was not found in this mailbox. Draft ids come from gmail_list_drafts and are ` +
+          "not message ids — a message id from gmail_search will not work here.",
+      );
+    }
+    throw err;
+  }
+  const raw = draft.message?.raw;
+  if (!raw) throw new GoogleApiError(404, `draft "${draftId}" has no message body to attach to`);
+  return { existing: base64UrlToBytes(raw), threadId: draft.message?.threadId };
+}
+
+/** Source bytes the draft can still take: what the message can grow by, before base64 adds its third. */
+export function draftAttachRoom(draft: DraftForAttach): number {
+  return Math.max(0, Math.floor(((GMAIL_MESSAGE_BYTE_CAP - draft.existing.byteLength) * 3) / 4));
+}
+
+export async function saveDraftWithAttachment(
+  client: GoogleClient,
+  draftId: string,
+  draft: DraftForAttach,
+  attachment: OutgoingAttachment,
+): Promise<{ result: Record<string, unknown>; messageBytes: number }> {
+  const updated = addAttachmentToMessage(bytesToLatin1(draft.existing), attachment);
+  const bytes = latin1ToBytes(updated);
+  if (bytes.byteLength > GMAIL_MESSAGE_BYTE_CAP) {
+    throw new GoogleApiError(
+      413,
+      `the draft would grow to about ${Math.round(bytes.byteLength / 1024 / 1024)} MB; Gmail refuses a message ` +
+        "over 25 MB. Send a Drive link in the body instead.",
+    );
+  }
+  const { contentType, body } = multipartBody(draft.threadId ? { message: { threadId: draft.threadId } } : {}, {
+    text: bytesToLatin1(bytes),
+    mimeType: "message/rfc822",
+  });
+  const result = (await client.sendBody("PUT", `${GMAIL_UPLOAD}/drafts/${draftId}`, contentType, body, {
+    uploadType: "multipart",
+  })) as Record<string, unknown>;
+  return { result, messageBytes: bytes.byteLength };
+}
+
 export function registerGmailWriteTools(
   server: McpServer,
   getClient: GetClient,
@@ -470,6 +535,7 @@ export function registerGmailWriteTools(
     "gmail_attach_drive_file",
     {
       description:
+        "Deprecated: prefer file_transfer (from drive:<file_id> to gmail:draft/<draft_id>). " +
         "Attach a Drive file to a draft that already exists, without the bytes passing through this conversation — the gateway fetches the file with the Drive account's credentials and attaches it with the mail account's. The exact inverse of drive_save_gmail_attachment, and the way to finish a draft you (or the human) already wrote: no re-typing the body, no downloading and re-uploading, no Gmail UI. Google Docs/Sheets/Slides are exported on the way out (PDF, xlsx). The draft's existing body and attachments are preserved as-is, including HTML formatting. Find draft_id with gmail_list_drafts, file_id with drive_search. To create a draft and attach in one step, use gmail_create_draft's drive_attachments instead. Never sends.",
       inputSchema: {
         draft_id: z.string().describe("Draft id from gmail_list_drafts (not the message id)"),
@@ -486,62 +552,21 @@ export function registerGmailWriteTools(
     },
     async ({ draft_id, file_id, filename, export_mime_type, account, drive_account }) =>
       run(async () => {
-        const client = await getClient(account);
-
-        // format=raw returns the message exactly as stored, which is the only
-        // representation that survives being written back.
-        let draft: { id?: string; message?: { raw?: string; threadId?: string } };
-        try {
-          draft = (await client.getJson(`${GMAIL}/drafts/${draft_id}`, { format: "raw" })) as typeof draft;
-        } catch (err) {
-          if (err instanceof GoogleApiError && err.status === 404) {
-            throw new GoogleApiError(
-              404,
-              `draft "${draft_id}" was not found in this mailbox. Draft ids come from gmail_list_drafts and are ` +
-                "not message ids — a message id from gmail_search will not work here.",
-            );
-          }
-          throw err;
-        }
-        const raw = draft.message?.raw;
-        if (!raw) throw new GoogleApiError(404, `draft "${draft_id}" has no message body to attach to`);
-
-        const existing = base64UrlToBytes(raw);
-        const drive = await getDriveClient(drive_account);
-        const accountHint = drive_account ? `the "${drive_account}" Drive account` : "the default Drive account";
-        const fetched = await fetchDriveAttachment(drive, file_id, {
-          accountHint,
-          filename,
-          exportMimeType: export_mime_type,
-          // What the message can still grow by, in encoded bytes.
-          byteCap: Math.max(0, Math.floor(((GMAIL_MESSAGE_BYTE_CAP - existing.byteLength) * 3) / 4)),
-        });
-
-        const updated = addAttachmentToMessage(bytesToLatin1(existing), {
-          filename: fetched.filename,
-          mimeType: fetched.mimeType,
-          base64: fetched.base64,
-        });
-        const bytes = latin1ToBytes(updated);
-        if (bytes.byteLength > GMAIL_MESSAGE_BYTE_CAP) {
-          throw new GoogleApiError(
-            413,
-            `the draft would grow to about ${Math.round(bytes.byteLength / 1024 / 1024)} MB; Gmail refuses a message ` +
-              "over 25 MB. Send a Drive link in the body instead.",
-          );
-        }
-
-        const { contentType, body } = multipartBody(
-          draft.message?.threadId ? { message: { threadId: draft.message.threadId } } : {},
-          { text: bytesToLatin1(bytes), mimeType: "message/rfc822" },
+        // A thin delegation to the file layer; the gmail:draft/ sink splices
+        // with the helpers above, and refuses on the draft's room before the
+        // Drive download starts.
+        const moved = await transfer(
+          { kind: "drive", fileId: file_id, ...(drive_account !== undefined && { account: drive_account }) },
+          { kind: "gmail-draft", draftId: draft_id, ...(account !== undefined && { account }) },
+          partialFileContext({ gmail: getClient, drive: getDriveClient }),
+          {
+            ...(filename !== undefined && { name: filename }),
+            ...(export_mime_type !== undefined && { exportMimeType: export_mime_type }),
+          },
         );
-        const result = (await client.sendBody("PUT", `${GMAIL_UPLOAD}/drafts/${draft_id}`, contentType, body, {
-          uploadType: "multipart",
-        })) as Record<string, unknown>;
         return {
-          ...result,
-          attached: { filename: fetched.filename, mimeType: fetched.mimeType, bytes: fetched.bytes },
-          messageBytes: bytes.byteLength,
+          ...((moved.result ?? {}) as Record<string, unknown>),
+          attached: { filename: moved.name, mimeType: moved.mimeType, bytes: moved.size },
         };
       }),
   );

@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS service_accounts (
   account_service TEXT NOT NULL,
   label TEXT NOT NULL
 );
+-- Small per-user values the gateway resolves once and reuses, such as the
+-- Drive id of the _Transit staging folder (files/transit.ts).
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 export class VaultStore {
@@ -222,6 +228,24 @@ export class VaultStore {
         service,
       );
     }
+  }
+
+  getSetting(key: string): string | null {
+    const rows = this.sql.exec("SELECT value FROM settings WHERE key = ?", key).toArray();
+    return rows.length === 0 ? null : (rows[0]!.value as string);
+  }
+
+  /** An empty value clears the key. */
+  setSetting(key: string, value: string): void {
+    if (value === "") {
+      this.sql.exec("DELETE FROM settings WHERE key = ?", key);
+      return;
+    }
+    this.sql.exec(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      key,
+      value,
+    );
   }
 
   appendAudit(entry: AuditEntry): void {

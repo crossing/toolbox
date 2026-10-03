@@ -27,6 +27,10 @@ import {
 } from "@toolbox/mcp-shared";
 import { decryptJson, encryptJson, importVaultKey } from "./crypto";
 import { vaultFor, type Env } from "./env";
+import { fileUrl, googleClientForUser, handleFilesRequest } from "./files/http";
+import { signToken } from "./files/signed";
+import { FileError } from "./files/types";
+import { listTransitFolders, transitCacheKey, trashExpired } from "./files/transit";
 import { FreeAgentClient, FreeAgentTokenSource } from "./freeagentapi";
 import {
   buildIdentityRedirect,
@@ -148,6 +152,16 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
       sendSms: async (sendId, peer, body) =>
         dispatchSms(this.env, peer, body, dlrUrl(this.env, this.env.PUBLIC_ORIGIN ?? "", sendId)),
       listAccounts: async () => vault.listAccounts(),
+      transitCache: vault,
+      signFileUrl: async (req) => {
+        // Checked here rather than left to signToken, so the model is told
+        // what is missing instead of getting an opaque failure.
+        if (!this.env.FILES_URL_KEY || !this.env.PUBLIC_ORIGIN) {
+          throw new FileError(503, "signed file URLs are not configured on this gateway (FILES_URL_KEY / PUBLIC_ORIGIN)");
+        }
+        const { token, payload } = await signToken(this.env.FILES_URL_KEY, { ...req, userId: email });
+        return { url: fileUrl(this.env.PUBLIC_ORIGIN, token), expiresAt: payload.exp };
+      },
       audit: async (tool, summary, status) =>
         vault.appendAudit({ ts: Date.now(), tool, summary, status }),
     };
@@ -286,7 +300,7 @@ const authHandler = {
   },
 };
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: mcpHandler,
   defaultHandler: authHandler,
@@ -295,3 +309,47 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/register",
   scopesSupported: ["read", "write"],
 });
+
+/**
+ * The daily `_Transit` sweep (wrangler.jsonc cron). Durable Objects cannot be
+ * enumerated, so the allowlist is the list of users; a user whose vault has
+ * never cached a `_Transit` id has never staged a file and costs no Drive
+ * call. `_Transit` lives only in the default Drive account (refs.ts refuses
+ * a labelled one); every root-level `_Transit` there is swept, not just the
+ * cached one, so a duplicate left by a find-or-create race still empties.
+ * One user's failure is logged and the sweep moves on.
+ */
+async function sweepTransit(env: Env, now: number): Promise<void> {
+  const emails = (env.ALLOWED_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+  for (const email of emails) {
+    try {
+      const vault = vaultFor(env, email);
+      if (!(await vault.getSetting(transitCacheKey()))) continue;
+      const drive = await googleClientForUser(env, email, "drive");
+      for (const transitId of await listTransitFolders(drive)) {
+        const report = await trashExpired(drive, transitId, now);
+        if (report.trashed.length > 0 || report.failed.length > 0) {
+          console.log(`transit sweep: trashed ${report.trashed.length}, failed ${report.failed.length}`);
+        }
+      }
+    } catch (err) {
+      console.log(`transit sweep failed for one user: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // Outside the OAuth provider altogether: a signed file URL is its own
+    // bearer credential, carried by sandboxes that hold no OAuth token.
+    const files = await handleFilesRequest(request, env);
+    if (files) return files;
+    return oauthProvider.fetch(request, env, ctx);
+  },
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(sweepTransit(env, controller.scheduledTime));
+  },
+} satisfies ExportedHandler<Env>;

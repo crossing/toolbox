@@ -4,6 +4,7 @@
 // no linked account. Both surface as clean tool errors pointing at /manage.
 
 import { z } from "zod";
+import { FileError } from "./files/types";
 import { FreeAgentApiError, FreeAgentUpstreamError } from "./freeagentapi";
 import { GoogleApiError } from "./googleapi";
 import { UpstreamError } from "./google";
@@ -108,7 +109,8 @@ export function asError(err: unknown) {
     err instanceof FreeAgentUpstreamError ||
     err instanceof ServiceDisabledError ||
     err instanceof NoLinkedAccountError ||
-    err instanceof BridgeError
+    err instanceof BridgeError ||
+    err instanceof FileError
   ) {
     text = err.message;
   } else {
