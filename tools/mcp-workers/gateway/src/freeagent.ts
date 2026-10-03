@@ -173,7 +173,12 @@ export async function listPage(
       all.push(r);
     }
     const paged = got.nextPage !== null || got.lastPage !== null || got.total !== null;
-    const more = paged ? got.nextPage !== null : records.length >= UPSTREAM_PER_PAGE;
+    // Link rel="next" is authoritative; X-Total-Count backs it up in case the
+    // header is missing or unparsable, so a total above what was read never
+    // ends the pass early.
+    const more = paged
+      ? got.nextPage !== null || (firstTotal !== null && all.length < firstTotal)
+      : records.length >= UPSTREAM_PER_PAGE;
     if (!more || records.length === 0) break;
   }
   if (firstTotal !== null && firstTotal !== all.length) changed = true;

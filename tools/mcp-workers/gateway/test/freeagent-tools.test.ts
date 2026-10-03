@@ -53,7 +53,7 @@ function bill(n: number) {
  */
 function fakeApi(
   count: number,
-  opts: { headers?: boolean; storageBytes?: Uint8Array; order?: number[]; growAfterFirstPage?: number } = {},
+  opts: { headers?: boolean | "total-only"; storageBytes?: Uint8Array; order?: number[]; growAfterFirstPage?: number } = {},
 ) {
   const calls: Call[] = [];
   const bills = (opts.order ?? Array.from({ length: count }, (_, i) => i + 1)).map(bill);
@@ -75,8 +75,11 @@ function fakeApi(
       }
       const last = Math.max(1, Math.ceil(bills.length / per));
       const headers = new Headers();
-      if (opts.headers !== false) {
-        const link = (p: number, rel: string) => `<${API}/bills?page=${p}&per_page=${per}>; rel="${rel}"`;
+      if (opts.headers === "total-only") {
+        headers.set("x-total-count", String(bills.length));
+      } else if (opts.headers !== false) {
+        // Real FreeAgent quotes rel with single quotes.
+        const link = (p: number, rel: string) => `<${API}/bills?page=${p}&per_page=${per}>; rel='${rel}'`;
         const parts = [link(1, "first"), link(last, "last")];
         if (page < last) parts.push(link(page + 1, "next"));
         headers.set("link", parts.join(", "));
@@ -115,6 +118,7 @@ describe("parseLinkHeader", () => {
     expect(
       parseLinkHeader(`<${API}/bills?page=2&per_page=5>; rel="prev", <${API}/bills?page=4&per_page=5>; rel="next", <${API}/bills?page=9>; rel="last"`),
     ).toEqual({ prev: 2, next: 4, last: 9 });
+    expect(parseLinkHeader(`<${API}/bills?page=3>; rel='next', <${API}/bills?page=7>; rel='last'`)).toEqual({ next: 3, last: 7 });
     expect(parseLinkHeader(null)).toEqual({});
     expect(parseLinkHeader("garbage")).toEqual({});
   });
@@ -177,6 +181,15 @@ describe("listPage", () => {
     expect(refs(out)).toEqual(["FAKE-230", "FAKE-229", "FAKE-228"]);
     expect(calls.map((c) => c.url.searchParams.get("page"))).toEqual(["1", "2", "3"]);
     expect(out.total).toBe(230);
+  });
+
+  it("keeps reading while X-Total-Count says more remain, even without a Link header", async () => {
+    const { calls, fetcher } = fakeApi(230, { headers: "total-only" });
+    const out = await listPage(staticClient("t", fetcher), "/bills", "bills", {}, { page: 1, perPage: 3, order: "newest", dateField: "dated_on" });
+    expect(refs(out)).toEqual(["FAKE-230", "FAKE-229", "FAKE-228"]);
+    expect(calls.map((c) => c.url.searchParams.get("page"))).toEqual(["1", "2", "3"]);
+    expect(out.total).toBe(230);
+    expect(out.note).toBeUndefined();
   });
 
   it("past the sort ceiling, falls back to FreeAgent's order and says so", async () => {

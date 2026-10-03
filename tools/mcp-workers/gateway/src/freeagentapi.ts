@@ -382,7 +382,8 @@ export function parseLinkHeader(header: string | null): Record<string, number> {
   const out: Record<string, number> = {};
   if (!header) return out;
   for (const part of header.split(",")) {
-    const match = /<([^>]*)>\s*;\s*rel="?([a-z]+)"?/i.exec(part.trim());
+    // FreeAgent quotes rel with single quotes (rel='next'); RFC 8288 uses double.
+    const match = /<([^>]*)>\s*;\s*rel=["']?([a-z]+)["']?/i.exec(part.trim());
     if (!match) continue;
     let page: number;
     try {
