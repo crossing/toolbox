@@ -6,12 +6,10 @@ import {
   FREEAGENT_TOKEN_URL,
   FreeAgentApiError,
   FreeAgentClient,
-  FreeAgentTokenSource,
   FreeAgentUpstreamError,
   isApiUrl,
   refreshFreeagent,
   staticClient,
-  type FreeAgentTokens,
 } from "../src/freeagentapi";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -102,34 +100,6 @@ describe("buildFreeagentAuthorizeRedirect", () => {
     expect(url.origin + url.pathname).toBe("https://api.freeagent.com/v2/approve_app");
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("state")).toBe("f.x");
-  });
-});
-
-describe("FreeAgentTokenSource", () => {
-  const fresh: FreeAgentTokens = { accessToken: "live", refreshToken: "rt", expiresAt: Date.now() + 86_400_000 };
-
-  it("serves the stored access token while fresh, without any request", async () => {
-    const { calls, fetcher } = capture(jsonResponse({}));
-    const source = new FreeAgentTokenSource("c", "s", fresh, undefined, fetcher);
-    expect(await source.token()).toBe("live");
-    expect(calls).toHaveLength(0);
-  });
-
-  it("refreshes an expired set and reports the rotation for persistence", async () => {
-    const { fetcher } = capture(jsonResponse({ access_token: "at2", refresh_token: "rt2", expires_in: 604800 }));
-    const rotations: FreeAgentTokens[] = [];
-    const source = new FreeAgentTokenSource(
-      "c",
-      "s",
-      { accessToken: "", refreshToken: "rt", expiresAt: 0 },
-      async (tokens) => {
-        rotations.push(tokens);
-      },
-      fetcher,
-    );
-    expect(await source.token()).toBe("at2");
-    expect(rotations).toHaveLength(1);
-    expect(rotations[0]!.refreshToken).toBe("rt2");
   });
 });
 

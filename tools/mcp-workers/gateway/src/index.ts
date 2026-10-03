@@ -25,13 +25,12 @@ import {
   WRITE_SCOPE,
   type OwnerProps,
 } from "@toolbox/mcp-shared";
-import { decryptJson, encryptJson, importVaultKey } from "./crypto";
 import { vaultFor, type Env } from "./env";
 import { fileUrl, googleClientForUser, grantStoreFor, handleFilesRequest, pinDriveAccount } from "./files/http";
 import { signToken } from "./files/signed";
 import { FileError } from "./files/types";
 import { listTransitFolders, transitCacheKey, trashExpired } from "./files/transit";
-import { FreeAgentClient, FreeAgentTokenSource } from "./freeagentapi";
+import { FreeAgentClient } from "./freeagentapi";
 import {
   buildIdentityRedirect,
   emailAllowed,
@@ -39,7 +38,7 @@ import {
   fetchUserEmail,
   UpstreamError,
 } from "./google";
-import { GoogleClient, TokenSource } from "./googleapi";
+import { GoogleClient } from "./googleapi";
 import { handleFreeagentLinkCallback, handleLinkCallback, handleManage, handleManageCallback } from "./manage";
 import {
   defaultServiceToggles,
@@ -52,9 +51,9 @@ import {
 import { inboxFor } from "./sms";
 import { handleSmsHook } from "./smshook";
 import { dispatchSms, dlrUrl } from "./smssend";
+import { vaultTokenSource, type VaultTokenSource } from "./tokencache";
 import { NoLinkedAccountError, ServiceDisabledError } from "./toolutil";
 import { bridgeFor } from "./whatsapp";
-import type { VaultBlob } from "./manage";
 
 export { UserVault } from "./vault";
 export { SmsInbox } from "./smsinbox";
@@ -72,10 +71,10 @@ const SERVER_VERSION = "0.4.0";
 
 export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
   server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  // One token source per resolved account label; instance memory only, so a
-  // hibernated DO simply re-derives from the vault's stored tokens on wake.
-  private tokenSources = new Map<string, TokenSource>();
-  private freeagentSource?: FreeAgentTokenSource;
+  // One token source per resolved account, holding only an access token and
+  // its expiry; refresh tokens stay in the vault, which alone refreshes. A
+  // hibernated DO just asks the vault again on wake.
+  private tokenSources = new Map<string, VaultTokenSource>();
 
   async init() {
     const email = this.props?.userId ?? "";
@@ -87,6 +86,15 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
       const enabled = await vault.isServiceEnabled(service, def?.defaultEnabled ?? false);
       if (!enabled) throw new ServiceDisabledError(service);
     };
+    const tokenSource = (service: "google" | "freeagent", label: string) => {
+      const key = `${service}\n${label}`;
+      let source = this.tokenSources.get(key);
+      if (!source) {
+        source = vaultTokenSource(vault, service, label);
+        this.tokenSources.set(key, source);
+      }
+      return source;
+    };
     const ctx: GatewayToolContext = {
       email,
       canWrite: hasScope(this.props, WRITE_SCOPE),
@@ -97,47 +105,13 @@ export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
         // default. An explicit `account` argument still wins over both.
         const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, service, account);
         if (!acct) throw new NoLinkedAccountError(service, account);
-        let source = this.tokenSources.get(acct.label);
-        if (!source) {
-          const key = await importVaultKey(this.env.VAULT_KEY);
-          const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
-          source = new TokenSource(this.env.GWS_CLIENT_ID, this.env.GWS_CLIENT_SECRET, {
-            accessToken: "",
-            refreshToken: blob.refreshToken,
-            expiresAt: 0,
-          });
-          this.tokenSources.set(acct.label, source);
-        }
-        return new GoogleClient(source);
+        return new GoogleClient(tokenSource(GOOGLE_ACCOUNT_SERVICE, acct.label));
       },
       freeagentClient: async () => {
         await assertEnabled("freeagent");
         const acct = await vault.getAccountForService(FREEAGENT_ACCOUNT_SERVICE, "freeagent");
         if (!acct) throw new NoLinkedAccountError("freeagent");
-        if (!this.freeagentSource) {
-          const key = await importVaultKey(this.env.VAULT_KEY);
-          const blob = await decryptJson<VaultBlob>(key, acct.ciphertext);
-          this.freeagentSource = new FreeAgentTokenSource(
-            this.env.FREEAGENT_CLIENT_ID,
-            this.env.FREEAGENT_CLIENT_SECRET,
-            {
-              accessToken: blob.accessToken ?? "",
-              refreshToken: blob.refreshToken,
-              expiresAt: blob.expiresAt ?? 0,
-            },
-            // FreeAgent may rotate the refresh token on use — persist every
-            // refreshed set so hibernation never resurrects a dead token.
-            async (tokens) => {
-              const ciphertext = await encryptJson(key, {
-                refreshToken: tokens.refreshToken,
-                accessToken: tokens.accessToken,
-                expiresAt: tokens.expiresAt,
-              } satisfies VaultBlob);
-              await vault.updateAccountCiphertext(FREEAGENT_ACCOUNT_SERVICE, acct.label, ciphertext);
-            },
-          );
-        }
-        return new FreeAgentClient(this.freeagentSource);
+        return new FreeAgentClient(tokenSource(FREEAGENT_ACCOUNT_SERVICE, acct.label));
       },
       whatsappBridge: async () => {
         await assertEnabled("whatsapp");

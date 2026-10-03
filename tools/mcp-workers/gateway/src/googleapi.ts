@@ -1,14 +1,20 @@
 // Google API client (ported from gws-mcp's api.ts). Google access tokens
-// live ~1 hour, so the session DO refreshes in-process: TokenSource holds the
-// current access token in instance memory and re-refreshes from the vault's
-// long-lived refresh token on demand (Google does not rotate refresh tokens,
-// so nothing needs writing back). A TokenSource built straight from a vault
-// blob starts with no access token (expiresAt 0) and refreshes on first use.
+// live about an hour. The client draws them from a GoogleTokenProvider:
+// inside the gateway that is tokencache.ts VaultTokenSource, which asks the
+// UserVault Durable Object — the only place a refresh happens and the only
+// place the access token is persisted.
 
 import { boundFetch, type Fetcher } from "@toolbox/mcp-shared";
-import { refreshUpstream, type UpstreamTokens } from "./google";
 
-const REFRESH_MARGIN_MS = 60 * 1000;
+/**
+ * What a GoogleClient draws access tokens from. `invalidate` is optional:
+ * given the token Google just refused with a 401, it returns a fresh one.
+ */
+export interface GoogleTokenProvider {
+  token(): Promise<string>;
+  invalidate?(failed: string): Promise<string>;
+}
+
 const DRIVE_RESUMABLE = "https://www.googleapis.com/upload/drive/v3/files";
 
 export class GoogleApiError extends Error {
@@ -17,34 +23,6 @@ export class GoogleApiError extends Error {
     message: string,
   ) {
     super(message);
-  }
-}
-
-export class TokenSource {
-  private accessToken: string;
-  private expiresAt: number;
-
-  constructor(
-    private clientId: string,
-    private clientSecret: string,
-    private upstream: UpstreamTokens,
-    private fetcher: Fetcher = boundFetch,
-  ) {
-    this.accessToken = upstream.accessToken;
-    this.expiresAt = upstream.expiresAt;
-  }
-
-  async token(): Promise<string> {
-    if (Date.now() < this.expiresAt - REFRESH_MARGIN_MS) return this.accessToken;
-    const refreshed = await refreshUpstream({
-      clientId: this.clientId,
-      clientSecret: this.clientSecret,
-      refreshToken: this.upstream.refreshToken,
-      fetcher: this.fetcher,
-    });
-    this.accessToken = refreshed.accessToken;
-    this.expiresAt = refreshed.expiresAt;
-    return this.accessToken;
   }
 }
 
@@ -66,7 +44,7 @@ export type QueryParams = Record<string, string | number | boolean | string[] | 
 
 export class GoogleClient {
   constructor(
-    private tokens: TokenSource,
+    private tokens: GoogleTokenProvider,
     private fetcher: Fetcher = boundFetch,
   ) {}
 
@@ -80,12 +58,21 @@ export class GoogleClient {
         u.searchParams.set(key, String(value));
       }
     }
+    const send = (token: string) =>
+      this.fetcher(u.toString(), {
+        ...init,
+        method,
+        headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(init?.headers ?? {}) },
+      });
     const token = await this.tokens.token();
-    const response = await this.fetcher(u.toString(), {
-      ...init,
-      method,
-      headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(init?.headers ?? {}) },
-    });
+    let response = await send(token);
+    // A 401 means the token died early (revoked, or the clock lied): ask for
+    // a fresh one and replay once. A streamed body was consumed by the first
+    // attempt and cannot be replayed, so that request fails as it is.
+    if (response.status === 401 && this.tokens.invalidate && !(init?.body instanceof ReadableStream)) {
+      await response.body?.cancel();
+      response = await send(await this.tokens.invalidate(token));
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new GoogleApiError(response.status, errorMessage(response.status, text));
