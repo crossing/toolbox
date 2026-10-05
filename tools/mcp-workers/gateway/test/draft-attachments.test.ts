@@ -478,3 +478,134 @@ describe("gmail_attach_drive_file — the mirror of drive_save_gmail_attachment"
     expect(rfc822From(String(calls.find((c) => c.method === "PUT")!.body))).toContain('name="Offer letter.pdf"');
   });
 });
+
+describe("gmail_update_draft — amending in place", () => {
+  async function update(tools: Map<string, Handler>, args: Record<string, unknown>) {
+    const result = await tools.get("gmail_update_draft")!(args, {});
+    return { isError: result.isError === true, text: result.content[0]!.text };
+  }
+  const WITH_ATTACHMENT = HTML_DRAFT.replace(
+    "--OUTER--",
+    ["--OUTER", 'Content-Type: application/pdf; name="a.pdf"', 'Content-Disposition: attachment; filename="a.pdf"', "", "JVBERi0=", "--OUTER--"].join(CRLF),
+  );
+
+  it("changes recipients and keeps the body, attachment and thread", async () => {
+    const { calls, tools } = harness({ draftRaw: WITH_ATTACHMENT });
+    const { isError, text } = await update(tools, { draft_id: "DRAFT1", to: "Zoë <z@x.com>", cc: "c@x.com" });
+
+    expect(isError).toBe(false);
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(put.url).toBe("https://gmail.googleapis.com/upload/gmail/v1/users/me/drafts/DRAFT1");
+    expect(String(put.body)).toContain('{"message":{"threadId":"THREAD1"}}');
+    const rfc822 = rfc822From(String(put.body));
+    expect(rfc822).not.toContain("To: a@b.com");
+    expect(rfc822).toMatch(/To: =\?UTF-8\?B\?[^?]+\?= <z@x\.com>/);
+    expect(rfc822).toContain("Cc: c@x.com");
+    expect(rfc822).toContain("<div><b>rich</b> body</div>");
+    expect(rfc822).toContain('filename="a.pdf"');
+    expect(JSON.parse(text).updated).toEqual(["to", "cc"]);
+  });
+
+  it("rewrites the body and leaves the attachment alone", async () => {
+    const { calls, tools } = harness({ draftRaw: WITH_ATTACHMENT });
+    const { isError, text } = await update(tools, { draft_id: "DRAFT1", body: "revised", subject: "Invoice v2" });
+
+    expect(isError).toBe(false);
+    const rfc822 = rfc822From(String(calls.find((c) => c.method === "PUT")!.body));
+    expect(rfc822).not.toContain("rich");
+    expect(rfc822).toContain(Buffer.from("revised").toString("base64"));
+    expect(rfc822).toContain("Subject: Invoice v2");
+    expect(rfc822).toContain('filename="a.pdf"');
+    expect(JSON.parse(text).updated).toEqual(["subject", "body"]);
+  });
+
+  it("removes cc when given an empty string", async () => {
+    const withCc = HTML_DRAFT.replace("To: a@b.com", "To: a@b.com\r\nCc: gone@b.com");
+    const { calls, tools } = harness({ draftRaw: withCc });
+    await update(tools, { draft_id: "DRAFT1", cc: "" });
+    expect(rfc822From(String(calls.find((c) => c.method === "PUT")!.body))).not.toContain("Cc:");
+  });
+
+  it("refuses a call that changes nothing, or empties To, before reading the draft", async () => {
+    const { calls, tools } = harness();
+    expect((await update(tools, { draft_id: "DRAFT1" })).text).toContain("nothing to change");
+    expect((await update(tools, { draft_id: "DRAFT1", to: " " })).text).toContain("to cannot be empty");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("strips header injection out of new values", async () => {
+    const { calls, tools } = harness();
+    await update(tools, { draft_id: "DRAFT1", subject: "hi\r\nBcc: evil@x.com" });
+    const rfc822 = rfc822From(String(calls.find((c) => c.method === "PUT")!.body));
+    expect(rfc822).not.toMatch(/^Bcc:/m);
+  });
+
+  it("tells the caller a draft id is not a message id", async () => {
+    const { calls, tools } = harness({ draftError: new GoogleApiError(404, "Requested entity was not found.") });
+    const { isError, text } = await update(tools, { draft_id: "NOT_A_DRAFT", body: "x" });
+    expect(isError).toBe(true);
+    expect(text).toContain("gmail_list_drafts");
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("replaces one attachment with a Drive file in a single call", async () => {
+    const { calls, driveCalls, tools } = harness({ draftRaw: WITH_ATTACHMENT });
+    const { isError, text } = await update(tools, {
+      draft_id: "DRAFT1",
+      remove_attachments: ["a.pdf"],
+      add_drive_attachments: [{ file_id: "FILE1" }],
+    });
+
+    expect(isError).toBe(false);
+    expect(driveCalls.some((c) => c.url.endsWith("/files/FILE1"))).toBe(true);
+    const rfc822 = rfc822From(String(calls.find((c) => c.method === "PUT")!.body));
+    expect(rfc822).not.toContain('filename="a.pdf"');
+    expect(rfc822).toContain('name="contract.pdf"');
+    expect(rfc822).toContain("<div><b>rich</b> body</div>");
+    const result = JSON.parse(text);
+    expect(result.removedAttachments).toEqual(["a.pdf"]);
+    expect(result.addedAttachments).toEqual([{ filename: "contract.pdf", mimeType: "application/pdf" }]);
+  });
+
+  it("adds inline bytes to a plain draft", async () => {
+    const plain = ["To: a@b.com", "Subject: s", 'Content-Type: text/plain; charset="UTF-8"', "", "words"].join(CRLF);
+    const { calls, tools } = harness({ draftRaw: plain });
+    const { isError } = await update(tools, {
+      draft_id: "DRAFT1",
+      add_attachments: [{ filename: "n.txt", mime_type: "text/plain", base64: "aGk=" }],
+    });
+    expect(isError).toBe(false);
+    const rfc822 = rfc822From(String(calls.find((c) => c.method === "PUT")!.body));
+    expect(rfc822).toContain("multipart/mixed");
+    expect(rfc822).toContain("words");
+    expect(rfc822).toContain('filename="n.txt"');
+  });
+
+  it("changes nothing, and downloads nothing, when a removal names a missing file", async () => {
+    const { calls, driveCalls, tools } = harness({ draftRaw: WITH_ATTACHMENT });
+    const { isError, text } = await update(tools, {
+      draft_id: "DRAFT1",
+      body: "new",
+      remove_attachments: ["a.pdf", "ghost.pdf"],
+      add_drive_attachments: [{ file_id: "FILE1" }],
+    });
+    expect(isError).toBe(true);
+    expect(text).toContain('"ghost.pdf"');
+    expect(text).toContain("Nothing was changed");
+    expect(driveCalls).toHaveLength(0);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("points an oversized inline attachment at add_drive_attachments", async () => {
+    const { calls, tools } = harness();
+    const big = Buffer.alloc(6 * 1024 * 1024).toString("base64");
+    const { isError, text } = await update(tools, {
+      draft_id: "DRAFT1",
+      add_attachments: [{ filename: "big.bin", mime_type: "application/octet-stream", base64: big }],
+    });
+    expect(isError).toBe(true);
+    expect(text).toContain("add_drive_attachments");
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+});
+

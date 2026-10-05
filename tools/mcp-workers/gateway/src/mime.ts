@@ -410,3 +410,184 @@ export function addAttachmentToMessage(message: string, attachment: OutgoingAtta
     "",
   ].join(CRLF);
 }
+
+// ---- amending a message that already exists ----
+//
+// The same splice-not-rebuild rule as above. Header edits touch only the named
+// top-level headers; a body edit replaces only the body part, so attachments,
+// In-Reply-To/References and every header we did not name keep their bytes.
+
+/** One header to set; `null` removes every occurrence. Values are already encoded. */
+export interface HeaderEdit {
+  name: string;
+  value: string | null;
+}
+
+/**
+ * Sets or removes top-level headers. A header that exists is replaced where it
+ * stands (all its occurrences collapse into one); a new one goes in ahead of
+ * MIME-Version, where Gmail's own drafts keep their addressing headers.
+ */
+export function setMessageHeaders(message: string, edits: HeaderEdit[]): string {
+  const shape = inspectMessage(message);
+  const eol = shape.headerBlock.includes("\r\n") ? CRLF : "\n";
+  const separator = message.slice(shape.headerBlock.length, message.length - shape.body.length);
+  let entries = shape.headerBlock.split(/\r?\n(?![ \t])/).filter((line) => line.trim() !== "");
+  for (const edit of edits) {
+    const named = (line: string) => line.toLowerCase().startsWith(edit.name.toLowerCase() + ":");
+    const at = entries.findIndex(named);
+    const line = edit.value === null ? null : `${edit.name}: ${edit.value}`;
+    entries = entries.filter((entry) => !named(entry));
+    if (line === null) continue;
+    if (at !== -1) {
+      entries.splice(at, 0, line);
+    } else {
+      const mime = entries.findIndex((entry) => /^mime-version:/i.test(entry));
+      entries.splice(mime === -1 ? entries.length : mime, 0, line);
+    }
+  }
+  return entries.join(eol) + (separator || eol + eol) + shape.body;
+}
+
+/** Start offsets of every line in `body` that begins with `--boundary`. */
+function delimiterOffsets(body: string, boundary: string): number[] {
+  const marker = `--${boundary}`;
+  const offsets: number[] = [];
+  for (let at = body.indexOf(marker); at !== -1; at = body.indexOf(marker, at + marker.length)) {
+    if (at === 0 || body[at - 1] === "\n") offsets.push(at);
+  }
+  return offsets;
+}
+
+function isAttachmentPart(part: string): boolean {
+  const headers = inspectMessage(part).headerBlock.replace(/\r?\n[ \t]+/g, " ");
+  return /^content-disposition:\s*attachment/im.test(headers);
+}
+
+/**
+ * Replaces the message's body with `body` as text/plain.
+ *
+ * In multipart/mixed the body is the first part that is not an attachment —
+ * a text/plain, a text/html, or a whole multipart/alternative — and only that
+ * part is swapped; when every part is an attachment the new body goes in
+ * first. Any other shape is all body, so the content headers and payload are
+ * replaced together and the message headers stay.
+ */
+export function replaceMessageBody(message: string, body: string): string {
+  const textPart = [
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrapBase64(toBase64Standard(body)),
+  ].join(CRLF);
+  const shape = inspectMessage(message);
+  const head = message.slice(0, message.length - shape.body.length);
+
+  if (shape.isMixed && shape.boundary) {
+    const offsets = delimiterOffsets(shape.body, shape.boundary);
+    const lineEnd = (at: number) => {
+      const nl = shape.body.indexOf("\n", at);
+      return nl === -1 ? shape.body.length : nl + 1;
+    };
+    // Each part runs from the line after its delimiter to the newline before the next.
+    for (let i = 0; i + 1 < offsets.length; i++) {
+      const start = lineEnd(offsets[i]!);
+      const next = offsets[i + 1]!;
+      const end = shape.body[next - 2] === "\r" ? next - 2 : next - 1;
+      if (isAttachmentPart(shape.body.slice(start, end))) continue;
+      return head + shape.body.slice(0, start) + textPart + shape.body.slice(end);
+    }
+    if (offsets.length > 0) {
+      const first = offsets[0]!;
+      return head + shape.body.slice(0, first) + `--${shape.boundary}${CRLF}${textPart}${CRLF}` + shape.body.slice(first);
+    }
+    // No delimiters at all: malformed, so fall through and replace the lot.
+  }
+
+  const entries = shape.headerBlock.split(/\r?\n(?![ \t])/).filter((line) => line.trim() !== "");
+  const messageHeaders = entries.filter((h) => !CONTENT_HEADERS.test(h) && !/^mime-version:/i.test(h));
+  return [...messageHeaders, "MIME-Version: 1.0", textPart].join(CRLF);
+}
+
+/** Decodes RFC 2047 encoded-words (B and Q) in a header value; anything malformed is left as written. */
+export function decodeEncodedWords(value: string): string {
+  return value
+    .replace(/(=\?[^?]+\?[bq]\?[^?]*\?=)\s+(?==\?)/gi, "$1")
+    .replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, (word, charset: string, encoding: string, text: string) => {
+      try {
+        const bytes =
+          encoding.toLowerCase() === "b"
+            ? base64UrlToBytes(text)
+            : latin1ToBytes(text.replace(/_/g, " ").replace(/=([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))));
+        return new TextDecoder(charset.toLowerCase(), { fatal: true, ignoreBOM: false }).decode(bytes);
+      } catch {
+        return word;
+      }
+    });
+}
+
+/**
+ * Every name a part might be known by: the RFC 2231 extended filename, the
+ * plain filename (decoded if a sender put an encoded-word there anyway), and
+ * Content-Type's name. Gmail's API reports the plain fallback for our own
+ * parts and the full name for most others, so a match on any of them counts.
+ */
+export function attachmentNames(part: string): string[] {
+  const headers = inspectMessage(part).headerBlock.replace(/\r?\n[ \t]+/g, " ");
+  const names = new Set<string>();
+  const extended = /filename\*\s*=\s*([^']*)'[^']*'([^;\s]+)/i.exec(headers);
+  if (extended) {
+    try {
+      const bytes = latin1ToBytes(unescapePercent(extended[2]!));
+      names.add(new TextDecoder((extended[1] || "utf-8").toLowerCase()).decode(bytes));
+    } catch {
+      // A broken extended name still leaves the plain one to match on.
+    }
+  }
+  for (const param of ["filename", "name"]) {
+    const match = new RegExp(`(?:^|[;\\s])${param}\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, "im").exec(headers);
+    const raw = match?.[1] ?? match?.[2];
+    if (raw) names.add(decodeEncodedWords(raw));
+  }
+  return [...names];
+}
+
+function unescapePercent(value: string): string {
+  return value.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/**
+ * Drops every top-level part of a multipart/mixed message that is an
+ * attachment answering to one of `filenames`. The body part is never a
+ * candidate, however it is named. Returns the filenames that matched nothing,
+ * so the caller can refuse rather than report a removal that did not happen.
+ */
+export function removeAttachments(
+  message: string,
+  filenames: string[],
+): { message: string; removed: string[]; missing: string[] } {
+  const wanted = new Set(filenames);
+  const matched = new Set<string>();
+  const removed: string[] = [];
+  const shape = inspectMessage(message);
+  if (!shape.isMixed || !shape.boundary) return { message, removed, missing: [...wanted] };
+
+  const offsets = delimiterOffsets(shape.body, shape.boundary);
+  let body = shape.body;
+  // Back to front, so earlier offsets stay valid as later parts are cut out.
+  for (let i = offsets.length - 2; i >= 0; i--) {
+    const start = offsets[i]!;
+    const next = offsets[i + 1]!;
+    const nl = shape.body.indexOf("\n", start);
+    const content = shape.body.slice(nl + 1, next);
+    if (!isAttachmentPart(content)) continue;
+    const hit = attachmentNames(content).find((name) => wanted.has(name));
+    if (hit === undefined) continue;
+    matched.add(hit);
+    removed.unshift(hit);
+    // Cut from this delimiter to the next one; the next one's line survives.
+    body = body.slice(0, start) + body.slice(next);
+  }
+  const head = message.slice(0, message.length - shape.body.length);
+  return { message: head + body, removed, missing: [...wanted].filter((name) => !matched.has(name)) };
+}
