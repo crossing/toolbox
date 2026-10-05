@@ -17,6 +17,11 @@ import {
   bytesToLatin1,
   inspectMessage,
   latin1ToBytes,
+  attachmentNames,
+  decodeEncodedWords,
+  removeAttachments,
+  replaceMessageBody,
+  setMessageHeaders,
   toBase64Url,
 } from "../src/mime";
 import { attachExportFor, exportedFilename } from "../src/drive";
@@ -385,5 +390,145 @@ describe("byte-exact message round-trip", () => {
         expect(decoded.every((b, i) => b === original[i])).toBe(true);
       }
     }
+  });
+});
+
+describe("amending an existing message", () => {
+  const CRLF = "\r\n";
+  const decodeTextPart = (message: string) => {
+    const match = /Content-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+?)(?:\r\n--|$)/.exec(message);
+    return Buffer.from(match![1]!.replace(/\r\n/g, ""), "base64").toString("utf8");
+  };
+  const MIXED = [
+    "To: a@b.com",
+    "Cc: old@b.com",
+    "Subject: Invoice",
+    "In-Reply-To: <p@x>",
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/mixed; boundary="OUTER"',
+    "",
+    "--OUTER",
+    'Content-Type: multipart/alternative; boundary="INNER"',
+    "",
+    "--INNER",
+    "Content-Type: text/plain",
+    "",
+    "old plain",
+    "--INNER",
+    "Content-Type: text/html",
+    "",
+    "<b>old html</b>",
+    "--INNER--",
+    "--OUTER",
+    'Content-Type: application/pdf; name="a.pdf"',
+    "Content-Transfer-Encoding: base64",
+    'Content-Disposition: attachment; filename="a.pdf"',
+    "",
+    "JVBERi0=",
+    "--OUTER--",
+    "",
+  ].join(CRLF);
+
+  it("replaces, removes and adds headers without touching the body", () => {
+    const out = setMessageHeaders(MIXED, [
+      { name: "To", value: "c@d.com" },
+      { name: "Cc", value: null },
+      { name: "Bcc", value: "e@f.com" },
+    ]);
+    expect(out).toMatch(/^To: c@d\.com\r\n/);
+    expect(out).not.toContain("old@b.com");
+    expect(out).toContain("Bcc: e@f.com\r\nMIME-Version: 1.0");
+    expect(out).toContain("In-Reply-To: <p@x>");
+    expect(out.slice(out.indexOf("\r\n\r\n"))).toBe(MIXED.slice(MIXED.indexOf("\r\n\r\n")));
+  });
+
+  it("collapses a folded header into its replacement", () => {
+    const folded = ["To: a@b.com,", " c@d.com", "Subject: s", "", "body"].join(CRLF);
+    const out = setMessageHeaders(folded, [{ name: "To", value: "x@y.com" }]);
+    expect(out).toBe(["To: x@y.com", "Subject: s", "", "body"].join(CRLF));
+  });
+
+  it("swaps only the body part of a mixed message, keeping the attachment", () => {
+    const out = replaceMessageBody(MIXED, "new words — café");
+    expect(out).not.toContain("old plain");
+    expect(out).not.toContain("old html");
+    expect(out).toContain('Content-Disposition: attachment; filename="a.pdf"');
+    expect(out).toContain("JVBERi0=");
+    expect(out).toContain("In-Reply-To: <p@x>");
+    expect(out.endsWith("--OUTER--" + CRLF)).toBe(true);
+    expect(decodeTextPart(out)).toBe("new words — café");
+    // Still a well-formed mixed list: one delimiter per part plus the close.
+    expect(out.match(/^--OUTER/gm)).toHaveLength(3);
+  });
+
+  it("puts a body in front when every part is an attachment", () => {
+    const attachmentsOnly = MIXED.replace(/--OUTER\r\nContent-Type: multipart\/alternative[\s\S]*?--INNER--\r\n/, "");
+    const out = replaceMessageBody(attachmentsOnly, "hello");
+    expect(out.indexOf("text/plain")).toBeLessThan(out.indexOf("a.pdf"));
+    expect(out.match(/^--OUTER/gm)).toHaveLength(3);
+  });
+
+  it("replaces a single-part body along with its content headers", () => {
+    const html = ["To: a@b.com", "Subject: s", "MIME-Version: 1.0", "Content-Type: text/html", "", "<p>x</p>"].join(CRLF);
+    const out = replaceMessageBody(html, "plain now");
+    expect(out).not.toContain("text/html");
+    expect(out).toContain("To: a@b.com");
+    expect(out.match(/MIME-Version/g)).toHaveLength(1);
+    expect(decodeTextPart(out)).toBe("plain now");
+  });
+});
+
+describe("removing attachments", () => {
+  const CRLF = "\r\n";
+  const part = (disposition: string, payload: string) =>
+    ["--B", "Content-Type: application/pdf", "Content-Transfer-Encoding: base64", disposition, "", payload].join(CRLF);
+  const message = [
+    "To: a@b.com",
+    "Subject: s",
+    'Content-Type: multipart/mixed; boundary="B"',
+    "",
+    "--B",
+    "Content-Type: text/plain",
+    "",
+    "the body",
+    part('Content-Disposition: attachment; filename="keep.pdf"', "S0VFUA=="),
+    part('Content-Disposition: attachment; filename="drop.pdf"', "RFJPUA=="),
+    part(["Content-Disposition: attachment;", ' filename="r_sum_.pdf";', " filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"].join(CRLF), "UkVT"),
+    "--B--",
+    "",
+  ].join(CRLF);
+
+  it("drops only the named part and keeps the list well-formed", () => {
+    const out = removeAttachments(message, ["drop.pdf"]);
+    expect(out.missing).toEqual([]);
+    expect(out.removed).toEqual(["drop.pdf"]);
+    expect(out.message).not.toContain("RFJPUA==");
+    expect(out.message).toContain("S0VFUA==");
+    expect(out.message).toContain("the body");
+    expect(out.message.match(/^--B/gm)).toHaveLength(4);
+    expect(out.message.endsWith("--B--" + CRLF)).toBe(true);
+  });
+
+  it("matches a Unicode name by either its extended form or the ASCII fallback", () => {
+    expect(removeAttachments(message, ["résumé.pdf"]).message).not.toContain("UkVT");
+    expect(removeAttachments(message, ["r_sum_.pdf"]).message).not.toContain("UkVT");
+  });
+
+  it("reports names that match nothing, and never removes the body", () => {
+    const out = removeAttachments(message, ["nope.pdf", "the body"]);
+    expect(out.missing).toEqual(["nope.pdf", "the body"]);
+    expect(out.message).toBe(message);
+  });
+
+  it("removes several at once", () => {
+    const out = removeAttachments(message, ["keep.pdf", "drop.pdf"]);
+    expect(out.removed).toEqual(["keep.pdf", "drop.pdf"]);
+    expect(out.message.match(/^--B/gm)).toHaveLength(3);
+  });
+
+  it("decodes encoded-word filenames the Gmail UI sometimes writes", () => {
+    expect(decodeEncodedWords("=?UTF-8?B?csOpc3Vtw6kucGRm?=")).toBe("résumé.pdf");
+    expect(decodeEncodedWords("=?UTF-8?Q?r=C3=A9sum=C3=A9_v2.pdf?=")).toBe("résumé v2.pdf");
+    expect(attachmentNames('Content-Type: application/pdf; name="=?UTF-8?B?csOpc3Vtw6kucGRm?="\r\n\r\nx')).toContain("résumé.pdf");
   });
 });

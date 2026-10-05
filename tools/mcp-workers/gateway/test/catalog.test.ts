@@ -37,6 +37,7 @@ describe("gmail catalog", () => {
     const tools = await catalog();
     expect([...tools.keys()]).toContain("gmail_create_draft");
     expect([...tools.keys()]).toContain("gmail_attach_drive_file");
+    expect([...tools.keys()]).toContain("gmail_update_draft");
     // The guarantee, asserted rather than assumed.
     expect([...tools.keys()].filter((n) => /send/i.test(n))).toEqual([]);
   });
@@ -78,5 +79,27 @@ describe("gmail catalog", () => {
       "filename",
     ]);
     expect(attach.required!.sort()).toEqual(["draft_id", "file_id"]);
+  });
+
+  it("lets an update name only the draft and what changes", async () => {
+    const update = (await catalog()).get("gmail_update_draft")!;
+    expect(Object.keys(update.properties!).sort()).toEqual([
+      "account",
+      "add_attachments",
+      "add_drive_attachments",
+      "bcc",
+      "body",
+      "cc",
+      "draft_id",
+      "drive_account",
+      "remove_attachments",
+      "subject",
+      "to",
+    ]);
+    // The shared schemas must survive serialization here too.
+    expect(Object.keys(update.properties!.add_attachments!.items!.properties!).sort()).toEqual(["base64", "filename", "mime_type"]);
+    expect(update.properties!.add_drive_attachments!.items!.required).toEqual(["file_id"]);
+    expect(update.properties!.remove_attachments!.items!.type).toBe("string");
+    expect(update.required).toEqual(["draft_id"]);
   });
 });
