@@ -128,7 +128,7 @@ const gmailService: ServiceDef = {
   id: "gmail",
   title: "Gmail",
   description:
-    "Search, read, labels, filters, and drafts that can reply in-thread, be amended in place, and carry attachments — including Drive files relayed server-side onto a new or existing draft. No send tool exists; deletes are confirm-gated.",
+    "Search, read, labels, filters, and drafts that can reply in-thread, be amended or deleted, and carry attachments — including Drive files relayed server-side onto a new or existing draft. No send tool exists; deletes are confirm-gated.",
   defaultEnabled: true,
   accountService: GOOGLE_ACCOUNT_SERVICE,
   registerRead(server, ctx) {

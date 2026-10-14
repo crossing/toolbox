@@ -744,6 +744,40 @@ export function registerGmailWriteTools(
   );
 
   server.registerTool(
+    "gmail_delete_draft",
+    {
+      description:
+        "Permanently delete a draft. Gmail does not put deleted drafts in the bin, so this cannot be undone — and a draft the human wrote is not yours to delete unless they named it. Find draft_id with gmail_list_drafts. Requires confirm: true.",
+      inputSchema: {
+        draft_id: z.string().describe("Draft id from gmail_list_drafts (not the message id)"),
+        confirm: z.boolean().optional(),
+        account: ACCOUNT_PARAM,
+      },
+      annotations: DESTRUCTIVE,
+    },
+    async ({ draft_id, confirm, account }) => {
+      if (confirm !== true) return needsConfirm();
+      return run(async () => {
+        try {
+          await (await getClient(account)).delete(`${GMAIL}/drafts/${draft_id}`);
+        } catch (err) {
+          if (err instanceof GoogleApiError && err.status === 404) {
+            // Gmail's bare 404 hides the two usual mistakes: a message id, or
+            // the right id asked of the wrong mailbox.
+            throw new GoogleApiError(
+              404,
+              `draft "${draft_id}" was not found in this mailbox. Draft ids come from gmail_list_drafts on the same ` +
+                "account, and are not message ids. Nothing was deleted.",
+            );
+          }
+          throw err;
+        }
+        return { deleted: draft_id };
+      });
+    },
+  );
+
+  server.registerTool(
     "gmail_modify_labels",
     {
       description: "Add/remove labels on a message (archive = remove INBOX, mark read = remove UNREAD).",

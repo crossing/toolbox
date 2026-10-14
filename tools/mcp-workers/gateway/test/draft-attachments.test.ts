@@ -94,6 +94,10 @@ function harness(opts: HarnessOptions = {}) {
       calls.push({ method, url, contentType, body, query });
       return { id: "DRAFT1", message: { id: "MSG1" } };
     },
+    async delete(url: string) {
+      calls.push({ method: "DELETE", url });
+      if (opts.draftError) throw opts.draftError;
+    },
   };
 
   const drive = {
@@ -609,3 +613,33 @@ describe("gmail_update_draft — amending in place", () => {
   });
 });
 
+describe("gmail_delete_draft", () => {
+  async function del(tools: Map<string, Handler>, args: Record<string, unknown>) {
+    const result = await tools.get("gmail_delete_draft")!(args, {});
+    return { isError: result.isError === true, text: result.content[0]!.text };
+  }
+
+  it("refuses without confirm and touches nothing", async () => {
+    const { calls, tools } = harness();
+    const { text } = await del(tools, { draft_id: "DRAFT1" });
+    expect(text).toMatch(/confirm: true/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("deletes the draft with confirm", async () => {
+    const { calls, tools } = harness();
+    const { isError, text } = await del(tools, { draft_id: "DRAFT1", confirm: true });
+    expect(isError).toBe(false);
+    expect(calls).toEqual([{ method: "DELETE", url: "https://gmail.googleapis.com/gmail/v1/users/me/drafts/DRAFT1" }]);
+    expect(JSON.parse(text)).toEqual({ deleted: "DRAFT1" });
+  });
+
+  it("explains a 404 as a wrong id or wrong mailbox", async () => {
+    const { tools } = harness({ draftError: new GoogleApiError(404, "Requested entity was not found.") });
+    const { isError, text } = await del(tools, { draft_id: "MSG_NOT_DRAFT", confirm: true });
+    expect(isError).toBe(true);
+    expect(text).toContain("MSG_NOT_DRAFT");
+    expect(text).toContain("same account");
+    expect(text).toContain("Nothing was deleted");
+  });
+});

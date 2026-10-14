@@ -38,6 +38,7 @@ describe("gmail catalog", () => {
     expect([...tools.keys()]).toContain("gmail_create_draft");
     expect([...tools.keys()]).toContain("gmail_attach_drive_file");
     expect([...tools.keys()]).toContain("gmail_update_draft");
+    expect([...tools.keys()]).toContain("gmail_delete_draft");
     // The guarantee, asserted rather than assumed.
     expect([...tools.keys()].filter((n) => /send/i.test(n))).toEqual([]);
   });
