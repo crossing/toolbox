@@ -61,3 +61,50 @@ if grep -qx 'AcceptIncomingConnectionAction=accept' "$config"; then
 fi
 
 printf 'PASS: rendered IBC config rejects unsolicited API prompts\n'
+
+# File-backed credentials (sops-nix): rendering must not touch 1Password at all.
+mkdir -p "$test_root/nobin" "$test_root/secrets"
+printf '#!%s\necho "safe-op must not run for file credentials" >&2\nexit 99\n' \
+  "$(command -v bash)" >"$test_root/nobin/safe-op"
+chmod +x "$test_root/nobin/safe-op"
+printf 'file-user' >"$test_root/secrets/username"
+printf 'file-password\n' >"$test_root/secrets/password"
+chmod 400 "$test_root/secrets/username" "$test_root/secrets/password"
+
+render_from_files() {
+  PATH="$test_root/nobin:$PATH" \
+    IBKR_LOCAL_PROFILES="$test_root/config/profiles.json" \
+    IBKR_IBC_RUNTIME_PARENT="$test_root/runtime" \
+    bash "$cli" ibc-config \
+      --profile main-live \
+      --trading-mode live \
+      --api-port 4005 \
+      "$@"
+}
+
+result=$(render_from_files \
+  --username-file "$test_root/secrets/username" \
+  --password-file "$test_root/secrets/password")
+config=$(jq -r '.config' <<<"$result")
+grep -qx 'IbLoginId=file-user' "$config"
+grep -qx 'IbPassword=file-password' "$config"
+printf 'PASS: file credentials render without 1Password\n'
+
+chmod 644 "$test_root/secrets/password"
+if render_from_files \
+  --username-file "$test_root/secrets/username" \
+  --password-file "$test_root/secrets/password" >/dev/null 2>&1; then
+  echo 'FAIL: world-readable password file was accepted' >&2
+  exit 1
+fi
+chmod 400 "$test_root/secrets/password"
+printf 'PASS: credential files must be owner-only\n'
+
+if render_from_files \
+  --username-file "$test_root/secrets/username" \
+  --password-file "$test_root/secrets/password" \
+  --password-ref op://test/item/password >/dev/null 2>&1; then
+  echo 'FAIL: --password-file combined with --password-ref was accepted' >&2
+  exit 1
+fi
+printf 'PASS: file and 1Password sources are mutually exclusive\n'
