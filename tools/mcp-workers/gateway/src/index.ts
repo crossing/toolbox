@@ -3,18 +3,18 @@
 // Connector OAuth authenticates *identity only* (Google sign-in, openid+email,
 // gated by ALLOWED_EMAILS); the grant's props carry the email and permission
 // tier, never upstream service tokens. Those live in the per-user vault DO,
-// written by the /manage account-linking flow (G1+). The session McpAgent
-// assembles its tool catalog from the vault's service toggles at init and
-// re-checks enablement on every call, so a disabled service fails closed
-// mid-conversation.
+// written by the /manage account-linking flow (G1+). MCP is served
+// statelessly: every request builds its server and tool catalog from the
+// vault's service toggles, and every call re-checks enablement, so a disabled
+// service fails closed mid-conversation.
 
 import {
   OAuthProvider,
   type AuthRequest,
   type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { RetiredSessionObject, statelessMcpHandler } from "@toolbox/mcp-shared/src/mcphandler";
 import {
   decodeAuthRequest,
   encodeAuthRequest,
@@ -69,102 +69,103 @@ interface PendingAuth {
 const SERVER_NAME = "gateway";
 const SERVER_VERSION = "0.4.0";
 
-export class GatewayMCP extends McpAgent<Env, unknown, GatewayProps> {
-  server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  // One token source per resolved account, holding only an access token and
-  // its expiry; refresh tokens stay in the vault, which alone refreshes. A
-  // hibernated DO just asks the vault again on wake.
-  private tokenSources = new Map<string, VaultTokenSource>();
-
-  async init() {
-    const email = this.props?.userId ?? "";
-    const vault = vaultFor(this.env, email);
-    // Fail closed per call: enablement and account linkage are re-read from
-    // the vault, so manage-page changes bite mid-conversation.
-    const assertEnabled = async (service: string) => {
-      const def = SERVICES.find((svc) => svc.id === service);
-      const enabled = await vault.isServiceEnabled(service, def?.defaultEnabled ?? false);
-      if (!enabled) throw new ServiceDisabledError(service);
-    };
-    const tokenSource = (service: "google" | "freeagent", label: string) => {
-      const key = `${service}\n${label}`;
-      let source = this.tokenSources.get(key);
-      if (!source) {
-        source = vaultTokenSource(vault, service, label);
-        this.tokenSources.set(key, source);
-      }
-      return source;
-    };
-    const ctx: GatewayToolContext = {
-      email,
-      canWrite: hasScope(this.props, WRITE_SCOPE),
-      googleClient: async (service, account) => {
-        await assertEnabled(service);
-        // Gmail and Drive share the "google" namespace but not necessarily
-        // the same account: each resolves its own pin before the namespace
-        // default. An explicit `account` argument still wins over both.
-        const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, service, account);
-        if (!acct) throw new NoLinkedAccountError(service, account);
-        return new GoogleClient(tokenSource(GOOGLE_ACCOUNT_SERVICE, acct.label));
-      },
-      freeagentClient: async () => {
-        await assertEnabled("freeagent");
-        const acct = await vault.getAccountForService(FREEAGENT_ACCOUNT_SERVICE, "freeagent");
-        if (!acct) throw new NoLinkedAccountError("freeagent");
-        return new FreeAgentClient(tokenSource(FREEAGENT_ACCOUNT_SERVICE, acct.label));
-      },
-      whatsappBridge: async () => {
-        await assertEnabled("whatsapp");
-        return bridgeFor(this.env);
-      },
-      smsInbox: async () => {
-        await assertEnabled("sms");
-        return inboxFor(this.env);
-      },
-      // The delivery-report URL carries the send id, which exists only after
-      // the store has opened the row — so it is built per call, not once.
-      sendSms: async (sendId, peer, body) =>
-        dispatchSms(this.env, peer, body, dlrUrl(this.env, this.env.PUBLIC_ORIGIN ?? "", sendId)),
-      listAccounts: async () => vault.listAccounts(),
-      transitCache: vault,
-      signFileUrl: async (req) => {
-        // Checked here rather than left to signToken, so the model is told
-        // what is missing instead of getting an opaque failure.
-        if (!this.env.FILES_URL_KEY || !this.env.PUBLIC_ORIGIN) {
-          throw new FileError(503, "signed file URLs are not configured on this gateway (FILES_URL_KEY / PUBLIC_ORIGIN)");
-        }
-        const account = await pinDriveAccount(vault, req.account);
-        const { token, grant } = await signToken(this.env.FILES_URL_KEY, grantStoreFor(this.env), {
-          ...req,
-          account,
-          userId: email,
-        });
-        return { url: fileUrl(this.env.PUBLIC_ORIGIN, token), expiresAt: grant.exp };
-      },
-      audit: async (tool, summary, status) =>
-        vault.appendAudit({ ts: Date.now(), tool, summary, status }),
-    };
-
-    registerGatewayTools(this.server, ctx);
-
-    // Read once, at connect: the tool list a client sees is fixed for the life
-    // of its session. That makes the two toggle directions behave differently,
-    // which /manage now says out loud — disabling bites immediately, because
-    // assertEnabled runs inside every handler, while enabling needs a new
-    // conversation, because there is no handler yet to run it. Registering
-    // every service unconditionally would make them symmetric at the cost of
-    // putting disabled tools in every client's list; the asymmetry is the
-    // better trade, so it is documented rather than removed.
-    const config = await vault.getCatalogConfig(defaultServiceToggles());
-    for (const svc of SERVICES) {
-      if (!config.services[svc.id]) continue;
-      svc.registerRead(this.server, ctx);
-      if (ctx.canWrite) svc.registerWrite?.(this.server, ctx);
+async function buildServer(env: Env, props: GatewayProps | undefined): Promise<McpServer> {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  // One token source per resolved account for this request, holding only an
+  // access token and its expiry; refresh tokens stay in the vault, which
+  // alone refreshes. Per request rather than per isolate: the sources hold
+  // this request's vault stub.
+  const tokenSources = new Map<string, VaultTokenSource>();
+  const email = props?.userId ?? "";
+  const vault = vaultFor(env, email);
+  // Fail closed per call: enablement and account linkage are re-read from
+  // the vault, so manage-page changes bite mid-conversation.
+  const assertEnabled = async (service: string) => {
+    const def = SERVICES.find((svc) => svc.id === service);
+    const enabled = await vault.isServiceEnabled(service, def?.defaultEnabled ?? false);
+    if (!enabled) throw new ServiceDisabledError(service);
+  };
+  const tokenSource = (service: "google" | "freeagent", label: string) => {
+    const key = `${service}\n${label}`;
+    let source = tokenSources.get(key);
+    if (!source) {
+      source = vaultTokenSource(vault, service, label);
+      tokenSources.set(key, source);
     }
+    return source;
+  };
+  const ctx: GatewayToolContext = {
+    email,
+    canWrite: hasScope(props, WRITE_SCOPE),
+    googleClient: async (service, account) => {
+      await assertEnabled(service);
+      // Gmail and Drive share the "google" namespace but not necessarily
+      // the same account: each resolves its own pin before the namespace
+      // default. An explicit `account` argument still wins over both.
+      const acct = await vault.getAccountForService(GOOGLE_ACCOUNT_SERVICE, service, account);
+      if (!acct) throw new NoLinkedAccountError(service, account);
+      return new GoogleClient(tokenSource(GOOGLE_ACCOUNT_SERVICE, acct.label));
+    },
+    freeagentClient: async () => {
+      await assertEnabled("freeagent");
+      const acct = await vault.getAccountForService(FREEAGENT_ACCOUNT_SERVICE, "freeagent");
+      if (!acct) throw new NoLinkedAccountError("freeagent");
+      return new FreeAgentClient(tokenSource(FREEAGENT_ACCOUNT_SERVICE, acct.label));
+    },
+    whatsappBridge: async () => {
+      await assertEnabled("whatsapp");
+      return bridgeFor(env);
+    },
+    smsInbox: async () => {
+      await assertEnabled("sms");
+      return inboxFor(env);
+    },
+    // The delivery-report URL carries the send id, which exists only after
+    // the store has opened the row — so it is built per call, not once.
+    sendSms: async (sendId, peer, body) =>
+      dispatchSms(env, peer, body, dlrUrl(env, env.PUBLIC_ORIGIN ?? "", sendId)),
+    listAccounts: async () => vault.listAccounts(),
+    transitCache: vault,
+    signFileUrl: async (req) => {
+      // Checked here rather than left to signToken, so the model is told
+      // what is missing instead of getting an opaque failure.
+      if (!env.FILES_URL_KEY || !env.PUBLIC_ORIGIN) {
+        throw new FileError(503, "signed file URLs are not configured on this gateway (FILES_URL_KEY / PUBLIC_ORIGIN)");
+      }
+      const account = await pinDriveAccount(vault, req.account);
+      const { token, grant } = await signToken(env.FILES_URL_KEY, grantStoreFor(env), {
+        ...req,
+        account,
+        userId: email,
+      });
+      return { url: fileUrl(env.PUBLIC_ORIGIN, token), expiresAt: grant.exp };
+    },
+    audit: async (tool, summary, status) =>
+      vault.appendAudit({ ts: Date.now(), tool, summary, status }),
+  };
+
+  registerGatewayTools(server, ctx);
+
+  // Read on every request, so the list is always current here — but a client
+  // keeps the tool list it read. That makes the two toggle directions behave
+  // differently, which /manage says out loud: disabling bites immediately,
+  // because assertEnabled runs inside every handler, while enabling shows up
+  // only when the client next reads the list (a new conversation, or a tools
+  // refresh). Registering every service unconditionally would make them
+  // symmetric at the cost of putting disabled tools in every client's list;
+  // the asymmetry is the better trade, so it is documented rather than removed.
+  const config = await vault.getCatalogConfig(defaultServiceToggles());
+  for (const svc of SERVICES) {
+    if (!config.services[svc.id]) continue;
+    svc.registerRead(server, ctx);
+    if (ctx.canWrite) svc.registerWrite?.(server, ctx);
   }
+  return server;
 }
 
-const mcpHandler = GatewayMCP.serve("/mcp", { binding: "GATEWAY_MCP" });
+const mcpHandler = statelessMcpHandler("/mcp", buildServer);
+
+export class GatewayMCP extends RetiredSessionObject {}
 
 function htmlError(status: number, message: string): Response {
   return new Response(

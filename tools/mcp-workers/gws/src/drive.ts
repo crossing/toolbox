@@ -7,7 +7,7 @@
 // plain write. Deletion is trash-only (30-day recovery, no permanent-delete
 // tool exists here) and still marked destructive + confirm-gated.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { GoogleApiError, type GoogleClient } from "./api";
 import { DESTRUCTIVE, needsConfirm, READ_ONLY, run, WRITE } from "./toolutil";
@@ -51,11 +51,11 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     {
       description:
         "Search Drive with the files.list query syntax, e.g. name contains 'report', fullText contains 'foo', mimeType = 'application/pdf', 'FOLDER_ID' in parents. Omit query to list recent files.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().optional().describe("Drive q syntax"),
         max_results: z.number().int().min(1).max(50).optional().describe("Default 20"),
         order_by: z.string().optional().describe("e.g. modifiedTime desc (default), name"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ query, max_results, order_by }) =>
@@ -73,7 +73,7 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     "drive_get_file",
     {
       description: "Get one Drive file's metadata.",
-      inputSchema: { file_id: z.string() },
+      inputSchema: z.object({ file_id: z.string() }),
       annotations: READ_ONLY,
     },
     async ({ file_id }) =>
@@ -85,7 +85,7 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     {
       description:
         "Read a Drive file's content. Google Docs export as text, Sheets as CSV; other files download raw (utf-8 text when possible, else base64). Capped at ~1MB.",
-      inputSchema: { file_id: z.string() },
+      inputSchema: z.object({ file_id: z.string() }),
       annotations: READ_ONLY,
     },
     async ({ file_id }) =>
@@ -118,12 +118,12 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Create a Drive file or folder. Text content uploads as-is; set mime_type 'application/vnd.google-apps.document' to convert text into a Google Doc, 'application/vnd.google-apps.folder' for a folder.",
-      inputSchema: {
+      inputSchema: z.object({
         name: z.string(),
         parent_id: z.string().optional(),
         mime_type: z.string().optional().describe("Target mime type (default text/plain for content, folder otherwise)"),
         content: z.string().optional().describe("Text content; omit for an empty file or folder"),
-      },
+      }),
       annotations: WRITE,
     },
     async ({ name, parent_id, mime_type, content }) =>
@@ -160,14 +160,14 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Update a Drive file: rename, move (add/remove parent), or replace text content. Content of Google-native files keeps full version history; uploaded binaries keep prior versions ~30 days.",
-      inputSchema: {
+      inputSchema: z.object({
         file_id: z.string(),
         name: z.string().optional(),
         description: z.string().optional(),
         add_parent_id: z.string().optional(),
         remove_parent_id: z.string().optional(),
         content: z.string().optional().describe("New text content (replaces the file body)"),
-      },
+      }),
       annotations: WRITE,
     },
     async ({ file_id, name, description, add_parent_id, remove_parent_id, content }) =>
@@ -203,7 +203,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Move a Drive file to trash (recoverable for 30 days; there is no permanent-delete tool). Requires confirm: true.",
-      inputSchema: { file_id: z.string(), confirm: z.boolean().optional() },
+      inputSchema: z.object({ file_id: z.string(), confirm: z.boolean().optional() }),
       annotations: DESTRUCTIVE,
     },
     async ({ file_id, confirm }) => {

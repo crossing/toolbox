@@ -2,7 +2,7 @@
 // against a scripted FreeAgent API (fake fetch). Ids, hosts and names are fake.
 
 import { describe, expect, it } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { contactUrl, listPage, registerFreeagentReadTools, SORT_MAX_UPSTREAM_PAGES, registerFreeagentWriteTools } from "../src/freeagent";
 import {
   attachmentUrl,

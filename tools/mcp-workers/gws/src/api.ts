@@ -1,5 +1,5 @@
 // Google API client. Google access tokens live ~1 hour, so unlike the
-// FreeAgent worker the DO refreshes in-process: TokenSource holds the
+// FreeAgent worker the worker refreshes in-process: TokenSource holds the
 // current access token in instance memory and re-refreshes from the grant's
 // long-lived refresh token on demand (Google does not rotate refresh tokens,
 // so nothing needs writing back to the grant).

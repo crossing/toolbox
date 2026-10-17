@@ -11,7 +11,7 @@
 // resolves it. Every resolver re-checks its service's toggle, so with Gmail
 // switched off a gmail: ref fails closed even though `files` is on.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { attachExportFor, DRIVE } from "../drive";
 import type { GatewayToolContext } from "../registry";
@@ -60,7 +60,7 @@ export function registerFileReadTools(server: McpServer, ctx: GatewayToolContext
       description:
         `Name, mime type and size of a file by ref, without moving its bytes — use it to check a file against a cap before file_transfer. ${SOURCE_REFS} ` +
         "Google Docs/Sheets/Slides report their export (PDF, xlsx), which means exporting them once.",
-      inputSchema: { ref: z.string().describe("Source ref, e.g. drive:<fileId> or gmail:<messageId>/<attachmentId>") },
+      inputSchema: z.object({ ref: z.string().describe("Source ref, e.g. drive:<fileId> or gmail:<messageId>/<attachmentId>") }),
       annotations: READ_ONLY,
     },
     async ({ ref }) =>
@@ -84,7 +84,7 @@ export function registerFileReadTools(server: McpServer, ctx: GatewayToolContext
         `Returns {ref, url, expires_at, curl}; run the curl line with <path> replaced. The URL is a bearer credential valid for 15 minutes — do not paste it anywhere public. ${SOURCE_REFS} ` +
         "Drive files are served directly (Docs/Slides as PDF, Sheets as xlsx). Any other ref (gmail:, wa:, freeagent:attachment/) is first copied into the Drive _Transit folder (needs write access); the returned ref is that copy, which is trashed after 7 days. " +
         "The sandbox must be allowed to reach the gateway host (egress allowlist).",
-      inputSchema: { ref: z.string().describe("Source ref to download") },
+      inputSchema: z.object({ ref: z.string().describe("Source ref to download") }),
       // Not read-only: a non-Drive ref (gmail:, wa:, freeagent:) is staged into Drive, which a
       // client auto-approving read-only tools must not do unasked. It stays
       // registered with the reads so a read-only session can still fetch
@@ -164,7 +164,7 @@ export function registerFileWriteTools(server: McpServer, ctx: GatewayToolContex
         "Drive to a Drive folder in the same account is server-side: a file in _Transit is moved (same file id — this is how an upload is ingested into a PARA folder), anything else copied. " +
         "Google Docs/Sheets/Slides are exported (PDF, xlsx) when the sink is not Drive. " +
         `${capsLine} Sending to wa:send/ cannot be undone, so it needs confirm: true. Returns the new ref when the file landed in Drive.`,
-      inputSchema: {
+      inputSchema: z.object({
         from: z.string().describe("Source ref"),
         to: z.string().describe("Sink ref"),
         name: z.string().optional().describe("Name at the destination; defaults to the source's"),
@@ -179,7 +179,7 @@ export function registerFileWriteTools(server: McpServer, ctx: GatewayToolContex
           .optional()
           .describe("Export format for a Google-native source; defaults to PDF for Docs/Slides, xlsx for Sheets"),
         confirm: z.boolean().optional().describe("Must be true when the sink is wa:send/ — a send is not reversible"),
-      },
+      }),
       annotations: WRITE,
     },
     async ({ from, to, name, caption, media_type, description, export_mime_type, confirm }) => {
@@ -213,11 +213,11 @@ export function registerFileWriteTools(server: McpServer, ctx: GatewayToolContex
         "The URL works once, for 15 minutes, and refuses a body larger than `size`; a failed upload needs a new URL. " +
         `After the upload, \`ref\` (drive:<id>) works anywhere a source ref does — file_transfer it into a PARA folder to ingest it (a move, same id), or onward to Gmail, WhatsApp or FreeAgent. Files left in _Transit are trashed after 7 days. Ceiling ${Math.round(FILE_CAPS.signedPut / MB)} MB. ` +
         "The sandbox must be allowed to reach the gateway host (egress allowlist).",
-      inputSchema: {
+      inputSchema: z.object({
         name: z.string().min(1).describe("File name in Drive — use 'YYYY-MM-DD <description>.<ext>'"),
         mime_type: z.string().min(1).describe("e.g. application/pdf"),
         size: z.number().int().nonnegative().describe("Exact size in bytes (e.g. from `stat -c %s` or `wc -c`)"),
-      },
+      }),
       annotations: WRITE,
     },
     async ({ name, mime_type, size }) =>

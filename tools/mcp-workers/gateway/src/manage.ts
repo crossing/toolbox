@@ -228,8 +228,9 @@ function renderManagePage(
   <h2>Services</h2>
   <p class="hint">What the connector offers. <strong>Disabling takes effect immediately</strong>,
   including in conversations already open — the check runs on every tool call. <strong>Enabling
-  needs a new conversation</strong>: the tool list is fixed when a client connects, so a service
-  switched on now will not appear until the next one. <strong>Account</strong> is which linked
+  shows up the next time the client reads the tool list</strong>: the gateway builds the list
+  fresh on every request, but a client keeps the one it read, so a service switched on now
+  appears in a new conversation or after the connector's tools are refreshed. <strong>Account</strong> is which linked
   account the service resolves to when a tool is called without one — Gmail and Drive share a
   single Google link but need not share an account.</p>
   <div class="scroll"><table>
