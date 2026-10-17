@@ -70,11 +70,11 @@ npx wrangler kv namespace delete --namespace-id <id>
 
 ### Durable Object namespaces (5)
 
-`gateway-mcp_GatewayMCP` (per-session MCP agent), **`gateway-mcp_UserVault`**
+`gateway-mcp_GatewayMCP` (retired: MCP sessions under `McpAgent`; now a stub kept for rollback, MCP is served statelessly), **`gateway-mcp_UserVault`**
 (per-identity vault: service toggles, linked-account refresh tokens as
 AES-GCM ciphertext, audit log), **`whatsapp-bridge_WhatsAppBridge`** (the
-WhatsApp session: Signal keys, chats and messages), `gws-mcp_GwsMCP`,
-`freeagent-mcp_FreeagentMCP`. All SQLite-backed, all removed when their Worker
+WhatsApp session: Signal keys, chats and messages), `gws-mcp_GwsMCP` and
+`freeagent-mcp_FreeagentMCP` (retired stubs, as for `GatewayMCP`). All SQLite-backed, all removed when their Worker
 is deleted.
 
 `whatsapp-bridge_WhatsAppBridge` holds **Signal session keys and message

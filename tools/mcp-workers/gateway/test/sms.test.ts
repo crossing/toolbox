@@ -5,9 +5,9 @@
 
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 import { registerSmsReadTools } from "../src/sms";
 import { SmsStore, type SmsInboxApi } from "../src/smsstore";
 import { makeFakeSql, type FakeSql } from "./sqlfake";

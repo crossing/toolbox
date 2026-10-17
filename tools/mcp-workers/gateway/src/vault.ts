@@ -8,8 +8,8 @@
 // holds VAULT_KEY and the OAuth client secrets from the Worker env. Sessions
 // never see a refresh token.
 //
-// Accessed over DO RPC from both the session McpAgent (catalog assembly,
-// per-call enablement checks, access tokens) and the /manage handlers
+// Accessed over DO RPC from both the MCP handler (per-request catalog
+// assembly, per-call enablement checks, access tokens) and the /manage handlers
 // (edits). The methods are one-line delegations on purpose: RPC needs them
 // declared on the class, and the logic they forward to lives in
 // vaultstore.ts and tokencache.ts, where it can be tested without a Durable

@@ -9,7 +9,7 @@
 // plain write. Deletion is trash-only (30-day recovery, no permanent-delete
 // tool exists here) and still marked destructive + confirm-gated.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { GoogleApiError, type GoogleClient } from "./googleapi";
 import type { GetClient } from "./gmail";
@@ -173,12 +173,12 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     {
       description:
         "Search Drive with the files.list query syntax, e.g. name contains 'report', fullText contains 'foo', mimeType = 'application/pdf', 'FOLDER_ID' in parents. Omit query to list recent files.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().optional().describe("Drive q syntax"),
         max_results: z.number().int().min(1).max(50).optional().describe("Default 20"),
         order_by: z.string().optional().describe("e.g. modifiedTime desc (default), name"),
         account: ACCOUNT_PARAM,
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ query, max_results, order_by, account }) =>
@@ -196,7 +196,7 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     "drive_get_file",
     {
       description: "Get one Drive file's metadata.",
-      inputSchema: { file_id: z.string(), account: ACCOUNT_PARAM },
+      inputSchema: z.object({ file_id: z.string(), account: ACCOUNT_PARAM }),
       annotations: READ_ONLY,
     },
     async ({ file_id, account }) =>
@@ -208,7 +208,7 @@ export function registerDriveReadTools(server: McpServer, getClient: GetClient):
     {
       description:
         "Read a Drive file's content. Google Docs export as text, Sheets as CSV; other files download raw (utf-8 text when possible, else base64). Capped at ~1MB.",
-      inputSchema: { file_id: z.string(), account: ACCOUNT_PARAM },
+      inputSchema: z.object({ file_id: z.string(), account: ACCOUNT_PARAM }),
       annotations: READ_ONLY,
     },
     async ({ file_id, account }) =>
@@ -271,7 +271,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Create a Drive file or folder. Text goes in `content`; binary (a Gmail attachment, a scan) goes in `base64` with its real mime_type — Gmail and Drive are different accounts here, so an attachment must be downloaded and re-uploaded rather than saved across. Set mime_type 'application/vnd.google-apps.document' to convert text into a Google Doc, 'application/vnd.google-apps.folder' for a folder.",
-      inputSchema: {
+      inputSchema: z.object({
         name: z.string(),
         parent_id: z.string().optional(),
         mime_type: z.string().optional().describe("Target mime type (default text/plain for content, folder otherwise)"),
@@ -281,7 +281,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
           .optional()
           .describe("Binary content, base64-encoded (e.g. straight from gmail_get_attachment). Give mime_type too; not combinable with content."),
         account: ACCOUNT_PARAM,
-      },
+      }),
       annotations: WRITE,
     },
     async ({ name, parent_id, mime_type, content, base64, account }) =>
@@ -313,7 +313,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Update a Drive file: rename, move (add/remove parent), or replace text content. Content of Google-native files keeps full version history; uploaded binaries keep prior versions ~30 days.",
-      inputSchema: {
+      inputSchema: z.object({
         file_id: z.string(),
         name: z.string().optional(),
         description: z.string().optional(),
@@ -326,7 +326,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
           .describe("New binary content, base64-encoded; give mime_type too. Not combinable with content."),
         mime_type: z.string().optional().describe("Mime type for base64 content"),
         account: ACCOUNT_PARAM,
-      },
+      }),
       annotations: WRITE,
     },
     async ({ file_id, name, description, add_parent_id, remove_parent_id, content, base64, mime_type, account }) =>
@@ -372,7 +372,7 @@ export function registerDriveWriteTools(server: McpServer, getClient: GetClient)
     {
       description:
         "Move a Drive file to trash (recoverable for 30 days; there is no permanent-delete tool). Requires confirm: true.",
-      inputSchema: { file_id: z.string(), confirm: z.boolean().optional(), account: ACCOUNT_PARAM },
+      inputSchema: z.object({ file_id: z.string(), confirm: z.boolean().optional(), account: ACCOUNT_PARAM }),
       annotations: DESTRUCTIVE,
     },
     async ({ file_id, confirm, account }) => {

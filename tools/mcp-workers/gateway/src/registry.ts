@@ -8,7 +8,8 @@
 // linked-account namespace ("google") — a single Google link covers both,
 // because one upstream grant carries both services' scopes.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod";
 import { registerDriveReadTools, registerDriveWriteTools } from "./drive";
 import type { FileUrlMethod } from "./files/signed";
 import { registerFileReadTools, registerFileWriteTools } from "./files/tools";
@@ -265,7 +266,7 @@ export function registerGatewayTools(server: McpServer, ctx: GatewayToolContext)
     "gateway_ping",
     {
       description: "Health check: confirms the gateway session is alive and shows the signed-in identity.",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: READ_ONLY,
     },
     async () => asResult({ ok: true, email: ctx.email, writeToolsGranted: ctx.canWrite }),
@@ -276,7 +277,7 @@ export function registerGatewayTools(server: McpServer, ctx: GatewayToolContext)
     {
       description:
         "List the accounts linked to this gateway (service, label, default flag). Multi-account tools take an `account` parameter matching a label here.",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: READ_ONLY,
     },
     async () => {

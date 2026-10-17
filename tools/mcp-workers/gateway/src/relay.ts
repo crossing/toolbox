@@ -30,7 +30,7 @@
 // Likewise `whatsapp_send_drive_file` in whatsapp.ts is the inverse of
 // drive_save_whatsapp_media: a Drive file out over the bridge.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { partialFileContext } from "./files/sources";
 import { transfer, type TransferResult } from "./files/transfer";
@@ -65,7 +65,7 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
         DEPRECATED +
         "Same as file_transfer from gmail:<message_id>/<attachment_id> to drive:folder/<parent_id>. " +
         "Copy a Gmail attachment straight into Drive without the bytes passing through this conversation — the gateway fetches it with the mail account's credentials and uploads it with the Drive account's. Prefer this over gmail_get_attachment + drive_create_file for anything you do not need to read: it costs no context and handles files up to 25 MB rather than 1 MB. Find message_id and attachment_id with gmail_get_message. For the opposite direction — a Drive file onto an outgoing message — use gmail_attach_drive_file, or gmail_create_draft's drive_attachments.",
-      inputSchema: {
+      inputSchema: z.object({
         message_id: z.string(),
         attachment_id: z.string(),
         name: z.string().describe("File name to save as — use 'YYYY-MM-DD <description>.<ext>'"),
@@ -76,7 +76,7 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
           .describe("Attachment's mime type from gmail_get_message; defaults to the type Gmail reports"),
         gmail_account: ACCOUNT_PARAM,
         drive_account: ACCOUNT_PARAM,
-      },
+      }),
       annotations: WRITE,
     },
     async ({ message_id, attachment_id, name, parent_id, mime_type, gmail_account, drive_account }) =>
@@ -99,13 +99,13 @@ export function registerRelayTools(server: McpServer, clients: RelayClients): vo
         DEPRECATED +
         "Same as file_transfer from wa:<chat_jid>/<message_id> to drive:folder/<parent_id>. " +
         "Copy a WhatsApp attachment straight into Drive without the bytes passing through this conversation: the bridge decrypts it and streams it, and the gateway uploads it. Use whatsapp_list_messages to find the message id and chat jid.",
-      inputSchema: {
+      inputSchema: z.object({
         message_id: z.string(),
         chat_jid: z.string(),
         name: z.string().optional().describe("File name to save as; defaults to the sender's filename"),
         parent_id: z.string().optional().describe("Destination Drive folder id"),
         drive_account: ACCOUNT_PARAM,
-      },
+      }),
       annotations: WRITE,
     },
     async ({ message_id, chat_jid, name, parent_id, drive_account }) =>

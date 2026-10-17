@@ -20,8 +20,8 @@ import {
   type TokenExchangeCallbackOptions,
   type TokenExchangeCallbackResult,
 } from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { RetiredSessionObject, statelessMcpHandler } from "@toolbox/mcp-shared/src/mcphandler";
 import { z } from "zod";
 import {
   decodeAuthRequest,
@@ -69,36 +69,36 @@ const SERVER_VERSION = "0.2.0";
 
 // Refresh the upstream token once it has less than a day left. claude.ai
 // refreshes the downstream token hourly-ish, so this keeps the upstream token
-// perpetually fresh without any DO-side refresh machinery.
+// perpetually fresh without any refresh machinery of our own.
 const UPSTREAM_REFRESH_MARGIN_MS = 24 * 60 * 60 * 1000;
 
-export class FreeagentMCP extends McpAgent<Env, unknown, FreeagentProps> {
-  server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-
-  async init() {
-    registerReadTools(this.server, () => {
-      const upstream = this.props?.upstream;
-      if (!upstream) throw new UpstreamError("grant is missing upstream credentials; reconnect this connector");
-      return new FreeAgentClient(upstream.accessToken);
-    });
-    if (hasScope(this.props, WRITE_SCOPE)) {
-      // Phase 3 replaces this spike with the real write tools.
-      this.server.registerTool(
-        "ping_write",
-        {
-          description: "Connectivity spike for write scope: pretends to write.",
-          inputSchema: { message: z.string() },
-          annotations: { readOnlyHint: false },
-        },
-        async ({ message }) => ({
-          content: [{ type: "text", text: JSON.stringify({ wrote: message }) }],
-        }),
-      );
-    }
+function buildServer(_env: Env, props: FreeagentProps | undefined): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  registerReadTools(server, () => {
+    const upstream = props?.upstream;
+    if (!upstream) throw new UpstreamError("grant is missing upstream credentials; reconnect this connector");
+    return new FreeAgentClient(upstream.accessToken);
+  });
+  if (hasScope(props, WRITE_SCOPE)) {
+    // Phase 3 replaces this spike with the real write tools.
+    server.registerTool(
+      "ping_write",
+      {
+        description: "Connectivity spike for write scope: pretends to write.",
+        inputSchema: z.object({ message: z.string() }),
+        annotations: { readOnlyHint: false },
+      },
+      async ({ message }) => ({
+        content: [{ type: "text", text: JSON.stringify({ wrote: message }) }],
+      }),
+    );
   }
+  return server;
 }
 
-const mcpHandler = FreeagentMCP.serve("/mcp", { binding: "FREEAGENT_MCP" });
+const mcpHandler = statelessMcpHandler("/mcp", buildServer);
+
+export class FreeagentMCP extends RetiredSessionObject {}
 
 function htmlError(status: number, message: string): Response {
   return new Response(

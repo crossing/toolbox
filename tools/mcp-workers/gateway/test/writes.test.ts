@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { explanationPayload } from "../src/freeagent";
 import { FreeAgentApiError, staticClient } from "../src/freeagentapi";
 import { auditedServer, summarizeArgs, type GatewayToolContext } from "../src/registry";

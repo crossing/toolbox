@@ -9,7 +9,7 @@
 // linked account. If ALLOWED_COMPANY ever becomes a list, add the parameter
 // the way gmail/drive carry it.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { FREEAGENT_BASE_URL, FreeAgentApiError, isApiUrl, type FreeAgentClient } from "./freeagentapi";
 import { DESTRUCTIVE, needsConfirm, READ_ONLY, run, WRITE } from "./toolutil";
@@ -234,7 +234,7 @@ const PAGING_NOTE =
 export function registerFreeagentReadTools(server: McpServer, getClient: GetFreeagentClient): void {
   server.registerTool(
     "freeagent_bank_accounts_list",
-    { description: "List all bank accounts.", inputSchema: {}, annotations: READ_ONLY },
+    { description: "List all bank accounts.", inputSchema: z.object({}), annotations: READ_ONLY },
     async () => run(async () => (await getClient()).get("/bank_accounts")),
   );
 
@@ -244,7 +244,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
       description:
         "List bank transactions for a bank account, newest first. Useful for finding transactions that need explanations." +
         PAGING_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         bank_account: z.string().describe("Bank account API URL (from freeagent_bank_accounts_list)"),
         view: z
           .enum(["all", "unexplained", "explained", "manual", "imported", "marked_for_review"])
@@ -256,7 +256,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
         page: PAGE,
         per_page: perPage(100),
         sort: ORDER,
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ bank_account, view, from_date, to_date, updated_since, page, per_page, sort }) =>
@@ -275,7 +275,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_bank_transaction_get",
     {
       description: "Show one bank transaction with its explanations.",
-      inputSchema: { url: z.string().describe("Bank transaction API URL") },
+      inputSchema: z.object({ url: z.string().describe("Bank transaction API URL") }),
       annotations: READ_ONLY,
     },
     async ({ url }) => run(async () => (await getClient()).getUrl(url)),
@@ -285,7 +285,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_bills_list",
     {
       description: "List bills, newest first." + PAGING_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         view: z
           .enum([
             "all",
@@ -308,7 +308,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
         page: PAGE,
         per_page: perPage(25),
         sort: ORDER,
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ view, from_date, to_date, updated_since, contact, page, per_page, sort }) =>
@@ -327,7 +327,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_expenses_list",
     {
       description: "List out-of-pocket expenses, newest first." + PAGING_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         view: z.enum(["recent", "recurring"]).optional().describe("Filter (default: all expenses)"),
         from_date: fromDate,
         to_date: toDate,
@@ -335,7 +335,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
         page: PAGE,
         per_page: perPage(100),
         sort: ORDER,
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ view, from_date, to_date, updated_since, page, per_page, sort }) =>
@@ -352,7 +352,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
 
   server.registerTool(
     "freeagent_categories_list",
-    { description: "List accounting categories (nominal codes).", inputSchema: {}, annotations: READ_ONLY },
+    { description: "List accounting categories (nominal codes).", inputSchema: z.object({}), annotations: READ_ONLY },
     async () => run(async () => (await getClient()).get("/categories")),
   );
 
@@ -361,7 +361,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     {
       description:
         "List contacts (suppliers and clients), by name unless sort says otherwise. Returns one page: {contacts, page, per_page, next_page}.",
-      inputSchema: {
+      inputSchema: z.object({
         view: z
           .enum([
             "all",
@@ -383,7 +383,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
         updated_since: UPDATED_SINCE,
         page: PAGE,
         per_page: perPage(100),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ view, sort, updated_since, page, per_page }) =>
@@ -405,9 +405,9 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_balance_sheet",
     {
       description: "Show the balance sheet (assets, liabilities, owners' equity).",
-      inputSchema: {
+      inputSchema: z.object({
         as_at_date: z.string().optional().describe("Balance sheet as at this date (YYYY-MM-DD, default today)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ as_at_date }) => run(async () => (await getClient()).get("/accounting/balance_sheet", { as_at_date })),
@@ -417,14 +417,14 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_profit_and_loss",
     {
       description: "Show the profit and loss summary.",
-      inputSchema: {
+      inputSchema: z.object({
         from_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
         to_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
         accounting_period: z
           .string()
           .optional()
           .describe("Accounting year, e.g. 2025/26 (default: current period to date)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ from_date, to_date, accounting_period }) =>
@@ -437,10 +437,10 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     "freeagent_trial_balance",
     {
       description: "Show the trial balance summary (per-category totals).",
-      inputSchema: {
+      inputSchema: z.object({
         from_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
         to_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ from_date, to_date }) =>
@@ -453,7 +453,7 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
       // Not in the original read set, but expense_create needs a user API
       // URL and there is no other way to discover one.
       description: "List the company's users (their API URLs are needed for freeagent_expense_create).",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: READ_ONLY,
     },
     async () => run(async () => (await getClient()).get("/users")),
@@ -464,9 +464,9 @@ export function registerFreeagentReadTools(server: McpServer, getClient: GetFree
     {
       description:
         "Show one attachment's metadata (id, url, file_name, content_type, file_size, description). Its bytes are never returned; copy them elsewhere with file_transfer from freeagent:attachment/<id>.",
-      inputSchema: {
+      inputSchema: z.object({
         attachment_id: z.string().describe("Attachment id, or its API URL (the attachment.url on a bill, expense or explanation)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ attachment_id }) => run(async () => ({ attachment: await (await getClient()).getAttachment(attachment_id) })),
@@ -478,7 +478,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     "freeagent_bill_create",
     {
       description: "Create a bill (a supplier invoice to be paid) with a single line item.",
-      inputSchema: {
+      inputSchema: z.object({
         contact: z.string().describe("Contact API URL (from freeagent_contacts_list)"),
         reference: z.string().describe("Bill reference"),
         date: z.string().describe("Bill date (YYYY-MM-DD)"),
@@ -486,7 +486,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
         category: z.string().describe("Category API URL (from freeagent_categories_list)"),
         value: z.string().describe("Total value"),
         description: z.string().optional().describe("Line item description"),
-      },
+      }),
       annotations: WRITE,
     },
     async ({ contact, reference, date, due, category, value, description }) =>
@@ -508,7 +508,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     {
       description:
         "Explain a bank transaction. Exactly one of category (spending/income), paid_bill (a bill this payment settles), or transfer_account (the other own-account of a transfer) must be given.",
-      inputSchema: {
+      inputSchema: z.object({
         transaction: z.string().optional().describe("Bank transaction API URL (from freeagent_bank_transactions_list)"),
         bank_account: z.string().optional().describe("Bank account API URL (when creating a manual explanation)"),
         date: z.string().describe("Explanation date (YYYY-MM-DD)"),
@@ -523,7 +523,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
           .optional()
           .describe("Explicit sales tax amount when a rate does not apply cleanly"),
         ec_status: EC_STATUS,
-      },
+      }),
       annotations: WRITE,
     },
     async (args) =>
@@ -539,7 +539,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     {
       description:
         "Approve a marked-for-review explanation (one FreeAgent guessed from a bank feed), confirming its category.",
-      inputSchema: { url: z.string().describe("Explanation API URL") },
+      inputSchema: z.object({ url: z.string().describe("Explanation API URL") }),
       annotations: WRITE,
     },
     async ({ url }) =>
@@ -555,7 +555,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     {
       description:
         "Delete an explanation, returning its bank transaction to the unexplained state. Requires confirm: true.",
-      inputSchema: { url: z.string().describe("Explanation API URL"), confirm: z.boolean().optional() },
+      inputSchema: z.object({ url: z.string().describe("Explanation API URL"), confirm: z.boolean().optional() }),
       annotations: DESTRUCTIVE,
     },
     async ({ url, confirm }) => {
@@ -572,7 +572,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     {
       description:
         "Record an out-of-pocket expense (money a user paid personally on behalf of the company). Gross value must be negative for money paid out.",
-      inputSchema: {
+      inputSchema: z.object({
         user: z.string().describe("User API URL who paid (from freeagent_users_list)"),
         category: z.string().describe("Category API URL (from freeagent_categories_list)"),
         date: z.string().describe("Expense date (YYYY-MM-DD)"),
@@ -585,7 +585,7 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
           .describe("Explicit sales tax amount when a rate does not apply cleanly"),
         currency: z.string().optional().describe("Currency code when not the company's native currency, e.g. USD"),
         ec_status: EC_STATUS,
-      },
+      }),
       annotations: WRITE,
     },
     async ({ user, category, date, value, description, sales_tax_rate, manual_sales_tax_amount, currency, ec_status }) =>
@@ -611,10 +611,10 @@ export function registerFreeagentWriteTools(server: McpServer, getClient: GetFre
     {
       description:
         "Delete an attachment from its bill, expense or explanation. FreeAgent refuses this for a record in a locked accounting period. Requires confirm: true.",
-      inputSchema: {
+      inputSchema: z.object({
         attachment_id: z.string().describe("Attachment id, or its API URL"),
         confirm: z.boolean().optional(),
-      },
+      }),
       annotations: DESTRUCTIVE,
     },
     async ({ attachment_id, confirm }) => {

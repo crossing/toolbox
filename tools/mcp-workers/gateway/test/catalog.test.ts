@@ -8,7 +8,7 @@
 // gateway for the whole conversation.
 
 import { describe, expect, it } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { registerGmailReadTools, registerGmailWriteTools } from "../src/gmail";
 
 interface JsonSchema {

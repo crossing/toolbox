@@ -6,7 +6,7 @@
 // permission system in particular) can auto-allow reads while keeping
 // per-call prompts for the write tools.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { FreeAgentApiError, type FreeAgentClient } from "./api";
 import { UpstreamError } from "./upstream";
@@ -44,7 +44,7 @@ const fromDate = z.string().optional().describe("Only items dated on or after th
 export function registerReadTools(server: McpServer, getClient: GetClient): void {
   server.registerTool(
     "bank_accounts_list",
-    { description: "List all bank accounts.", inputSchema: {}, annotations: READ_ONLY },
+    { description: "List all bank accounts.", inputSchema: z.object({}), annotations: READ_ONLY },
     async () => run(() => getClient().get("/bank_accounts")),
   );
 
@@ -53,14 +53,14 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     {
       description:
         "List bank transactions for a bank account. Useful for finding transactions that need explanations.",
-      inputSchema: {
+      inputSchema: z.object({
         bank_account: z.string().describe("Bank account API URL (from bank_accounts_list)"),
         view: z
           .string()
           .optional()
           .describe("Filter: unexplained, explained, manual, imported, marked_for_review"),
         from_date: fromDate,
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ bank_account, view, from_date }) =>
@@ -78,7 +78,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "bank_transaction_get",
     {
       description: "Show one bank transaction with its explanations.",
-      inputSchema: { url: z.string().describe("Bank transaction API URL") },
+      inputSchema: z.object({ url: z.string().describe("Bank transaction API URL") }),
       annotations: READ_ONLY,
     },
     async ({ url }) => run(() => getClient().getUrl(url)),
@@ -86,7 +86,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
 
   server.registerTool(
     "bills_list",
-    { description: "List bills.", inputSchema: {}, annotations: READ_ONLY },
+    { description: "List bills.", inputSchema: z.object({}), annotations: READ_ONLY },
     async () => run(() => getClient().get("/bills")),
   );
 
@@ -94,7 +94,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "expenses_list",
     {
       description: "List out-of-pocket expenses.",
-      inputSchema: { from_date: fromDate },
+      inputSchema: z.object({ from_date: fromDate }),
       annotations: READ_ONLY,
     },
     async ({ from_date }) => run(() => getClient().get("/expenses", { from_date, per_page: "100" })),
@@ -102,7 +102,7 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
 
   server.registerTool(
     "categories_list",
-    { description: "List accounting categories (nominal codes).", inputSchema: {}, annotations: READ_ONLY },
+    { description: "List accounting categories (nominal codes).", inputSchema: z.object({}), annotations: READ_ONLY },
     async () => run(() => getClient().get("/categories")),
   );
 
@@ -110,9 +110,9 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "contacts_list",
     {
       description: "List contacts (suppliers and clients).",
-      inputSchema: {
+      inputSchema: z.object({
         view: z.string().optional().describe("Filter: all, active, clients, suppliers (default active)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ view }) => run(() => getClient().get("/contacts", { view, per_page: "100" })),
@@ -122,9 +122,9 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "balance_sheet",
     {
       description: "Show the balance sheet (assets, liabilities, owners' equity).",
-      inputSchema: {
+      inputSchema: z.object({
         as_at_date: z.string().optional().describe("Balance sheet as at this date (YYYY-MM-DD, default today)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ as_at_date }) => run(() => getClient().get("/accounting/balance_sheet", { as_at_date })),
@@ -134,14 +134,14 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "profit_and_loss",
     {
       description: "Show the profit and loss summary.",
-      inputSchema: {
+      inputSchema: z.object({
         from_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
         to_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
         accounting_period: z
           .string()
           .optional()
           .describe("Accounting year, e.g. 2025/26 (default: current period to date)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ from_date, to_date, accounting_period }) =>
@@ -152,10 +152,10 @@ export function registerReadTools(server: McpServer, getClient: GetClient): void
     "trial_balance",
     {
       description: "Show the trial balance summary (per-category totals).",
-      inputSchema: {
+      inputSchema: z.object({
         from_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
         to_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
-      },
+      }),
       annotations: READ_ONLY,
     },
     async ({ from_date, to_date }) =>

@@ -4,7 +4,7 @@
 // Ids and accounts are obviously fake.
 
 import { describe, expect, it } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { fileUrl } from "../src/files/http";
 import { signToken, verifyToken } from "../src/files/signed";
 import { registerFileReadTools, registerFileWriteTools } from "../src/files/tools";

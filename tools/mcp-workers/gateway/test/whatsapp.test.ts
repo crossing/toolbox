@@ -4,9 +4,9 @@
 // service is registered for every session once it is enabled.
 
 import { describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 import type { WhatsAppBridgeApi } from "@toolbox/mcp-shared";
 import { GoogleApiError } from "../src/googleapi";
 import { registerWhatsappReadTools, registerWhatsappWriteTools } from "../src/whatsapp";

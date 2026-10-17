@@ -4,7 +4,7 @@
 // checkbox → "write" scope → conditional tool registration; identity gate at
 // /callback compares the Google account email against ALLOWED_EMAILS.
 // Upstream scopes are minimized per grant: a read-only grant only ever asks
-// Google for the readonly scopes. Google access tokens live ~1h, so the DO
+// Google for the readonly scopes. Google access tokens live ~1h, so the worker
 // refreshes in-process from the grant's refresh token (see api.ts).
 
 import {
@@ -12,8 +12,8 @@ import {
   type AuthRequest,
   type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { RetiredSessionObject, statelessMcpHandler } from "@toolbox/mcp-shared/src/mcphandler";
 import {
   decodeAuthRequest,
   encodeAuthRequest,
@@ -60,27 +60,40 @@ interface PendingAuth {
 const SERVER_NAME = "gws";
 const SERVER_VERSION = "0.1.0";
 
-export class GwsMCP extends McpAgent<Env, unknown, GwsProps> {
-  server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  private tokenSource?: TokenSource;
+// One TokenSource per grant for the life of the isolate. Each request builds
+// a fresh server, so without this every call made after the grant's access
+// token expired (~1h) would refresh again. Keyed by the refresh token, which
+// is what a TokenSource refreshes from; a re-consent brings a new one.
+const tokenSources = new Map<string, TokenSource>();
 
-  async init() {
-    const getClient = () => {
-      const upstream = this.props?.upstream;
-      if (!upstream) throw new UpstreamError("grant is missing upstream credentials; reconnect this connector");
-      this.tokenSource ??= new TokenSource(this.env.GWS_CLIENT_ID, this.env.GWS_CLIENT_SECRET, upstream);
-      return new GoogleClient(this.tokenSource);
-    };
-    registerGmailReadTools(this.server, getClient);
-    registerDriveReadTools(this.server, getClient);
-    if (hasScope(this.props, WRITE_SCOPE)) {
-      registerGmailWriteTools(this.server, getClient);
-      registerDriveWriteTools(this.server, getClient);
-    }
+function tokenSourceFor(env: Env, upstream: UpstreamTokens): TokenSource {
+  let source = tokenSources.get(upstream.refreshToken);
+  if (!source) {
+    source = new TokenSource(env.GWS_CLIENT_ID, env.GWS_CLIENT_SECRET, upstream);
+    tokenSources.set(upstream.refreshToken, source);
   }
+  return source;
 }
 
-const mcpHandler = GwsMCP.serve("/mcp", { binding: "GWS_MCP" });
+function buildServer(env: Env, props: GwsProps | undefined): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  const getClient = () => {
+    const upstream = props?.upstream;
+    if (!upstream) throw new UpstreamError("grant is missing upstream credentials; reconnect this connector");
+    return new GoogleClient(tokenSourceFor(env, upstream));
+  };
+  registerGmailReadTools(server, getClient);
+  registerDriveReadTools(server, getClient);
+  if (hasScope(props, WRITE_SCOPE)) {
+    registerGmailWriteTools(server, getClient);
+    registerDriveWriteTools(server, getClient);
+  }
+  return server;
+}
+
+const mcpHandler = statelessMcpHandler("/mcp", buildServer);
+
+export class GwsMCP extends RetiredSessionObject {}
 
 function htmlError(status: number, message: string): Response {
   return new Response(
