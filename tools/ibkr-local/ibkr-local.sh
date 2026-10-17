@@ -51,7 +51,7 @@ Commands:
   order-cancel ORDER_ID    Cancel one order with explicit profile/account/confirmation
   config path|show         Print local/upstream config paths or local config
   gateway                  Launch IB Gateway for a local profile
-  ibc-config               Render ephemeral IBC config from safe-op secret refs
+  ibc-config               Render ephemeral IBC config from safe-op refs or owner-only files
 
 Examples:
   ibkr positions --profile main-paper --group isa
@@ -492,9 +492,25 @@ cmd_gateway() {
   IBGATEWAY_DIR="$gateway_dir" IBGATEWAY_CONFIG_DIR="$jts_dir" IBGATEWAY_LOG_DIR="$log_dir" exec ibgateway "$@"
 }
 
+# Read one IBC login credential from a decrypted secret file (e.g. sops-nix). The
+# symlink chain is followed, but the file itself must be owner-only, as for flex.tokenFile.
+read_credential_file() {
+  local label=$1 path=$2 mode value
+  [[ "$path" == /* ]] || die "$label file must be an absolute path"
+  [[ -f "$path" ]] || die "$label file is missing: $path"
+  mode=$(stat -Lc '%a' "$path" 2>/dev/null) || die "unable to inspect the $label file"
+  case "$mode" in
+    400|600) ;;
+    *) die "$label file must be owner-only (mode 0400 or 0600)" ;;
+  esac
+  value=$(<"$path")
+  [[ -n "$value" ]] || die "$label file is empty"
+  printf '%s' "$value"
+}
+
 cmd_ibc_config() {
   require_config
-  local profile="" username_ref="" password_ref="" username_item="" username_field="" username_vault="" password_item="" password_field="" password_vault="" trading_mode="" api_port="" second_factor_device="" auto_restart_time="" read_only_login=0 read_only_api=yes
+  local profile="" username_ref="" password_ref="" username_file="" password_file="" username_item="" username_field="" username_vault="" password_item="" password_field="" password_vault="" trading_mode="" api_port="" second_factor_device="" auto_restart_time="" read_only_login=0 read_only_api=yes
   while (($#)); do
     case "$1" in
       -p|--profile)
@@ -503,6 +519,10 @@ cmd_ibc_config() {
         ;;
       --username-ref)
         username_ref=$2
+        shift 2
+        ;;
+      --username-file)
+        username_file=$2
         shift 2
         ;;
       --username-item)
@@ -519,6 +539,10 @@ cmd_ibc_config() {
         ;;
       --password-ref)
         password_ref=$2
+        shift 2
+        ;;
+      --password-file)
+        password_file=$2
         shift 2
         ;;
       --password-item)
@@ -563,19 +587,27 @@ cmd_ibc_config() {
     esac
   done
   [[ -n "$profile" ]] || profile=$(default_profile)
-  if [[ -z "$username_ref" ]]; then
-    [[ -n "$username_item" ]] || die "--username-ref or --username-item is required"
+  if [[ -n "$username_file" ]]; then
+    [[ -z "$username_ref$username_item$username_field$username_vault" ]] \
+      || die "--username-file cannot be combined with a 1Password username reference"
+  elif [[ -z "$username_ref" ]]; then
+    [[ -n "$username_item" ]] || die "--username-ref, --username-file or --username-item is required"
     [[ -n "$username_field" ]] || die "--username-ref or --username-field is required"
     [[ -n "$username_vault" ]] || die "--username-ref or --username-vault is required"
     username_ref="op://$username_vault/$username_item/$username_field"
   fi
-  if [[ -z "$password_ref" ]]; then
-    [[ -n "$password_item" ]] || die "--password-ref or --password-item is required"
+  if [[ -n "$password_file" ]]; then
+    [[ -z "$password_ref$password_item$password_field$password_vault" ]] \
+      || die "--password-file cannot be combined with a 1Password password reference"
+  elif [[ -z "$password_ref" ]]; then
+    [[ -n "$password_item" ]] || die "--password-ref, --password-file or --password-item is required"
     [[ -n "$password_field" ]] || die "--password-ref or --password-field is required"
     [[ -n "$password_vault" ]] || die "--password-ref or --password-vault is required"
     password_ref="op://$password_vault/$password_item/$password_field"
   fi
-  command -v safe-op >/dev/null 2>&1 || die "safe-op is required; refusing to read secrets with raw op"
+  if [[ -n "$username_ref$password_ref" ]]; then
+    command -v safe-op >/dev/null 2>&1 || die "safe-op is required; refusing to read secrets with raw op"
+  fi
 
   local runtime_parent runtime_dir config_path username password mode
   mode=${trading_mode:-$(profile_string "$profile" "mode" "paper")}
@@ -585,8 +617,16 @@ cmd_ibc_config() {
   runtime_parent=${IBKR_IBC_RUNTIME_PARENT:-${XDG_RUNTIME_DIR:-/tmp}}
   [[ -d "$runtime_parent" ]] || die "IBC runtime parent does not exist: $runtime_parent"
 
-  username=$(safe-op read "$username_ref" --no-newline)
-  password=$(safe-op read "$password_ref" --no-newline)
+  if [[ -n "$username_file" ]]; then
+    username=$(read_credential_file username "$username_file")
+  else
+    username=$(safe-op read "$username_ref" --no-newline)
+  fi
+  if [[ -n "$password_file" ]]; then
+    password=$(read_credential_file password "$password_file")
+  else
+    password=$(safe-op read "$password_ref" --no-newline)
+  fi
   [[ "$username" != *$'\n'* && "$username" != *$'\r'* ]] || die "username contains a line break"
   [[ "$password" != *$'\n'* && "$password" != *$'\r'* ]] || die "password contains a line break"
   [[ "$second_factor_device" != *$'\n'* && "$second_factor_device" != *$'\r'* ]] \
