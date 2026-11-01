@@ -28,15 +28,35 @@ shift 2
 # Overridable so tests can fake a /proc tree.
 proc_root=${IBKR_X11_PROC_ROOT:-/proc}
 
-pid=$(ps -eo pid=,args= | awk -v name="--name ibkr-gateway-$profile" \
-  '/podman run/ && index($0, name) { print $1; exit }')
+procs=$(ps -eo pid=,ppid=,args=)
+pid=$(awk -v name="--name ibkr-gateway-$profile" \
+  '/podman run/ && index($0, name) { print $1; exit }' <<<"$procs")
 if [ -z "$pid" ]; then
   printf '{"ok":false,"error":{"code":"no_gateway_process","message":"no podman run process found for profile %s"}}\n' "$profile"
   exit 1
 fi
 
-display=$(tr '\0' '\n' <"$proc_root/$pid/environ" | sed -n 's/^DISPLAY=//p')
-xauthority=$(tr '\0' '\n' <"$proc_root/$pid/environ" | sed -n 's/^XAUTHORITY=//p')
+# The environment is exact, but an agent sandbox in a nested user namespace cannot
+# read another process's environ. Fall back to what stays visible from there: the
+# XAUTHORITY passed to podman with -e, and the Xvfb started by the xvfb-run ancestor.
+proc_env() {
+  { tr '\0' '\n' <"$proc_root/$pid/environ"; } 2>/dev/null | sed -n "s/^$1=//p" || true
+}
+display=$(proc_env DISPLAY)
+xauthority=$(proc_env XAUTHORITY)
+if [ -z "$xauthority" ]; then
+  xauthority=$({ tr '\0' '\n' <"$proc_root/$pid/cmdline"; } 2>/dev/null \
+    | sed -n 's/^XAUTHORITY=//p' | head -n 1 || true)
+fi
+if [ -z "$display" ]; then
+  display=$(awk -v pid="$pid" '
+    { parent[$1] = $2 }
+    $3 ~ /(^|\/)Xvfb$/ && $4 ~ /^:[0-9]+$/ { xvfb[$2] = $4 }
+    END {
+      for (p = parent[pid]; p != "" && p + 0 > 1; p = parent[p])
+        if (p in xvfb) { print xvfb[p]; exit }
+    }' <<<"$procs")
+fi
 if [ -z "$display" ] || [ -z "$xauthority" ]; then
   printf '{"ok":false,"error":{"code":"no_display","message":"gateway process %s has no DISPLAY or XAUTHORITY"}}\n' "$pid"
   exit 1

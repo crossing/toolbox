@@ -41,5 +41,8 @@ ibkr-x11 <profile> import -window <window-id> /tmp/w.png  # raw import passthrou
 
 - `no_gateway_process`: no `podman run --name ibkr-gateway-<profile>` process is
   running — start the gateway service first.
-- `no_display`: the process exists but has no X11 environment; the service is
-  probably not running in `xvfb` display mode.
+- `no_display`: neither the process environment nor the process tree yields a
+  display. The environment is unreadable from an agent sandbox (a nested user
+  namespace), so the tool then reads `XAUTHORITY` from the podman argv and the
+  display from the `Xvfb :N` started by the `xvfb-run` ancestor; with neither, the
+  service is probably not running in `xvfb` display mode.
