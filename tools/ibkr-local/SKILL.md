@@ -139,9 +139,11 @@ reference rate, limit and cap before asking for approval.
 
 ## Gateway not responding
 
-The Gateway needs to be running and authenticated. If a command fails to connect, use
-the `bootstrap-ibkr-gateway` skill to restart and re-authenticate rather than retrying
-in a loop — repeated failed auth attempts can lock the account.
+The Gateway needs to be running and authenticated. If a command fails to connect, start
+it once through the consumer's lifecycle command (in home-ops, `ibkr-gateway-ensure-live`
+starts each `ibkr-gateway-<profile>` service and waits for the API), then finish a stuck
+Second Factor Authentication dialog with the `ibkr-x11` skill. Never retry in a loop or
+restart while a challenge is pending — repeated failed auth attempts can lock the account.
 
 ## Handling output
 

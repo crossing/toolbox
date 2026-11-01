@@ -21,11 +21,23 @@ printf 'LANG=C\0DISPLAY=:102\0XAUTHORITY=/tmp/xauth-test\0HOME=/nonexistent\0' \
   > "$TEST_DIR/proc/4242/environ"
 
 # Mock the external commands the tool discovers processes and drives X11 with.
+# main-live has no readable environ, as seen from an agent sandbox; its display must
+# come from the podman argv and the Xvfb that its xvfb-run ancestor started.
+mkdir -p "$TEST_DIR/proc/5555" "$TEST_DIR/proc/7777"
+printf 'podman\0run\0--name\0ibkr-gateway-main-live\0-e\0DISPLAY\0-e\0XAUTHORITY=/tmp/xauth-main\0gateway-image\0' \
+  > "$TEST_DIR/proc/5555/cmdline"
+printf 'podman\0run\0--name\0ibkr-gateway-paper\0-e\0XAUTHORITY=/tmp/xauth-paper\0gateway-image\0' \
+  > "$TEST_DIR/proc/7777/cmdline"
+
 cat > "$TEST_DIR/bin/ps" <<EOF
 #!$(command -v bash)
-echo '   4242 podman run --name ibkr-gateway-pension-live --rm gateway-image'
-echo '   5555 podman run --name ibkr-gateway-main-live --rm gateway-image'
-echo '   6666 grep podman run'
+echo '    100      1 /bin/sh xvfb-run -a --server-args=-screen 0 1920x1080x24 ibgateway --x11'
+echo '    101    100 Xvfb :103 -screen 0 1920x1080x24 -nolisten tcp'
+echo '    102    100 /bin/bash ibgateway --x11 --ibc'
+echo '   4242      1 podman run --name ibkr-gateway-pension-live --rm gateway-image'
+echo '   5555    102 podman run --name ibkr-gateway-main-live --rm gateway-image'
+echo '   7777      1 podman run --name ibkr-gateway-paper --rm gateway-image'
+echo '   6666      1 grep podman run'
 EOF
 
 cat > "$TEST_DIR/bin/xdotool" <<EOF
@@ -57,6 +69,20 @@ out=$(bash "$TOOL" pension-live xdotool mousemove 505 765 click 1)
 echo "$out" | grep -q 'DISPLAY=:102' || { echo "  Failure: $out"; exit 1; }
 echo "$out" | grep -q 'XAUTHORITY=/tmp/xauth-test' || { echo "  Failure: $out"; exit 1; }
 echo "$out" | grep -q 'args=mousemove 505 765 click 1' || { echo "  Failure: $out"; exit 1; }
+echo "  Success."
+
+echo "--- unreadable environ falls back to the podman argv and the Xvfb ancestor"
+out=$(bash "$TOOL" main-live env)
+echo "$out" | grep -q '"display":":103"' || { echo "  Failure: $out"; exit 1; }
+echo "$out" | grep -q '"xauthority":"/tmp/xauth-main"' || { echo "  Failure: $out"; exit 1; }
+echo "$out" | grep -q '"pid":5555' || { echo "  Failure: $out"; exit 1; }
+echo "  Success."
+
+echo "--- no Xvfb ancestor fails with no_display"
+if bash "$TOOL" paper env > "$TEST_DIR/out" 2>&1; then
+  echo "  Failure: should have exited non-zero"; exit 1
+fi
+grep -q 'no_display' "$TEST_DIR/out" || { echo "  Failure: $(cat "$TEST_DIR/out")"; exit 1; }
 echo "  Success."
 
 echo "--- unknown profile fails with a structured error"
