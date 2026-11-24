@@ -2,6 +2,8 @@
 // around them. `UserVault` is the DO shell; everything that decides *which*
 // account a tool call resolves to lives here, where a test can reach it.
 
+import type { CallerInfo } from "./caller";
+
 /** The slice of SqlStorage this module uses; node:sqlite satisfies it in tests. */
 export interface SqlLike {
   exec(query: string, ...bindings: unknown[]): { toArray(): Record<string, unknown>[] };
@@ -27,6 +29,8 @@ export interface AuditEntry {
   tool: string;
   summary: string;
   status: string;
+  /** Who made the call (caller.ts); absent on rows written before it was recorded. */
+  caller?: CallerInfo;
 }
 
 export const VAULT_SCHEMA = `
@@ -49,7 +53,8 @@ CREATE TABLE IF NOT EXISTS audit (
   ts INTEGER NOT NULL,
   tool TEXT NOT NULL,
   summary TEXT NOT NULL,
-  status TEXT NOT NULL
+  status TEXT NOT NULL,
+  caller TEXT
 );
 -- Which linked account a *catalog service* uses, as opposed to which one its
 -- account namespace defaults to. Gmail and Drive share the "google" namespace
@@ -77,6 +82,13 @@ export class VaultStore {
     // table is dead. Dropping it is idempotent and costs one no-op statement
     // per vault start; delete this line once every vault has started once.
     this.sql.exec("DROP TABLE IF EXISTS file_url_claims");
+    // Vaults created before the audit log recorded callers lack the column;
+    // CREATE TABLE IF NOT EXISTS leaves their table as it was.
+    try {
+      this.sql.exec("ALTER TABLE audit ADD COLUMN caller TEXT");
+    } catch {
+      // already there
+    }
   }
 
   // Explicit toggles override the code-side defaults; unknown services in
@@ -267,23 +279,33 @@ export class VaultStore {
 
   appendAudit(entry: AuditEntry): void {
     this.sql.exec(
-      "INSERT INTO audit (ts, tool, summary, status) VALUES (?, ?, ?, ?)",
+      "INSERT INTO audit (ts, tool, summary, status, caller) VALUES (?, ?, ?, ?, ?)",
       entry.ts,
       entry.tool,
       entry.summary,
       entry.status,
+      entry.caller ? JSON.stringify(entry.caller) : null,
     );
   }
 
   listAudit(limit: number): AuditEntry[] {
     return this.sql
-      .exec("SELECT ts, tool, summary, status FROM audit ORDER BY id DESC LIMIT ?", limit)
+      .exec("SELECT ts, tool, summary, status, caller FROM audit ORDER BY id DESC LIMIT ?", limit)
       .toArray()
       .map((row) => ({
         ts: row.ts as number,
         tool: row.tool as string,
         summary: row.summary as string,
         status: row.status as string,
+        ...(typeof row.caller === "string" ? { caller: parseCaller(row.caller) } : {}),
       }));
+  }
+}
+
+function parseCaller(text: string): CallerInfo {
+  try {
+    return JSON.parse(text) as CallerInfo;
+  } catch {
+    return {};
   }
 }

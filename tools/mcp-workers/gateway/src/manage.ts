@@ -111,9 +111,25 @@ export async function sessionEmail(request: Request, env: Env): Promise<string |
 }
 
 
+function renderCaller(caller: AuditEntry["caller"]): string {
+  if (!caller) return `<span class="muted">—</span>`;
+  const lines: string[] = [];
+  if (caller.declared) lines.push(escapeHtml(caller.declared));
+  const observed = [
+    caller.sessionId && `session ${caller.sessionId}`,
+    caller.toolUseId && `tool_use ${caller.toolUseId}`,
+    caller.client,
+    caller.userAgent && `UA ${caller.userAgent}`,
+    caller.clientId && `client ${caller.clientId}`,
+    ...Object.entries(caller.meta ?? {}).map(([key, value]) => `${key}=${value}`),
+  ].filter((part): part is string => Boolean(part));
+  if (observed.length > 0) lines.push(`<span class="muted mono">${escapeHtml(observed.join(" · "))}</span>`);
+  return lines.length > 0 ? lines.join("<br>") : `<span class="muted">—</span>`;
+}
+
 function renderAuditRows(audit: AuditEntry[]): string {
   if (audit.length === 0) {
-    return `<tr><td colspan="4" class="muted">No write calls recorded yet.</td></tr>`;
+    return `<tr><td colspan="5" class="muted">No write calls recorded yet.</td></tr>`;
   }
   return audit
     .map(
@@ -121,6 +137,7 @@ function renderAuditRows(audit: AuditEntry[]): string {
       <td class="muted mono">${escapeHtml(new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19))}</td>
       <td class="mono">${escapeHtml(entry.tool)}</td>
       <td>${pill(entry.status, entry.status === "ok" ? "ok" : "err")}</td>
+      <td>${renderCaller(entry.caller)}</td>
       <td class="muted mono">${escapeHtml(entry.summary)}</td>
     </tr>`,
     )
@@ -266,7 +283,7 @@ function renderManagePage(
   <p class="hint">Every write-tool call, including the ones refused for want of a confirmation and
   the ones the upstream rejected.</p>
   <div class="scroll"><table>
-    <thead><tr><th>Time (UTC)</th><th>Tool</th><th>Status</th><th>Arguments</th></tr></thead>
+    <thead><tr><th>Time (UTC)</th><th>Tool</th><th>Status</th><th>Caller</th><th>Arguments</th></tr></thead>
     <tbody>${renderAuditRows(audit)}</tbody>
   </table></div>
 </section>`;

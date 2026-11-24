@@ -140,8 +140,8 @@ async function buildServer(env: Env, props: GatewayProps | undefined): Promise<M
       });
       return { url: fileUrl(env.PUBLIC_ORIGIN, token), expiresAt: grant.exp };
     },
-    audit: async (tool, summary, status) =>
-      vault.appendAudit({ ts: Date.now(), tool, summary, status }),
+    audit: async (tool, summary, status, caller) =>
+      vault.appendAudit({ ts: Date.now(), tool, summary, status, caller }),
   };
 
   registerGatewayTools(server, ctx);

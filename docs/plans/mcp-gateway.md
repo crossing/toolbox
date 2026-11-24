@@ -57,7 +57,10 @@ domain). Three cooperating parts:
 2. **User vault DO** — one Durable Object per allowlisted identity, SQLite
    holding: linked accounts (service, account label, upstream refresh token,
    granted scopes, enabled flag, per-service default), service toggles, and
-   the audit log (timestamp, tool, arg summary, upstream status). Upstream
+   the audit log (timestamp, tool, arg summary, upstream status, caller — see
+   `gateway/src/caller.ts`: the model-declared `caller` argument every write
+   tool requires, plus Claude Code's `_meta` tool_use id and the headers and
+   OAuth client the request carried). Upstream
    refresh tokens move here from grant props — this is the structural change
    that makes "enable Drive later" and "N accounts" possible without
    reconnecting the connector. Vault rows holding tokens are encrypted with
