@@ -21,6 +21,7 @@ import { registerRelayTools } from "./relay";
 import type { GoogleClient } from "./googleapi";
 import { registerSmsReadTools, registerSmsWriteTools } from "./sms";
 import type { SmsInboxApi } from "./smsstore";
+import { CALLER_ARG, CALLER_PARAM, callerFromContext, type CallerInfo } from "./caller";
 import { asResult, READ_ONLY } from "./toolutil";
 import type { AccountInfo } from "./vault";
 import { registerWhatsappReadTools, registerWhatsappWriteTools } from "./whatsapp";
@@ -57,7 +58,7 @@ export interface GatewayToolContext {
     maxBytes: number;
   }): Promise<{ url: string; expiresAt: number }>;
   // Best-effort write audit into the vault; failures never fail a tool call.
-  audit(tool: string, summary: string, status: "ok" | "error"): Promise<void>;
+  audit(tool: string, summary: string, status: "ok" | "error", caller?: CallerInfo): Promise<void>;
 }
 
 // Audit summaries keep the arg shape without dumping full content (drafts,
@@ -81,29 +82,47 @@ export function summarizeArgs(args: unknown): string {
 }
 
 type AnyToolHandler = (args: Record<string, unknown>, extra: unknown) => Promise<{ isError?: boolean }>;
-type AnyToolConfig = { annotations?: { readOnlyHint?: boolean } };
+type AnyToolConfig = {
+  annotations?: { readOnlyHint?: boolean };
+  inputSchema?: { safeExtend?(shape: Record<string, z.ZodType>): AnyToolConfig["inputSchema"] };
+};
 
 // Wraps registerTool so every non-read tool call lands in the audit log
-// (including confirm-refusals and upstream failures, as status "error").
+// (including confirm-refusals and upstream failures, as status "error"),
+// together with who made it (caller.ts). Each write tool also gains a
+// required `caller` argument: the schema is where a server can insist, so a
+// call without it fails validation and the model retries with it. The
+// argument is taken off before the tool's own handler sees its arguments.
 // Service modules occasionally register a read tool alongside their writes
 // (gmail_list_filters); the readOnlyHint annotation keeps those out.
 export function auditedServer(server: McpServer, ctx: GatewayToolContext): McpServer {
   const registerTool = (name: string, config: AnyToolConfig, handler: AnyToolHandler) => {
-    const wrapped: AnyToolHandler =
-      config.annotations?.readOnlyHint === true
-        ? handler
-        : async (args, extra) => {
-            const result = await handler(args, extra);
-            try {
-              await ctx.audit(name, summarizeArgs(args), result?.isError ? "error" : "ok");
-            } catch {
-              // audit is best-effort
-            }
-            return result;
-          };
+    const readOnly = config.annotations?.readOnlyHint === true;
+    const wrapped: AnyToolHandler = readOnly
+      ? handler
+      : async (args, extra) => {
+          const { [CALLER_ARG]: declared, ...rest } = args ?? {};
+          const result = await handler(rest, extra);
+          try {
+            await ctx.audit(
+              name,
+              summarizeArgs(rest),
+              result?.isError ? "error" : "ok",
+              callerFromContext(extra, declared),
+            );
+          } catch {
+            // audit is best-effort
+          }
+          return result;
+        };
+    const schema = config.inputSchema;
+    const withCaller =
+      readOnly || typeof schema?.safeExtend !== "function"
+        ? config
+        : { ...config, inputSchema: schema.safeExtend({ [CALLER_ARG]: CALLER_PARAM }) };
     return (server.registerTool as unknown as (n: string, c: AnyToolConfig, h: AnyToolHandler) => unknown)(
       name,
-      config,
+      withCaller,
       wrapped,
     );
   };

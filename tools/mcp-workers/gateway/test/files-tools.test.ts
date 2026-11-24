@@ -380,8 +380,10 @@ describe("files service", () => {
     // Staging a gmail:/wa: ref writes to Drive, so it must not invite auto-approval.
     expect(byName.get("file_download_url")!.annotations?.readOnlyHint).toBe(false);
     expect(byName.get("file_transfer")!.annotations?.readOnlyHint).toBe(false);
-    expect(byName.get("file_transfer")!.inputSchema.required!.sort()).toEqual(["from", "to"]);
-    expect(byName.get("file_upload_url")!.inputSchema.required!.sort()).toEqual(["mime_type", "name", "size"]);
+    // Every write tool also requires `caller`, added by auditedServer.
+    expect(byName.get("file_transfer")!.inputSchema.required!.sort()).toEqual(["caller", "from", "to"]);
+    expect(byName.get("file_upload_url")!.inputSchema.required!.sort()).toEqual(["caller", "mime_type", "name", "size"]);
+    expect(byName.get("file_stat")!.inputSchema.required ?? []).not.toContain("caller");
   });
 });
 

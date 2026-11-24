@@ -44,6 +44,11 @@ means the file lives in a different one, so retry with `?account=`.
 | `file_upload_url(name, mime_type, size)` | Signed PUT URL into `_Transit` for a sandbox. |
 | `file_download_url(ref)` | Signed GET URL for any ref, for a sandbox. |
 
+**Every gateway write tool requires `caller`**, including all of the tools above except
+`file_stat`. It goes into the audit log so a send or an upload can be traced back to the
+session that made it. In Claude Code, pass `claude-code <$CLAUDE_CODE_SESSION_ID> — <session
+title>`. In a claude.ai chat or a Cowork task, pass the surface and the conversation title.
+
 ### Routing with `file_transfer`
 
 ```
